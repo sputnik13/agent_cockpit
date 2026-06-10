@@ -6,12 +6,13 @@
 
 Provide a lightweight Electron desktop **agent cockpit** for driving a CLI
 coding agent against a single active repository — local or remote over SSH —
-while watching the work through first-class, read-only review surfaces. A
+while watching the work through first-class review surfaces. A
 terminal running the agent is a first-class center surface, peer to the content
 viewer, with the beads workgraph, change list, diff/preview content viewer, and
 notes as read-only observers. The agent in the terminal performs every
-repository write; every other surface is a read-only projection sourced through
-a transport-agnostic provider seam.
+repository write, and the surfaces are read-only projections sourced through a
+transport-agnostic provider seam — with one exception: the beads **task detail**
+surface mutates issue state through the `br` CLI (see NFR-2).
 
 ## Scope
 
@@ -44,10 +45,11 @@ In scope:
   updating so a return is instant, with no warm/hot distinction.
 - A Dockview workspace, themed to the shell, with two curated presets (**Edit**
   and **Review**) and a flip action; per-project layout persistence.
-- Read-only review surfaces carried forward from v1 and re-homed on the
+- Review surfaces carried forward from v1 and re-homed on the
   provider seam: beads workgraph, changes list, content viewer (unified diff,
   rendered Markdown with changed-block callouts, Mermaid, raw, image-compare),
-  task detail, notes, since-seen.
+  task detail, notes, since-seen. All are read-only except **task detail**, which
+  mutates beads issue state via the `br` CLI (close/reopen/comment/create — NFR-2).
 - A renderer visual system: Tailwind v4 token layer, app-owned primitives, and
   Radix controls.
 
@@ -56,7 +58,9 @@ Out of scope:
 - Multiple simultaneous diff/preview pairs beyond the single active content
   viewer.
 - Editing files in-app (the agent edits; the app observes).
-- Mutating beads state from the app (the workgraph is read-only).
+- Direct writes to the working tree or the beads SQLite DB (the app's only
+  repository mutation is beads issue state through the `br` CLI, from task detail;
+  the workgraph navigation views stay read-only — see NFR-2).
 - Remote helper auto-update / version negotiation beyond one pinned protocol
   version with a hard-fail mismatch (which triggers a single re-provision).
 - Windows remote-host support (the client may run on macOS/Linux; remote hosts

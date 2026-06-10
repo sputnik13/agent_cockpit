@@ -7,7 +7,8 @@
 The Agent Cockpit is an Electron application: a sandboxed React renderer, a
 narrow preload bridge, and a capability-bearing main process. It drives a CLI
 coding agent against one active repository — local or remote over SSH — and
-presents read-only review surfaces around it. The organizing principle is the
+presents review surfaces around it — read-only except beads edits via task
+detail. The organizing principle is the
 **`WorkspaceProvider` seam**: the renderer addresses the *active provider*
 through typed IPC and never knows whether the project is local or remote.
 
@@ -17,11 +18,13 @@ The durable architectural boundaries are:
   `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`. It has no
   Node or filesystem access; it sees only typed payloads via `window.api`. The
   preload forwards typed IPC and carries no business logic.
-- **App-local-only writes.** The app writes only its SQLite store under
-  `userData/`. It never mutates any repository, git state, or beads database.
-- **Agent-terminal as the sole write path.** All repository mutation happens
-  through the CLI agent the user runs in the embedded terminal (or the Run
-  panel). Both are backed by `tmux` on a dedicated `agent-cockpit` socket so
+- **App writes are narrow.** The app writes its app-local SQLite store under
+  `userData/`, and — as the single exception — beads issue state through the `br`
+  CLI (never the beads SQLite DB or working tree directly; see NFR-2). It does not
+  otherwise mutate the repository or git state.
+- **Agent-terminal as the primary write path.** All working-tree and git
+  mutation happens through the CLI agent the user runs in the embedded terminal
+  (or the Run panel); the lone app-side exception is beads issue state via `br`. Both are backed by `tmux` on a dedicated `agent-cockpit` socket so
   sessions persist across restarts and stay isolated from the user's own tmux.
   Two backends coexist behind the `WorkspaceProvider` seam and are selected by
   the `terminalBackend` setting in [src/shared/settings.ts](../src/shared/settings.ts):
@@ -31,8 +34,9 @@ The durable architectural boundaries are:
   model drives one per-project session (`agent-cockpit-<projectId>`) where
   tmux is the authority for windows and panes. Switching backends is a
   clean-slate operation that kills every cockpit-socket tmux session. Every
-  other surface (beads, changes, content viewer, notes, sessions) is a
-  read-only projection.
+  other surface (changes, content viewer, notes, sessions) is a read-only
+  projection; beads navigation is read-only too, but **task detail** writes
+  issue state via the `br` CLI (see NFR-2).
 - **Untrusted repository content.** Repository Markdown/Mermaid and file bytes
   are untrusted: Markdown runs through one whole-document `unified`
   (`remark-parse` → `remark-gfm` → `remark-rehype` → `rehype-highlight` →

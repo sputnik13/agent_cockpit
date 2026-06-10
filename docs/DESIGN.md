@@ -437,7 +437,8 @@ The provider seam realizes the primary flows as follows:
   each row reusing the flat row's status color + priority + open-blocker badge and
   the FR3 sibling ordering. All three share `selectedId`/`select()` with
   `TaskDetail` (clicking a node/row selects it). The view flag persists per
-  project in `localStorage`. Read-only — no beads mutation.
+  project in `localStorage`. The three views are read-only navigation; beads
+  mutation lives only in `TaskDetail` (comments / add-child / lifecycle).
 - **Sessions.** `SessionsDialog` is a management modal (opened from a Sessions
   button in the Terminal panel header, mirroring Manage Projects — not a dock
   panel) that lists `tmux` sessions on the cockpit socket via `sessions:list` and

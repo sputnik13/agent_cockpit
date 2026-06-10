@@ -1,13 +1,19 @@
 # Agent Cockpit
 
+> **Heads-up:** This is a highly opinionated, personal tool — built specifically
+> around the way I work, not as a general-purpose product. Its defaults, scope, and
+> workflow assumptions reflect my own setup; it may not fit yours, and that's by
+> design.
+
 A lightweight Electron desktop **cockpit for driving a CLI coding agent** against
 a single active repository — local or remote over SSH — while you watch the work
-through first-class, read-only review surfaces.
+through first-class review surfaces.
 
-The agent runs in an embedded terminal and performs every repository write. Every
-other surface — the workgraph, change list, diff/preview content viewer, and
-notes — is a read-only projection sourced through a transport-agnostic provider
-seam.
+The agent runs in an embedded terminal and performs every repository write. The
+surrounding review surfaces — workgraph, change list, diff/preview content viewer,
+and notes — are read-only projections sourced through a transport-agnostic provider
+seam. The exception is **task detail**, which can also act on the beads issue graph
+(close/reopen a task, add comments, create child tasks).
 
 ## Overview
 
@@ -20,14 +26,34 @@ seam.
   inside `tmux` on a dedicated `agent-cockpit` socket, so sessions persist across
   restarts. Two selectable backends: session-per-tab and tmux control mode
   (`-CC`).
-- **Read-only review surfaces:** workgraph, changes list, a content viewer
-  (unified diff, rendered Markdown with changed-block callouts, Mermaid, image
-  compare), task detail, and notes.
+- **Review surfaces:** workgraph, changes list, a content viewer (unified diff,
+  rendered Markdown with changed-block callouts, Mermaid, image compare), and
+  notes are read-only; **task detail** can also act on the beads graph
+  (close/reopen, comment, create child tasks).
 - **Dockview workspace** with curated Edit and Review layout presets and
   per-project layout persistence.
 
 See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture.
+
+## Screenshots
+
+The workspace — agent terminal in the center, the beads workgraph on the left,
+and the changes list + content viewer on the right:
+
+![Agent Cockpit workspace](docs/images/workspace.png)
+
+The content viewer rendering a unified diff of a changed file:
+
+![Content viewer diff](docs/images/content-diff.png)
+
+Task detail — beads issue state with inline lifecycle actions (the one app-side
+write surface; everything else is read-only):
+
+![Task detail](docs/images/workgraph-task-detail.png)
+
+> Screenshots use a throwaway demo project and are regenerated with
+> `npm run screenshots` (see [scripts/screenshots/](scripts/screenshots/)).
 
 ## Installation
 

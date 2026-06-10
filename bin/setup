@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install project dependencies via npm (idempotent).
+# Does not install the project command into PATH; see bin/install for that.
+
+cd "$(dirname "$0")/.."
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is required but not on PATH" >&2
+  exit 1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "npm is required but not on PATH" >&2
+  exit 1
+fi
+
+exec npm install

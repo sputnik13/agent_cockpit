@@ -1,0 +1,81 @@
+/*
+ * Agent Cockpit Dockview theme.
+ *
+ * Approach: a custom theme class (`dockview-theme-agent-cockpit`) that sets
+ * dockview-core's `--dv-*` custom properties to the cockpit design tokens
+ * defined in `src/renderer/styles.css`. This class is referenced by the
+ * `agentCockpitDockviewTheme` object in `Workspace.tsx` and passed to
+ * `<DockviewReact theme={...} />`.
+ *
+ * It mirrors the variable surface of the built-in `dockview-theme-dark`
+ * theme so every dockview chrome surface is covered, but recolors the
+ * chrome (tabs, group/panel content, borders, sashes) with cockpit tokens.
+ *
+ * Token vars consumed (from the Tailwind `@theme` block):
+ *   --color-bg     #002b36  app background (Solarized base03)
+ *   --color-panel  #073642  panel/tab strip surface (base02)
+ *   --color-panel-2 #0a3a47 raised surface (active tab)
+ *   --color-fg     #93a1a1  primary text (base1)
+ *   --color-dim    #586e75  secondary/inactive text (base01)
+ *   --color-accent #268bd2  accent (active sash, drag-over) (blue)
+ *   --color-edge   #0f3e4b  borders/dividers
+ */
+
+.dockview-theme-agent-cockpit {
+  /* Panel content + group surface */
+  --dv-group-view-background-color: var(--color-bg);
+
+  /* Tab strip (tabs-and-actions container) */
+  --dv-tabs-and-actions-container-background-color: var(--color-panel);
+  --dv-tabs-and-actions-container-height: 32px;
+  --dv-tabs-and-actions-container-font-size: 13px;
+  --dv-tab-font-size: 13px;
+  --dv-tab-margin: 0px;
+
+  /* Active group tab backgrounds */
+  --dv-activegroup-visiblepanel-tab-background-color: var(--color-panel-2);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--color-panel);
+  /* Inactive group tab backgrounds */
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--color-panel);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--color-bg);
+
+  /* Tab text colors */
+  --dv-activegroup-visiblepanel-tab-color: var(--color-fg);
+  --dv-activegroup-hiddenpanel-tab-color: var(--color-dim);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--color-dim);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--color-dim);
+
+  /* Borders and dividers */
+  --dv-tab-divider-color: var(--color-edge);
+  --dv-separator-border: var(--color-edge);
+  --dv-paneview-header-border-color: var(--color-edge);
+  --dv-paneview-active-outline-color: var(--color-accent);
+
+  /* Sash / resize handles */
+  --dv-sash-color: var(--color-edge);
+  --dv-active-sash-color: var(--color-accent);
+  --dv-active-sash-transition-duration: 0.1s;
+  --dv-active-sash-transition-delay: 0s;
+
+  /* Drag-and-drop overlay */
+  --dv-drag-over-background-color: rgba(91, 141, 239, 0.18);
+  --dv-drag-over-border-color: var(--color-accent);
+
+  /* Icons / scrollbars / misc chrome */
+  --dv-icon-hover-background-color: var(--color-panel-2);
+  --dv-tabs-container-scrollbar-color: var(--color-edge);
+  --dv-floating-box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --dv-overlay-z-index: 999;
+  --dv-border-radius: 0px;
+}
+
+/*
+ * The active visible tab in the active group gets a subtle accent underline so
+ * the focused panel reads clearly against the compact dark chrome. `--dv-*`
+ * variables do not cover an active-tab accent rule, so it is set directly.
+ */
+.dockview-theme-agent-cockpit
+  .dv-active-group
+  .dv-tab.dv-active-tab {
+  box-shadow: inset 0 -2px 0 0 var(--color-accent);
+}

@@ -1,0 +1,26 @@
+# bv (beads viewer) local config and caches
+.bv/
+
+# Node / build outputs
+node_modules/
+out/
+dist/
+release/
+*.app/
+.vite/
+coverage/
+
+# Logs and editor noise
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# remote-helper local `go build` output (real artifacts live in remote-helper/dist/)
+/remote-helper/remote-helper
+

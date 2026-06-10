@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Launch the app in development mode without installing.
+
+cd "$(dirname "$0")/.."
+
+if [ ! -d node_modules ]; then
+  bin/setup
+fi
+
+exec npm run dev

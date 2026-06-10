@@ -1,0 +1,359 @@
+@import 'tailwindcss';
+
+/* Design tokens (CSS-first Tailwind theme) — Solarized Dark.
+   Generates utilities such as bg-bg, bg-panel, bg-elev, text-fg, text-dim,
+   border-edge, text-accent, plus status colors. */
+@theme {
+  /* Solarized Dark base tones */
+  --color-bg: #002b36; /* base03 — window background */
+  --color-panel: #073642; /* base02 — panels, tab strips */
+  --color-panel-2: #0a3a47; /* slightly elevated surface */
+  --color-elev: #0d4150; /* hover / active surface */
+  --color-fg: #93a1a1; /* base1 — primary text */
+  --color-dim: #586e75; /* base01 — secondary text */
+  --color-muted: #43585f; /* fainter than dim, for hints */
+  --color-accent: #268bd2; /* blue — selection / focus */
+  --color-edge: #0f3e4b; /* subtle divider/border */
+  --color-edge-strong: #164b5a; /* stronger border (focus rings, active) */
+
+  /* Status / diff (Solarized accents) */
+  --color-added: #859900; /* green */
+  --color-removed: #dc322f; /* red */
+  --color-warn: #b58900; /* yellow */
+  --color-info: #268bd2; /* blue */
+
+  --radius: 5px;
+  --font-mono: 'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root {
+  color-scheme: dark;
+  /* Runtime-overridable monospace font (set by settings). */
+  --font-mono: 'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --mono-size: 13px;
+  /* Legacy aliases consumed by retained review components. */
+  --bg: var(--color-bg);
+  --bg-panel: var(--color-panel);
+  --fg: var(--color-fg);
+  --fg-dim: var(--color-dim);
+  --accent: var(--color-accent);
+  --border: var(--color-edge);
+}
+
+/* Solarized Light — overrides the @theme (dark) token values at runtime when the
+   settings store sets data-theme. Utilities read var(--color-*), so this swaps
+   the whole palette live. */
+:root[data-theme='solarized-light'] {
+  color-scheme: light;
+  --color-bg: #fdf6e3; /* base3 */
+  --color-panel: #eee8d5; /* base2 */
+  --color-panel-2: #e7e0cd;
+  --color-elev: #ddd6c1;
+  --color-fg: #586e75; /* base01 — primary text */
+  --color-dim: #93a1a1; /* base1 */
+  --color-muted: #b8b59f;
+  --color-accent: #268bd2;
+  --color-edge: #ddd6c1;
+  --color-edge-strong: #cabf9f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* The desktop shell never scrolls — Dockview panels manage their own scroll.
+     Clipping here is defense-in-depth so any stray DOM (e.g. a third-party lib
+     appending a measuring node to body) can never make the whole frame scroll. */
+  overflow: hidden;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Anti-alias all text (crisper rendering, especially on the dark theme). */
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Rendered-Markdown code: fenced blocks must preserve whitespace (ASCII trees,
+   tables); inline code uses the mono font. `.agent-cockpit-pre` is retained
+   for any callers that build <pre> outside the unified pipeline; the prose
+   pipeline emits plain <pre><code class="hljs language-x"> elements that the
+   `.agent-cockpit-markdown pre` rules below cover. */
+.agent-cockpit-pre,
+.agent-cockpit-markdown pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-edge);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 4;
+  font-family: var(--font-mono);
+  font-size: var(--mono-size);
+  line-height: 1.45;
+}
+.agent-cockpit-pre code,
+.agent-cockpit-markdown pre code {
+  font: inherit;
+  background: none;
+  padding: 0;
+  white-space: pre;
+}
+.agent-cockpit-markdown :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--color-panel);
+  border: 1px solid var(--color-edge);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+/* hljs base color/background — the imported solarized-dark theme hard-codes
+   bg=#002b36 / fg=#93a1a1; replace with our panel/fg tokens so light theme
+   doesn't get a dark stripe. Token-class colors (keywords, strings, etc.)
+   are Solarized accents and work in both themes unchanged. */
+.agent-cockpit-markdown pre code.hljs,
+.agent-cockpit-markdown code.hljs {
+  background: transparent;
+  color: var(--color-fg);
+  padding: 0;
+}
+
+/* Rendered-Markdown prose typography. Scoped under `.agent-cockpit-markdown`
+   to counteract Tailwind Preflight, which resets headings to inherit and
+   strips list markers/indentation/table borders. All values use theme tokens
+   so light and dark variants flip together with `:root[data-theme]`. */
+.agent-cockpit-markdown {
+  color: var(--color-fg);
+}
+.agent-cockpit-markdown h1,
+.agent-cockpit-markdown h2,
+.agent-cockpit-markdown h3,
+.agent-cockpit-markdown h4,
+.agent-cockpit-markdown h5,
+.agent-cockpit-markdown h6 {
+  color: var(--color-fg);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+}
+.agent-cockpit-markdown h1:first-child,
+.agent-cockpit-markdown h2:first-child,
+.agent-cockpit-markdown h3:first-child {
+  margin-top: 0.2em;
+}
+.agent-cockpit-markdown h1 {
+  font-size: 1.9em;
+  border-bottom: 1px solid var(--color-edge);
+  padding-bottom: 0.3em;
+}
+.agent-cockpit-markdown h2 {
+  font-size: 1.55em;
+  border-bottom: 1px solid var(--color-edge);
+  padding-bottom: 0.25em;
+}
+.agent-cockpit-markdown h3 {
+  font-size: 1.3em;
+}
+.agent-cockpit-markdown h4 {
+  font-size: 1.12em;
+}
+.agent-cockpit-markdown h5 {
+  font-size: 1em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-dim);
+}
+.agent-cockpit-markdown h6 {
+  font-size: 0.9em;
+  color: var(--color-dim);
+}
+
+.agent-cockpit-markdown p {
+  margin: 0.6em 0;
+}
+.agent-cockpit-markdown strong {
+  font-weight: 600;
+  color: var(--color-fg);
+}
+.agent-cockpit-markdown em {
+  font-style: italic;
+}
+.agent-cockpit-markdown del {
+  color: var(--color-dim);
+  text-decoration: line-through;
+}
+
+.agent-cockpit-markdown a {
+  color: var(--color-accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+.agent-cockpit-markdown a:hover,
+.agent-cockpit-markdown a:focus-visible {
+  border-bottom-color: var(--color-accent);
+  outline: none;
+}
+
+.agent-cockpit-markdown ul,
+.agent-cockpit-markdown ol {
+  margin: 0.6em 0;
+  padding-left: 1.6em;
+}
+.agent-cockpit-markdown ul {
+  list-style: disc;
+}
+.agent-cockpit-markdown ol {
+  list-style: decimal;
+}
+.agent-cockpit-markdown ul ul {
+  list-style: circle;
+}
+.agent-cockpit-markdown ul ul ul {
+  list-style: square;
+}
+.agent-cockpit-markdown li {
+  margin: 0.2em 0;
+}
+.agent-cockpit-markdown li > ul,
+.agent-cockpit-markdown li > ol {
+  margin: 0.2em 0;
+}
+/* GFM task list: remark-gfm emits <li class="task-list-item"> with a leading
+   <input type="checkbox" disabled>. Strip the bullet and align the checkbox. */
+.agent-cockpit-markdown li.task-list-item {
+  list-style: none;
+  margin-left: -1.4em;
+  padding-left: 1.4em;
+  position: relative;
+}
+.agent-cockpit-markdown li.task-list-item > input[type='checkbox'] {
+  position: absolute;
+  left: 0;
+  top: 0.35em;
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.agent-cockpit-markdown blockquote {
+  margin: 0.8em 0;
+  padding: 0.1em 0.9em;
+  border-left: 3px solid var(--color-edge-strong);
+  color: var(--color-dim);
+  background: var(--color-panel);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.agent-cockpit-markdown blockquote > :first-child {
+  margin-top: 0;
+}
+.agent-cockpit-markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-cockpit-markdown hr {
+  border: 0;
+  border-top: 1px solid var(--color-edge);
+  margin: 1.5em 0;
+}
+
+.agent-cockpit-markdown table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  width: max-content;
+  max-width: 100%;
+}
+.agent-cockpit-markdown th,
+.agent-cockpit-markdown td {
+  border: 1px solid var(--color-edge);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.agent-cockpit-markdown thead th {
+  background: var(--color-panel);
+  font-weight: 600;
+}
+.agent-cockpit-markdown tbody tr:nth-child(even) td {
+  background: var(--color-panel);
+}
+
+.agent-cockpit-markdown img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+
+/* Footnote section emitted by remark-gfm at end of doc. */
+.agent-cockpit-markdown .footnotes {
+  margin-top: 2em;
+  padding-top: 0.8em;
+  border-top: 1px solid var(--color-edge);
+  color: var(--color-dim);
+  font-size: 0.92em;
+}
+.agent-cockpit-markdown .footnotes ol {
+  padding-left: 1.4em;
+}
+
+/* xterm host overrides. Scoped under `.ac-term` so they beat the runtime-injected
+   xterm.css defaults regardless of stylesheet order.
+   - padding offsets the grid from the panel edges (default `.xterm` padding is 0,
+     which jams the first column against the left border); the FitAddon reads this
+     padding when proposing columns, so the grid still fits without clipping.
+   - overflow-y: auto drops the always-reserved scrollbar gutter (default is
+     `scroll`), reclaiming the empty strip on the right when there is no scrollback. */
+.ac-term .xterm {
+  padding: 0 6px;
+  background: var(--color-bg);
+}
+.ac-term .xterm .xterm-viewport {
+  /* xterm.css hardcodes #000 here, which shows through the padding offset as a
+     black border. Match the terminal/panel background (the xterm theme bg uses
+     the same token value) so the offset strip blends in. */
+  background-color: var(--color-bg);
+  overflow-y: auto;
+}
+
+/* Modern, unobtrusive scrollbars that fit the dark surfaces. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-edge-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-edge-strong);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-dim);
+  background-clip: content-box;
+}
+
+/* Find-in-file highlights (CSS Custom Highlight API; painted without DOM
+   mutation by src/renderer/content/findInContent.ts). `find-match` tints every
+   match; `find-active` marks the current one. */
+::highlight(find-match) {
+  background-color: color-mix(in srgb, var(--color-warn) 45%, transparent);
+  color: var(--color-bg);
+}
+::highlight(find-active) {
+  background-color: var(--color-accent);
+  color: var(--color-bg);
+}

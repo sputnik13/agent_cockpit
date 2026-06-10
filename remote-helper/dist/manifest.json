@@ -1,0 +1,6 @@
+{
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "sourceHash": "5cde0622e06203a89fa1881c308a93939be89b9e2cf6f529f37b04724546952a",
+  "binaries": [{"os":"linux","arch":"amd64","filename":"helper-0.1.0-linux-amd64","sha256":"f1bc1f5024f76fbf57aae6775d1b58b5191d4fa0bc1562e69ecc3627b006fd9c"},{"os":"linux","arch":"arm64","filename":"helper-0.1.0-linux-arm64","sha256":"22b6fae57811fb3eed06ddd172a4713935d58ee84164c174898db2d3ff6ed6cd"},{"os":"darwin","arch":"arm64","filename":"helper-0.1.0-darwin-arm64","sha256":"33bb4847d64827d571d0ddd365e35fa29b0a99ba7cebd1b08dfd16b17d797415"}]
+}

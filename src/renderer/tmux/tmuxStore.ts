@@ -1,0 +1,382 @@
+/**
+ * Renderer state model for the tmux control-mode (`-CC`) subsystem.
+ *
+ * The store is a pure reducer over the typed control notifications, namespaced
+ * **per project**: `byProject[projectId]` is that project's windows/panes/layout
+ * view, and `activeProjectId` selects the one the UI renders. Switching projects
+ * only moves `activeProjectId` — it never resets state — so a previously visited
+ * project's windows (and the live xterms bound to them) are preserved and shown
+ * instantly on return (see the lifecycle-decoupling invariant in
+ * docs/ARCHITECTURE.md). IPC lives behind the action methods, so the pure
+ * reducer is trivially unit-testable under jsdom with a faked `window.api`.
+ *
+ * Authoritative state is tmux; this store is a derived live view that the
+ * reducer keeps idempotent so duplicate notifications (e.g. on reconnect resync)
+ * do not corrupt it.
+ */
+import { create } from 'zustand';
+import { fromWireNotification, toHex } from '@shared/tmux';
+import type { LayoutNode, TmuxNotification, TmuxWireNotification } from '@shared/tmux';
+import { agentCockpit } from '../providerClient';
+
+/** A pane in the live view, with its decoded output buffered for an xterm. */
+export interface PaneState {
+  paneId: string;
+  windowId: string | null;
+}
+
+/** A window (UI tab) and its current pane-layout tree. `name` is the
+ *  tmux-owned window name (set via new-window -n / rename-window — this is
+ *  what reserved-window matching keys off). `displayName` is the latest
+ *  SCREEN-style title from the active pane (`\ek <title> \e\`), which
+ *  zsh/p10k usually sets to the running command or working directory; the
+ *  tab strip prefers it when present so the tab labels track the active
+ *  command without losing the underlying window name. */
+export interface WindowState {
+  windowId: string;
+  name: string;
+  displayName?: string;
+  layout: LayoutNode | null;
+  /** True when the window has a zoomed pane (tmux window flag `Z`). Derived
+   *  from the `%layout-change` flags field, so a zoom toggled outside the app
+   *  (a tmux keybinding or another client) is reflected. */
+  isZoomed: boolean;
+  /** The zoomed-aware visible layout tmux reports alongside the full layout:
+   *  when a pane is zoomed this is the single visible pane, else it mirrors
+   *  `layout`. The renderer draws `visibleLayout ?? layout`. */
+  visibleLayout: LayoutNode | null;
+}
+
+/**
+ * @deprecated ControlSessionStatus is removed in favor of deriving terminal
+ * readiness from the canonical ConnectionStatus (NFR4). Use `isOpen` and
+ * `openError` on TmuxViewState instead. This type alias is kept temporarily
+ * for test compatibility and will be removed after tests are updated.
+ * @internal
+ */
+export type ControlSessionStatus = 'connecting' | 'open' | 'failed';
+
+export interface TmuxViewState {
+  /** Whether the control session is open. */
+  isOpen: boolean;
+  /**
+   * Terminal-local "panes initialized" error: set when tmuxControl.open() IPC
+   * call rejects; cleared on the next open() attempt. The "connecting" phase is
+   * derived from `!isOpen && openError === null`. This replaces the prior
+   * `connectStatus` three-value enum (NFR4: remove the parallel connection
+   * truth; only terminal-local state lives here).
+   */
+  openError: string | null;
+  sessionName: string | null;
+  /** Ordered window ids (tab order = arrival order). */
+  windowOrder: string[];
+  windows: Record<string, WindowState>;
+  panes: Record<string, PaneState>;
+  /** Active window/pane as last reported by tmux (%window-pane-changed). */
+  activeWindowId: string | null;
+  activePaneId: string | null;
+}
+
+/** Initial empty view. */
+export function emptyView(): TmuxViewState {
+  return {
+    isOpen: false,
+    openError: null,
+    sessionName: null,
+    windowOrder: [],
+    windows: {},
+    panes: {},
+    activeWindowId: null,
+    activePaneId: null,
+  };
+}
+
+/** Collect every leaf pane id in a layout tree (depth-first, left to right). */
+export function collectPaneIds(node: LayoutNode | null): string[] {
+  if (!node) return [];
+  if (node.type === 'leaf') return [node.paneId];
+  return node.children.flatMap(collectPaneIds);
+}
+
+/**
+ * Pure reducer: fold one parsed notification into the view. Returns a new state
+ * object (never mutates the input). Idempotent for repeated structural
+ * notifications so reconnect resync is safe.
+ */
+export function reduce(state: TmuxViewState, n: TmuxNotification): TmuxViewState {
+  switch (n.type) {
+    case 'window-add':
+    case 'unlinked-window-add': {
+      if (state.windows[n.windowId]) return state; // idempotent
+      return {
+        ...state,
+        windowOrder: [...state.windowOrder, n.windowId],
+        windows: {
+          ...state.windows,
+          [n.windowId]: {
+            windowId: n.windowId,
+            name: n.windowId,
+            layout: null,
+            isZoomed: false,
+            visibleLayout: null,
+          },
+        },
+      };
+    }
+    case 'window-close': {
+      if (!state.windows[n.windowId]) return state;
+      const windows = { ...state.windows };
+      const closed = windows[n.windowId];
+      delete windows[n.windowId];
+      // Drop panes that belonged to the closed window.
+      const panes = { ...state.panes };
+      for (const pid of collectPaneIds(closed?.layout ?? null)) delete panes[pid];
+      const windowOrder = state.windowOrder.filter((w) => w !== n.windowId);
+      const activeWindowId =
+        state.activeWindowId === n.windowId ? (windowOrder[windowOrder.length - 1] ?? null) : state.activeWindowId;
+      return { ...state, windows, panes, windowOrder, activeWindowId };
+    }
+    case 'window-renamed': {
+      const w = state.windows[n.windowId];
+      if (!w) return state;
+      return { ...state, windows: { ...state.windows, [n.windowId]: { ...w, name: n.name } } };
+    }
+    case 'layout-change': {
+      // Ensure the window exists (layout can arrive for a window we have not
+      // seen an explicit add for yet), then attach the parsed tree and index
+      // its panes.
+      const existing = state.windows[n.windowId];
+      const name = existing?.name ?? n.windowId;
+      const windowOrder = existing ? state.windowOrder : [...state.windowOrder, n.windowId];
+      const root = n.layout.root;
+      // tmux reports the zoom state in the window-flags field (`Z`) and the
+      // visible (zoomed) layout as a separate string. Mirror both so the view
+      // follows zoom even when it was toggled outside the app (FR1.2). Index
+      // panes from the FULL layout so every pane stays tracked while zoomed.
+      const isZoomed = n.flags?.includes('Z') ?? false;
+      const visibleLayout = n.visibleLayout?.root ?? null;
+      const panes = { ...state.panes };
+      for (const pid of collectPaneIds(root)) {
+        panes[pid] = { paneId: pid, windowId: n.windowId };
+      }
+      return {
+        ...state,
+        windowOrder,
+        windows: {
+          ...state.windows,
+          [n.windowId]: { windowId: n.windowId, name, layout: root, isZoomed, visibleLayout },
+        },
+        panes,
+      };
+    }
+    case 'window-pane-changed': {
+      // tmux emits this when the ACTIVE PANE OF A WINDOW changes
+      // (split-window, select-pane, mouse click into pane). For pure
+      // window switches (new-window, select-window) tmux emits
+      // %session-window-changed instead — see that case below.
+      return { ...state, activeWindowId: n.windowId, activePaneId: n.paneId };
+    }
+    case 'session-window-changed': {
+      // tmux 3.5+ control-mode notification when a session's active window
+      // changes. new-window fires this (followed by window-add + layout-
+      // change for the new window), NOT %window-pane-changed. Mirror the
+      // new active window into state; activePaneId is intentionally
+      // cleared so the renderer's layout effect picks the first pane of
+      // the new window (which may not have its layout yet at this
+      // moment — that's why we don't try to derive the pane here).
+      return { ...state, activeWindowId: n.windowId, activePaneId: null };
+    }
+    case 'session-changed': {
+      return { ...state, sessionName: n.name };
+    }
+    case 'exit': {
+      return { ...emptyView() };
+    }
+    default:
+      return state;
+  }
+}
+
+/** Stable empty view for selectors so an absent project never churns renders. */
+const EMPTY_VIEW: TmuxViewState = emptyView();
+
+/** Output sinks are keyed by (projectId, paneId): the tmux pane id (`%0`) repeats
+ *  across projects' sessions, so the project must be part of the key or one
+ *  project's output would bleed into another's xterm. */
+const SEP = '\x1f'; // unit separator: never appears in project or pane ids, and is not NUL (NUL breaks git diffs)
+const sinkKey = (projectId: string, paneId: string): string => `${projectId}${SEP}${paneId}`;
+
+export interface TmuxStore {
+  /** Per-project derived views. The active project's view drives the UI. */
+  byProject: Record<string, TmuxViewState>;
+  /** Project whose view the UI currently renders. */
+  activeProjectId: string | null;
+
+  /** Select which project's view is active (no reset of any slice). */
+  setActiveProject: (projectId: string) => void;
+  /** Apply a wire notification for a project: route %output to its pane sink,
+   *  else reduce into that project's slice. */
+  applyNotification: (projectId: string, wire: TmuxWireNotification) => void;
+  bindPaneSink: (projectId: string, paneId: string, sink: (bytes: Uint8Array) => void) => () => void;
+  /** Set the display name of a window (the SCREEN-style title captured
+   *  from `\ek...\e\` in the pane's byte stream). Independent of the
+   *  tmux-owned `name` field — both coexist. No-op when the window or
+   *  project slice doesn't exist. */
+  setWindowDisplayName: (projectId: string, windowId: string, displayName: string) => void;
+
+  /**
+   * Set the terminal-local open error for a project's slice.
+   * Pass null to clear (reset to "connecting" phase).
+   */
+  setOpenError: (projectId: string, error: string | null) => void;
+
+  // Actions (IPC behind them). Commands/input/resize target the active provider
+  // on the main side, which always matches the active project.
+  open: (projectId: string, opts?: { cols?: number; rows?: number }) => Promise<void>;
+  close: (kill?: boolean) => Promise<void>;
+  command: (args: string) => Promise<{ num: number; error: boolean; lines: string[] }>;
+  /** Send literal input bytes to a pane (encoded to hex pairs). */
+  sendInput: (projectId: string, paneId: string, data: string | Uint8Array) => Promise<void>;
+  resize: (cols: number, rows: number) => Promise<void>;
+  /** Drop a single project's slice + its sinks. */
+  resetProject: (projectId: string) => void;
+  /** Clear every project (backend switch / teardown). */
+  reset: () => void;
+}
+
+/** The active project's view, or a stable empty view when none is selected. */
+export function selectActiveView(s: TmuxStore): TmuxViewState {
+  return (s.activeProjectId != null && s.byProject[s.activeProjectId]) || EMPTY_VIEW;
+}
+
+export const useTmuxStore = create<TmuxStore>((set) => {
+  // Pane sinks live in closure state, not in the reduced view, so the reducer
+  // remains pure and serializable.
+  const sinks = new Map<string, Set<(bytes: Uint8Array) => void>>();
+
+  return {
+    byProject: {},
+    activeProjectId: null,
+
+    setActiveProject: (projectId) =>
+      set((st) =>
+        st.activeProjectId === projectId && st.byProject[projectId]
+          ? st
+          : {
+              activeProjectId: projectId,
+              byProject: st.byProject[projectId]
+                ? st.byProject
+                : { ...st.byProject, [projectId]: emptyView() },
+            },
+      ),
+
+    applyNotification: (projectId, wire) => {
+      const n = fromWireNotification(wire);
+      if (n.type === 'output') {
+        const bound = sinks.get(sinkKey(projectId, n.paneId));
+        if (bound) for (const s of bound) s(n.bytes);
+        return;
+      }
+      set((st) => {
+        const prev = st.byProject[projectId] ?? emptyView();
+        const next = reduce(prev, n);
+        if (next === prev) return st;
+        return { byProject: { ...st.byProject, [projectId]: next } };
+      });
+    },
+
+    setWindowDisplayName: (projectId, windowId, displayName) => {
+      set((st) => {
+        const slice = st.byProject[projectId];
+        const win = slice?.windows[windowId];
+        if (!slice || !win || win.displayName === displayName) return st;
+        return {
+          byProject: {
+            ...st.byProject,
+            [projectId]: {
+              ...slice,
+              windows: { ...slice.windows, [windowId]: { ...win, displayName } },
+            },
+          },
+        };
+      });
+    },
+
+    bindPaneSink: (projectId, paneId, sink) => {
+      const key = sinkKey(projectId, paneId);
+      let bound = sinks.get(key);
+      if (!bound) {
+        bound = new Set();
+        sinks.set(key, bound);
+      }
+      bound.add(sink);
+      return () => {
+        bound!.delete(sink);
+        if (bound!.size === 0) sinks.delete(key);
+      };
+    },
+
+    setOpenError: (projectId, error) => {
+      set((st) => {
+        const prev = st.byProject[projectId] ?? emptyView();
+        if (prev.openError === error) return st;
+        return {
+          byProject: {
+            ...st.byProject,
+            [projectId]: { ...prev, openError: error },
+          },
+        };
+      });
+    },
+
+    open: async (projectId, opts) => {
+      // Clear any prior openError (resets to "connecting" phase) before the IPC
+      // call so the UI shows progress instead of hanging on the prior error.
+      set((st) => {
+        const prev = st.byProject[projectId] ?? emptyView();
+        return {
+          byProject: {
+            ...st.byProject,
+            [projectId]: { ...prev, openError: null },
+          },
+        };
+      });
+      const sessionName = await agentCockpit.tmuxControl.open(opts);
+      set((st) => {
+        const prev = st.byProject[projectId] ?? emptyView();
+        return {
+          byProject: {
+            ...st.byProject,
+            [projectId]: { ...prev, isOpen: true, openError: null, sessionName },
+          },
+        };
+      });
+    },
+    close: async (kill) => {
+      await agentCockpit.tmuxControl.close(kill);
+    },
+    command: (args) => agentCockpit.tmuxControl.command(args),
+    sendInput: async (_projectId, paneId, data) => {
+      await agentCockpit.tmuxControl.input(paneId, toHex(data));
+    },
+    resize: async (cols, rows) => {
+      await agentCockpit.tmuxControl.resize(cols, rows);
+    },
+    resetProject: (projectId) => {
+      for (const k of [...sinks.keys()]) if (k.startsWith(`${projectId}${SEP}`)) sinks.delete(k);
+      set((st) => {
+        if (!st.byProject[projectId]) return st;
+        const next = { ...st.byProject };
+        delete next[projectId];
+        return {
+          byProject: next,
+          activeProjectId: st.activeProjectId === projectId ? null : st.activeProjectId,
+        };
+      });
+    },
+    reset: () => {
+      sinks.clear();
+      set({ byProject: {}, activeProjectId: null });
+    },
+  };
+});

@@ -1,0 +1,8 @@
+# Build output (static binaries + manifest), produced by build.sh.
+# The prebuilt dist IS committed (tracked via !dist/ below) so:
+#   1. electron-builder's extraResources can ship it with the packaged app.
+#   2. Dev mode can find the binaries at <repo>/remote-helper/dist without
+#      requiring a local Go toolchain.
+# Regenerate with: cd remote-helper && ./build.sh
+!/dist/
+/dist/*.tmp

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Generate a clickable macOS .app shim that launches this app in DEV mode
+# (`npm run dev`, Vite + hot reload) from this source tree. The shim embeds the
+# absolute path of *this* repo checkout, so it is per-machine — regenerate after
+# moving/cloning the repo elsewhere. The generated .app is copyable: drop it in
+# /Applications or your Dock and launch it like a desktop app.
+#
+# This is a DEV convenience, not a standalone build: it needs the repo,
+# node_modules, and Node/npm present. For a self-contained production bundle use
+# `bin/package`.
+#
+# Usage:
+#   bin/make-dev-app [output-dir]    # default output dir: release/
+
+cd "$(dirname "$0")/.."
+REPO="$(pwd)"
+OUT_DIR="${1:-$REPO/release}"
+APP="$OUT_DIR/Agent Cockpit (Dev).app"
+
+mkdir -p "$OUT_DIR"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS"
+
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Agent Cockpit (Dev)</string>
+  <key>CFBundleDisplayName</key><string>Agent Cockpit (Dev)</string>
+  <key>CFBundleIdentifier</key><string>net.sputnik13.agent-cockpit.dev-launcher</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>launch</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+</dict>
+</plist>
+PLIST
+
+# The launch script runs under Finder/Dock with a minimal PATH (no shell rc), so
+# it sets up Node on PATH itself: common Homebrew/local locations plus nvm. The
+# repo path is baked in at generation time (quoted for paths with spaces).
+cat > "$APP/Contents/MacOS/launch" <<LAUNCH
+#!/bin/zsh
+export PATH="/opt/homebrew/bin:/usr/local/bin:\$HOME/.local/bin:\$PATH"
+[ -s "\$HOME/.nvm/nvm.sh" ] && . "\$HOME/.nvm/nvm.sh"
+cd "$REPO" || exit 1
+exec npm run dev
+LAUNCH
+chmod +x "$APP/Contents/MacOS/launch"
+
+echo "Created: $APP"
+echo "  -> points at repo: $REPO"
+echo "  -> copy it to /Applications (or drag to the Dock) to launch dev mode like an app."

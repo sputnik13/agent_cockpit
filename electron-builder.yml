@@ -1,0 +1,51 @@
+# electron-builder packaging config. The app is compiled by electron-vite
+# (`npm run build` -> out/{main,preload,renderer}); this only packages that
+# output into distributable artifacts. See docs/BUILD.md.
+appId: net.sputnik13.agent-cockpit
+productName: Agent Cockpit
+
+directories:
+  output: release
+  buildResources: build # optional icons live here (build/icon.icns, build/icon.png)
+
+# Ship the compiled app + manifest. Production `dependencies` (including the
+# native better-sqlite3 / node-pty / ssh2) are bundled and rebuilt against
+# Electron's ABI automatically; unpack their .node binaries from the asar so
+# they can be dlopen'd at runtime.
+files:
+  - out/**/*
+  - package.json
+asarUnpack:
+  - '**/*.node'
+
+# Ship the prebuilt remote-helper binaries + manifest outside the asar so they
+# can be read as plain files at runtime (they are uploaded via SFTP to the
+# remote host; an asar-packed binary cannot be opened as a plain file stream).
+# Landing path: Contents/Resources/remote-helper/dist (macOS) or
+# resources/remote-helper/dist (Linux). Matches distDir() in helper.ts.
+extraResources:
+  - from: remote-helper/dist
+    to: remote-helper/dist
+    filter:
+      - '**/*'
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
+  # Ad-hoc signed (no Apple Developer cert). Apple Silicon refuses to run a
+  # fully unsigned arm64 app, so we DON'T set `identity: null` (that skips
+  # signing entirely); instead the package scripts export
+  # CSC_IDENTITY_AUTO_DISCOVERY=false, which makes electron-builder ad-hoc sign
+  # so the app launches locally. To enable real signing + notarization later,
+  # drop that env (or set a Developer ID via CSC_LINK / CSC_KEY_PASSWORD or the
+  # keychain), set `hardenedRuntime: true`, and add a `notarize` block with
+  # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID. See docs/BUILD.md.
+
+linux:
+  category: Development
+  target:
+    - AppImage

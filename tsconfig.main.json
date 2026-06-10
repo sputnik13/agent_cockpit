@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "target": "ES2022",
+    "types": ["node", "electron-vite/node"],
+    "lib": ["ES2022"],
+    "outDir": "out/main",
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["src/shared/*"],
+      "@main/*": ["electron/main/*"]
+    },
+    "composite": true,
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationDir": "out/types/main"
+  },
+  "include": ["electron/main/**/*.ts", "electron/preload/**/*.ts", "src/shared/**/*.ts"],
+  "exclude": ["node_modules", "out", "dist", "src/renderer", "**/*.test.ts", "**/*.test.tsx"]
+}

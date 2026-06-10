@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build standalone, distributable packages of the app via electron-builder
+# (macOS .dmg + .zip arm64; Linux AppImage). Artifacts land in release/.
+#
+# Usage:
+#   bin/package              # package for the current platform
+#   bin/package --linux      # cross-target Linux (run on Linux)
+#   bin/package --mac        # macOS .dmg + .zip
+#   bin/package --dir        # unpacked app only (fast, no installers)
+#
+# macOS builds are ad-hoc signed so they run locally without an Apple
+# Developer certificate. See docs/BUILD.md.
+
+cd "$(dirname "$0")/.."
+
+if [ ! -d node_modules ]; then
+  bin/setup
+fi
+
+if [ "$#" -gt 0 ]; then
+  exec npm run package -- "$@"
+fi
+exec npm run package

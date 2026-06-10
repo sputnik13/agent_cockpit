@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build the desktop app and place a wrapper launcher in ~/.local/bin.
+
+cd "$(dirname "$0")/.."
+
+bin/setup
+npm run build
+
+PREFIX="${HOME}/.local/bin"
+mkdir -p "$PREFIX"
+
+REPO_ROOT="$(pwd)"
+WRAPPER="$PREFIX/agent-changeset-viewer"
+
+cat > "$WRAPPER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$REPO_ROOT"
+exec npx electron .
+EOF
+chmod +x "$WRAPPER"
+
+echo "Installed launcher at $WRAPPER"

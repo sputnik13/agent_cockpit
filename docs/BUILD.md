@@ -8,10 +8,21 @@ macOS and Linux.
 ## Run from source (dev mode)
 
 ```sh
-bin/run          # installs deps if needed, then `npm run dev`
+bin/setup        # first-time: deps + Electron binary + native-module rebuild
+bin/run          # runs bin/setup if needed, then `npm run dev`
 # or:
 npm run dev
 ```
+
+On a fresh clone run `bin/setup` first (or let `bin/run` call it). Beyond
+`npm install` it does two repairs a plain install leaves broken: it ensures the
+**Electron binary** is fully extracted (Electron 33's postinstall can leave a
+partial `dist/` with no `path.txt` under newer Node — the "Electron failed to
+install" error), and it rebuilds the native modules (`better-sqlite3`,
+`node-pty`, `cpu-features`) against **Electron's ABI** (node-gyp builds them
+against the system Node, a different `NODE_MODULE_VERSION`). Use the Node version
+in [`.nvmrc`](../.nvmrc) (Node 20, matching Electron 33); `bin/setup` repairs the
+Electron install under newer Node too, so another Node still works.
 
 This launches the app with hot-reload against the source tree. Nothing is
 installed system-wide. DevTools does **not** auto-open — the app starts like a

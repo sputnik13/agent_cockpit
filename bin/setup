@@ -1,19 +1,82 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install project dependencies via npm (idempotent).
-# Does not install the project command into PATH; see bin/install for that.
+# Install project dependencies and produce a working `npm run dev` on this
+# machine's toolchain. Idempotent; safe to re-run. Does NOT install the project
+# command into PATH (see bin/install).
+#
+# Beyond `npm install`, this repairs two things newer Node breaks for Electron
+# 33's Node-20-era install tooling (a plain `npm install` exits 0 but leaves the
+# app unable to launch):
+#   1. The Electron binary. Its postinstall downloads the platform zip, but
+#      extract-zip can fail to settle under newer Node, leaving a partial dist/
+#      and no path.txt (the "Electron uninstall" error). We re-extract the
+#      cached zip with the system `unzip`.
+#   2. Native modules (better-sqlite3 / node-pty / cpu-features). node-gyp builds
+#      them against the system Node ABI, but the main process loads them under
+#      Electron's bundled Node (a different NODE_MODULE_VERSION → "compiled
+#      against a different Node.js version"). We rebuild them against Electron.
+#
+# Order matters: install → ensure the Electron binary → electron-rebuild.
 
 cd "$(dirname "$0")/.."
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "node is required but not on PATH" >&2
+for cmd in node npm unzip; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "$cmd is required but not on PATH" >&2
+    exit 1
+  fi
+done
+
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+if [ "$NODE_MAJOR" -lt 20 ]; then
+  echo "Node $(node -v) is below the supported minimum (>= 20). See .nvmrc." >&2
   exit 1
 fi
-
-if ! command -v npm >/dev/null 2>&1; then
-  echo "npm is required but not on PATH" >&2
-  exit 1
+if [ "$NODE_MAJOR" -gt 22 ]; then
+  echo "Note: Node $(node -v) is newer than the tested range (.nvmrc pins 20)." >&2
+  echo "      Electron's installer is repaired below; 'nvm use' selects the tested Node." >&2
 fi
 
-exec npm install
+npm install
+
+# --- 1. Ensure the Electron binary is fully extracted ------------------------
+ensure_electron() {
+  local ver arch plat exe cache zip
+  ver="$(node -p "require('./node_modules/electron/package.json').version")"
+  arch="$(node -p process.arch)"
+  case "$(node -p process.platform)" in
+    darwin) plat=darwin; exe='Electron.app/Contents/MacOS/Electron'; cache="$HOME/Library/Caches/electron" ;;
+    linux)  plat=linux;  exe='electron';                            cache="${XDG_CACHE_HOME:-$HOME/.cache}/electron" ;;
+    *) echo "Electron repair: unsupported platform, skipping." >&2; return 0 ;;
+  esac
+
+  # Already complete? path.txt present and pointing at an existing binary.
+  if [ -f node_modules/electron/path.txt ] && [ -e "node_modules/electron/dist/$exe" ]; then
+    return 0
+  fi
+
+  echo "Repairing Electron $ver binary (postinstall left it incomplete)…"
+  zip="$(find "$cache" -name "electron-v${ver}-${plat}-${arch}.zip" 2>/dev/null | head -1)"
+  if [ -z "$zip" ]; then
+    echo "  Electron zip not cached; fetching via electron's installer…"
+    node node_modules/electron/install.js >/dev/null 2>&1 || true
+    zip="$(find "$cache" -name "electron-v${ver}-${plat}-${arch}.zip" 2>/dev/null | head -1)"
+  fi
+  if [ -z "$zip" ]; then
+    echo "Could not locate the Electron $ver zip to extract (network/cache issue)." >&2
+    exit 1
+  fi
+  rm -rf node_modules/electron/dist
+  mkdir -p node_modules/electron/dist
+  unzip -q "$zip" -d node_modules/electron/dist
+  printf '%s' "$exe" > node_modules/electron/path.txt
+  echo "  Extracted $(basename "$zip")."
+}
+ensure_electron
+
+# --- 2. Rebuild native modules against Electron's ABI ------------------------
+echo "Rebuilding native modules against Electron's ABI…"
+./node_modules/.bin/electron-rebuild -f -w better-sqlite3,node-pty,cpu-features
+
+echo "Setup complete: Electron binary + native modules ready. Run 'npm run dev'."

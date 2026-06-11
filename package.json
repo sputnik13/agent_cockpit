@@ -87,5 +87,15 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "cpu-features": true,
+    "electron": true,
+    "esbuild": true,
+    "fsevents": true,
+    "node-pty": true,
+    "electron-winstaller": true,
+    "ssh2": true
   }
 }

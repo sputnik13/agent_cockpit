@@ -17,6 +17,7 @@
 import { spawnSync } from 'node:child_process';
 import * as pty from 'node-pty';
 import { withNativeArch } from './nativeArch';
+import { tmuxSocket } from '../../instanceConfig';
 import {
   TERMINAL_SCROLLBACK,
   TmuxControlParser,
@@ -34,7 +35,7 @@ import {
 } from '@shared/tmux';
 import type { TmuxNotification } from '@shared/tmux';
 
-const SOCKET = 'agent-cockpit';
+const SOCKET = tmuxSocket();
 
 /** tmux session names cannot contain '.' or ':'. */
 const sanitize = (s: string): string => s.replace(/[.:\s]/g, '-');

@@ -61,8 +61,10 @@ export async function computeChangeset(
     });
   }
 
-  // Untracked + ignored from porcelain status
-  const status = await git.status();
+  // Untracked from porcelain status. `--untracked-files=all` expands untracked
+  // directories into their individual files (the default collapses a non-empty
+  // untracked dir to a single trailing-slash entry); git still honors .gitignore.
+  const status = await git.status(['--untracked-files=all']);
   for (const file of status.not_added) {
     if (!files.has(file)) {
       files.set(file, {

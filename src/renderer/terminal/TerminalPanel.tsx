@@ -6,7 +6,7 @@ import * as registry from './terminalRegistry';
 import { SessionsDialog } from '../sessions';
 import { ControlTerminalPanel } from '../tmux/ControlTerminalPanel';
 import { useSettingsStore } from '../settings';
-import { Button, EmptyState, IconButton, cn } from '../ui';
+import { Button, EmptyState, IconButton, TabbedPanelHeader, cn } from '../ui';
 
 /**
  * Terminal dock panel. Switches between the session-per-tab backend and the
@@ -62,53 +62,59 @@ function SessionTerminalPanel(): JSX.Element {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
-      <div className="flex h-7 shrink-0 items-center gap-1 border-b border-edge bg-panel px-1">
-        {keys.map((k) => (
-          <div
-            key={k}
-            onClick={() => setActive(k)}
-            className={cn(
-              'group flex cursor-pointer items-center gap-1 border-t-2 px-2.5 py-1 text-xs',
-              k === activeKey
-                ? 'border-accent bg-bg text-fg'
-                : 'border-transparent text-dim hover:bg-elev hover:text-fg',
-            )}
-          >
-            <span>{k}</span>
-            {keys.length > 1 && (
-              <span
-                role="button"
-                aria-label={`Close terminal ${k}`}
-                className="opacity-0 group-hover:opacity-100"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  // Tear down the renderer instance; store.close kills the session.
-                  registry.dispose(activeId, 'terminal', k);
-                  void close(k);
-                }}
+      <TabbedPanelHeader
+        tabs={
+          <>
+            {keys.map((k) => (
+              <div
+                key={k}
+                onClick={() => setActive(k)}
+                className={cn(
+                  'group flex cursor-pointer items-center gap-1 border-t-2 px-2.5 py-1 text-xs',
+                  k === activeKey
+                    ? 'border-accent bg-bg text-fg'
+                    : 'border-transparent text-dim hover:bg-elev hover:text-fg',
+                )}
               >
-                ×
-              </span>
-            )}
-          </div>
-        ))}
-        <IconButton label="New terminal" size="sm" onClick={() => add()}>
-          +
-        </IconButton>
-        <div className="ml-auto flex items-center gap-1">
-          <IconButton
-            label="Reset terminal (reattach session)"
-            size="sm"
-            disabled={!activeKey}
-            onClick={() => void resetActive()}
-          >
-            ⟳
-          </IconButton>
-          <Button size="sm" title="Manage sessions" onClick={() => setSessionsOpen(true)}>
-            Sessions
-          </Button>
-        </div>
-      </div>
+                <span>{k}</span>
+                {keys.length > 1 && (
+                  <span
+                    role="button"
+                    aria-label={`Close terminal ${k}`}
+                    className="opacity-0 group-hover:opacity-100"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // Tear down the renderer instance; store.close kills the session.
+                      registry.dispose(activeId, 'terminal', k);
+                      void close(k);
+                    }}
+                  >
+                    ×
+                  </span>
+                )}
+              </div>
+            ))}
+            <IconButton label="New terminal" size="sm" onClick={() => add()}>
+              +
+            </IconButton>
+          </>
+        }
+        actions={
+          <>
+            <IconButton
+              label="Reset terminal (reattach session)"
+              size="sm"
+              disabled={!activeKey}
+              onClick={() => void resetActive()}
+            >
+              ⟳
+            </IconButton>
+            <Button size="sm" title="Manage sessions" onClick={() => setSessionsOpen(true)}>
+              Sessions
+            </Button>
+          </>
+        }
+      />
       <SessionsDialog open={sessionsOpen} onOpenChange={setSessionsOpen} />
       <div className="relative min-h-0 flex-1">
         {keys.map((k) => (

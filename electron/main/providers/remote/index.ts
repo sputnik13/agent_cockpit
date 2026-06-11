@@ -12,6 +12,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { posix } from 'node:path';
+import { tmuxSocket } from '../../instanceConfig';
 import type {
   BeadsComment,
   BeadsCreateInput,
@@ -154,7 +155,7 @@ export function controlSessionName(projectId: string): string {
 }
 
 /** Shared tmux socket for control-mode sessions (same as local). */
-const CONTROL_SOCKET = 'agent-cockpit';
+const CONTROL_SOCKET = tmuxSocket();
 
 /** Shell-quote a value for a remote command. */
 function shellQuote(value: string): string {

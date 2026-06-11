@@ -9,6 +9,7 @@
 import { spawnSync } from 'node:child_process';
 import * as pty from 'node-pty';
 import { withNativeArch } from './nativeArch';
+import { tmuxSocket } from '../../instanceConfig';
 import type {
   TerminalDataHandler,
   TerminalExitHandler,
@@ -17,7 +18,7 @@ import type {
   TerminalOpenOptions,
 } from '../types';
 
-const SOCKET = 'agent-cockpit';
+const SOCKET = tmuxSocket();
 
 function defaultShell(): string {
   if (process.platform === 'win32') return process.env['COMSPEC'] ?? 'powershell.exe';

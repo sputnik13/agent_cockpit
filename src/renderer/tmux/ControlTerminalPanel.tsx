@@ -21,7 +21,7 @@ import {
   resetControlSession,
   syncFromTmux,
 } from './controlSession';
-import { EmptyState, IconButton, cn } from '../ui';
+import { EmptyState, IconButton, TabbedPanelHeader, cn } from '../ui';
 
 /**
  * Control-mode terminal surface (flag-gated alternative to the session-per-tab
@@ -543,58 +543,64 @@ export function ControlTerminalPanel(): JSX.Element {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
-      <div className="flex h-7 shrink-0 items-center gap-1 border-b border-edge bg-panel px-1">
-        {tabWindows.map((id, i) => {
-          const w = windows[id];
-          const name = w?.name;
-          // Prefer the SCREEN-title-derived displayName so the tab tracks the
-          // active command/cwd; fall back to tmux window name; finally the
-          // 1-based tab index when nothing useful is set.
-          const label = w?.displayName ?? (name && name !== id ? name : String(i + 1));
-          const titleAttr = [
-            id,
-            name && name !== id ? name : null,
-            w?.displayName && w.displayName !== name ? w.displayName : null,
-          ]
-            .filter(Boolean)
-            .join(' · ');
-          return (
-            <div
-              key={id}
-              title={titleAttr}
-              onClick={() => {
-                setSelectedWindow(id);
-                // Select in tmux so split/pane navigation targets this window.
-                cmd(`select-window -t ${id}`);
-              }}
-              className={cn(
-                'cursor-pointer border-t-2 px-2.5 py-1 text-xs',
-                id === currentWindow
-                  ? 'border-accent bg-bg text-fg'
-                  : 'border-transparent text-dim hover:bg-elev hover:text-fg',
-              )}
+      <TabbedPanelHeader
+        tabs={
+          <>
+            {tabWindows.map((id, i) => {
+              const w = windows[id];
+              const name = w?.name;
+              // Prefer the SCREEN-title-derived displayName so the tab tracks the
+              // active command/cwd; fall back to tmux window name; finally the
+              // 1-based tab index when nothing useful is set.
+              const label = w?.displayName ?? (name && name !== id ? name : String(i + 1));
+              const titleAttr = [
+                id,
+                name && name !== id ? name : null,
+                w?.displayName && w.displayName !== name ? w.displayName : null,
+              ]
+                .filter(Boolean)
+                .join(' · ');
+              return (
+                <div
+                  key={id}
+                  title={titleAttr}
+                  onClick={() => {
+                    setSelectedWindow(id);
+                    // Select in tmux so split/pane navigation targets this window.
+                    cmd(`select-window -t ${id}`);
+                  }}
+                  className={cn(
+                    'cursor-pointer border-t-2 px-2.5 py-1 text-xs',
+                    id === currentWindow
+                      ? 'border-accent bg-bg text-fg'
+                      : 'border-transparent text-dim hover:bg-elev hover:text-fg',
+                  )}
+                >
+                  {label}
+                </div>
+              );
+            })}
+            <IconButton label="New tmux window" size="sm" onClick={() => cmd('new-window')}>
+              +
+            </IconButton>
+          </>
+        }
+        actions={
+          <>
+            <IconButton
+              label="Refresh tab (repaint without touching tmux)"
+              size="sm"
+              disabled={!layout}
+              onClick={recoverActiveTab}
             >
-              {label}
-            </div>
-          );
-        })}
-        <IconButton label="New tmux window" size="sm" onClick={() => cmd('new-window')}>
-          +
-        </IconButton>
-        <div className="ml-auto flex items-center gap-1">
-          <IconButton
-            label="Refresh tab (repaint without touching tmux)"
-            size="sm"
-            disabled={!layout}
-            onClick={recoverActiveTab}
-          >
-            ⟳
-          </IconButton>
-          <IconButton label="Kill pane" size="sm" disabled={!target} onClick={() => cmd(`kill-pane -t ${target}`)}>
-            ×
-          </IconButton>
-        </div>
-      </div>
+              ⟳
+            </IconButton>
+            <IconButton label="Kill pane" size="sm" disabled={!target} onClick={() => cmd(`kill-pane -t ${target}`)}>
+              ×
+            </IconButton>
+          </>
+        }
+      />
       <div ref={hostRef} className="relative min-h-0 flex-1">
         {renderLayout ? (
           <PaneTree

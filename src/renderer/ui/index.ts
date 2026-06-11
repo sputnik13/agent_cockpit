@@ -2,7 +2,15 @@
  *  accessibility-heavy controls (dialog, menus, tooltip, tabs, select). */
 export { cn } from './cn';
 export { Button, IconButton, type ButtonProps, type IconButtonProps } from './Button';
-export { Panel, PanelHeader, PanelBody, type PanelHeaderProps } from './Panel';
+export {
+  Panel,
+  PanelHeader,
+  PanelBody,
+  PanelFullscreenButton,
+  TabbedPanelHeader,
+  type PanelHeaderProps,
+  type TabbedPanelHeaderProps,
+} from './Panel';
 export {
   PanelFullscreenProvider,
   usePanelFullscreen,

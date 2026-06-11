@@ -1,9 +1,10 @@
-// Boots the built Electron app against the demo fixture (see fixture.mjs) in an
-// isolated user-data profile and captures README screenshots into docs/images/.
+// Boots the built Electron app against the demo fixture (see fixture.mjs) in a
+// fully isolated instance and captures README screenshots into docs/images/.
 //
 // Run via `npm run screenshots` (builds first) or directly with `node`.
-// Isolation: a throwaway --user-data-dir means the app starts empty and only the
-// demo project is ever shown — your real projects never appear in a screenshot.
+// Isolation (see docs/BUILD.md "Running an isolated instance"):
+//   --user-data-dir  → empty profile, so only the demo project is ever shown.
+//   --tmux-socket    → a separate tmux server, so the running app is untouched.
 
 import { _electron as electron } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
@@ -11,36 +12,32 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { generateFixture, FIXTURE_DIR } from './fixture.mjs';
-
-/** Kill only the tmux sessions the demo opened (matched by working dir), never the user's. */
-function killDemoSessions() {
-  try {
-    const out = execFileSync('tmux', ['-L', 'agent-cockpit', 'list-sessions', '-F', '#{session_name} #{session_path}'], {
-      encoding: 'utf8',
-    });
-    for (const line of out.split('\n')) {
-      const [name, ...rest] = line.split(' ');
-      if (name && rest.join(' ') === FIXTURE_DIR) {
-        execFileSync('tmux', ['-L', 'agent-cockpit', 'kill-session', '-t', name]);
-      }
-    }
-  } catch {
-    /* no socket / no sessions — nothing to clean */
-  }
-}
+import { generateFixture } from './fixture.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
 const MAIN = join(ROOT, 'out', 'main', 'index.js');
 const OUT_DIR = join(ROOT, 'docs', 'images');
 
+// Dedicated, throwaway tmux socket — never the app's default 'agent-cockpit'.
+const TMUX_SOCKET = 'agent-cockpit-shots';
+// A Nerd Font so powerline/git glyphs in the demo prompt render correctly.
+const FONT_FAMILY = 'RobotoMono Nerd Font Mono';
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function shot(win, name) {
-  const path = join(OUT_DIR, `${name}.png`);
-  await win.screenshot({ path });
+  await win.screenshot({ path: join(OUT_DIR, `${name}.png`) });
   console.log('  •', `docs/images/${name}.png`);
+}
+
+/** Tear down the isolated tmux server (exclusively this run's). */
+function killShotSessions() {
+  try {
+    execFileSync('tmux', ['-L', TMUX_SOCKET, 'kill-server']);
+  } catch {
+    /* no server / already gone */
+  }
 }
 
 async function main() {
@@ -49,8 +46,10 @@ async function main() {
   const fixture = generateFixture();
   const userDataDir = mkdtempSync(join(tmpdir(), 'agent-cockpit-shots-'));
 
-  console.log('Launching app…');
-  const app = await electron.launch({ args: [MAIN, `--user-data-dir=${userDataDir}`] });
+  console.log('Launching isolated app…');
+  const app = await electron.launch({
+    args: [MAIN, `--user-data-dir=${userDataDir}`, `--tmux-socket=${TMUX_SOCKET}`],
+  });
   const win = await app.firstWindow();
   await win.waitForLoadState('domcontentloaded');
 
@@ -60,16 +59,21 @@ async function main() {
   });
   await sleep(600);
 
-  // Add + activate the demo project through the real IPC, then reload so the
-  // renderer re-hydrates from the persisted store and the provider goes live.
-  console.log('Adding demo project…');
-  await win.evaluate(async (rootPath) => {
-    const p = await window.api.projects.add({
-      label: 'Demo Notes',
-      connection: { kind: 'local', rootPath },
-    });
-    await window.api.projects.activate(p.id);
-  }, fixture);
+  // Set the Nerd Font, then add + activate the demo project through the real IPC.
+  // Reloading re-hydrates the renderer from the persisted store and the provider
+  // goes live with the chosen font.
+  console.log('Configuring + adding demo project…');
+  await win.evaluate(
+    async ({ rootPath, fontFamily }) => {
+      await window.api.settings.set({ fontFamily });
+      const p = await window.api.projects.add({
+        label: 'Demo Notes',
+        connection: { kind: 'local', rootPath },
+      });
+      await window.api.projects.activate(p.id);
+    },
+    { rootPath: fixture, fontFamily: FONT_FAMILY },
+  );
   await win.reload();
   await win.waitForLoadState('domcontentloaded');
 
@@ -98,7 +102,7 @@ async function main() {
   }
 
   await app.close();
-  killDemoSessions();
+  killShotSessions();
   console.log('Done.');
 }
 

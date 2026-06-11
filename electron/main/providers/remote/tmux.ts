@@ -23,12 +23,13 @@ import type {
   TerminalOpenOptions,
 } from '../types';
 import type { PtyChannel, RemoteTransport } from './transportTypes';
+import { tmuxSocket } from '../../instanceConfig';
 
 /** Backoff schedule (ms) for re-attaching after a transport drop. */
 const REATTACH_BACKOFF_MS = [500, 1_000, 2_000, 5_000];
 
 /** Dedicated tmux socket, isolated from the user's interactive tmux / byobu. */
-const SOCKET = 'agent-cockpit';
+const SOCKET = tmuxSocket();
 
 /** tmux session names cannot contain '.' or ':'. */
 const sanitize = (s: string): string => s.replace(/[.:\s]/g, '-');

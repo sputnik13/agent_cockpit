@@ -146,6 +146,41 @@ func TestGitStatus(t *testing.T) {
 	}
 }
 
+// An untracked directory with content must be expanded to its individual files
+// (not collapsed to a single "notes/" entry), while .gitignore is still honored.
+func TestGitStatusUntrackedDir(t *testing.T) {
+	dir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"a.md": "a\n", "b.md": "b\n", "debug.log": "ignored\n"} {
+		if err := os.WriteFile(filepath.Join(dir, "notes", name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := handleGitStatus(json.RawMessage(`{"cwd":` + jstr(dir) + `}`))
+	if err != nil {
+		t.Fatalf("gitStatus: %v", err)
+	}
+	paths := map[string]bool{}
+	for _, e := range res.([]statusEntry) {
+		paths[e.Path] = true
+	}
+	if !paths["notes/a.md"] || !paths["notes/b.md"] {
+		t.Fatalf("expected individual untracked files under notes/, got %v", paths)
+	}
+	if paths["notes/"] {
+		t.Fatalf("untracked directory should be expanded, not listed as notes/: %v", paths)
+	}
+	if paths["notes/debug.log"] {
+		t.Fatalf("gitignored file should be excluded, got %v", paths)
+	}
+}
+
 func TestGitDiff(t *testing.T) {
 	dir := initRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("hello\nworld\n"), 0o644); err != nil {

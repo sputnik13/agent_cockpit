@@ -100,3 +100,25 @@ modules, and scripts stay the same. To distribute to other Macs cleanly:
 runs the app from the repo via the local Electron. This is convenient but is
 **not** a self-contained bundle — it depends on the source tree staying in
 place. For a relocatable artifact, use `bin/package` instead.
+
+## Running an isolated instance
+
+Automated tests and the screenshot harness launch a second app instance. To keep
+it from disturbing a normally-running app, point it at isolated copies of the
+resources that overlap between instances:
+
+| Resource | Override | Effect |
+| --- | --- | --- |
+| App user-data (`config.json`, SQLite store, projects, layout) | `--user-data-dir=<path>` | Redirects `app.getPath('userData')`; the instance starts empty and never sees the main app's projects. |
+| tmux server/socket | `--tmux-socket=<name>` or `AC_TMUX_SOCKET=<name>` | Runs `tmux -L <name>` on a separate server, so sessions never collide with the main app's. |
+
+With no override set, both default to the normal app (`userData` and the
+`agent-cockpit` socket). Example:
+
+```sh
+electron out/main/index.js --user-data-dir=/tmp/ac-test --tmux-socket=ac-test
+```
+
+The screenshot harness (`scripts/screenshots/`) sets both so it leaves a running
+app untouched. The socket override is read in
+[electron/main/instanceConfig.ts](../electron/main/instanceConfig.ts).

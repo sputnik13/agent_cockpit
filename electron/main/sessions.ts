@@ -6,9 +6,10 @@
  */
 import { spawnSync } from 'node:child_process';
 import type { TmuxSessionInfo } from '@shared/ipc/channels';
+import { tmuxSocket } from './instanceConfig';
 
-// Must match the socket used by LocalTerminalManager / remote tmux.ts.
-const SOCKET = 'agent-cockpit';
+// Single source for the socket name (overridable per instance).
+const SOCKET = tmuxSocket();
 
 export type { TmuxSessionInfo };
 

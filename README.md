@@ -102,6 +102,11 @@ npm run typecheck    # tsc
 
 ## Known Issues
 
+- **Occasional terminal text glitches:** the terminal renderer can intermittently
+  garble glyphs or leave stale cells. Refreshing the panel (the tab's refresh
+  button) or resizing the window repaints it cleanly. An experimental alternative
+  renderer (`wterm`, selectable in Preferences) aims to resolve this but is not yet
+  stable.
 - **Tight split widths:** dragging a control-mode split until one pane is roughly
   prompt-wide can surface zsh's `%` missing-newline marker on the next prompt,
   because tmux, xterm's fit addon, and the flex layout round cell counts

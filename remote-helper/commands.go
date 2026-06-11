@@ -140,7 +140,10 @@ func handleGitStatus(raw json.RawMessage) (interface{}, error) {
 	entries := []statusEntry{}
 
 	// Working-tree status via porcelain v1 (-z null-delimited records).
-	out, err := runCommand(p.Cwd, "git", "status", "--porcelain", "-z")
+	// --untracked-files=all expands untracked directories into individual files
+	// (the default collapses a non-empty untracked dir to one entry); .gitignore
+	// is still honored.
+	out, err := runCommand(p.Cwd, "git", "status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return nil, err
 	}

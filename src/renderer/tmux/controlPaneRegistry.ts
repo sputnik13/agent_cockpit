@@ -85,6 +85,55 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
   });
   const inputSub = renderer.onData((data) => void useTmuxStore.getState().sendInput(projectId, paneId, data));
 
+  // Mouse-wheel forwarding (control mode). tmux does NOT put the `-CC` control
+  // client into mouse mode, so the renderer would just scroll its own buffer and
+  // the wheel would never reach the app. For a pane whose foreground app has
+  // mouse tracking on (`#{mouse_any_flag}`), synthesize SGR wheel events and send
+  // them to the pane so the app scrolls (Claude, vim, htop, …); for a non-mouse
+  // pane, let the renderer scroll its own scrollback. The flag is queried lazily
+  // and cached (self-correcting within a gesture). This is a capture-phase
+  // listener on the container, so it fires before the terminal's own wheel
+  // handling and works for any backend (xterm.js or wterm). Only the visible
+  // (active-project) pane receives wheel events.
+  let paneHasMouse = false;
+  let mouseFlagInFlight = false;
+  const refreshMouseFlag = (): void => {
+    if (mouseFlagInFlight) return;
+    mouseFlagInFlight = true;
+    void useTmuxStore
+      .getState()
+      .command(`display-message -p -t ${paneId} '#{mouse_any_flag}'`)
+      .then((r) => {
+        paneHasMouse = r.lines[0]?.trim() === '1';
+      })
+      .catch(() => {})
+      .finally(() => {
+        mouseFlagInFlight = false;
+      });
+  };
+  const onWheel = (e: WheelEvent): void => {
+    refreshMouseFlag();
+    if (!paneHasMouse) return; // let the renderer scroll its own buffer
+    e.preventDefault();
+    e.stopPropagation();
+    const m = renderer.cellMetrics();
+    const rect = container.getBoundingClientRect();
+    const col =
+      m && m.w > 0
+        ? Math.min(Math.max(1, Math.floor((e.clientX - rect.left) / m.w) + 1), renderer.cols || 1)
+        : 1;
+    const row =
+      m && m.h > 0
+        ? Math.min(Math.max(1, Math.floor((e.clientY - rect.top) / m.h) + 1), renderer.rows || 1)
+        : 1;
+    const button = e.deltaY < 0 ? 64 : 65; // SGR wheel up / down (press-only)
+    const ticks = Math.min(5, Math.max(1, Math.round(Math.abs(e.deltaY) / 40)));
+    let seq = '';
+    for (let i = 0; i < ticks; i++) seq += `\x1b[<${button};${col};${row}M`;
+    void useTmuxStore.getState().sendInput(projectId, paneId, seq);
+  };
+  container.addEventListener('wheel', onWheel, { capture: true, passive: false });
+
   // Backfill scrollback once the session is open via capture-pane — but ONLY if
   // the live sink hasn't already rendered anything for this pane. capture-pane
   // returns the pane buffer AS IT IS RIGHT NOW, so writing it after the sink
@@ -133,6 +182,7 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
       disposed = true;
       unbind();
       inputSub.dispose();
+      container.removeEventListener('wheel', onWheel, true);
       // The renderer disposes its terminal (incl. any GPU renderer) and removes
       // its container.
       renderer.dispose();

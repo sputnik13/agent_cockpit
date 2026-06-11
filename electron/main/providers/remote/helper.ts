@@ -269,7 +269,15 @@ export class RemoteHelperLauncher {
     const rel = remotePath.replace(/^\.\//, '');
     const cmd = `exec "$HOME/${rel}"`;
     try {
-      return await this.transport.execStream(cmd);
+      const stream = await this.transport.execStream(cmd);
+      // Drain + surface the helper's stderr so remote errors/panics reach the
+      // app's diagnostics instead of being silently dropped (an unread stderr
+      // stream can also back-pressure the remote process).
+      stream.stderr.on('data', (chunk: Buffer) => {
+        const text = chunk.toString('utf8').trimEnd();
+        if (text) logger.warn(`remote helper stderr: ${text}`, 'remote-helper');
+      });
+      return stream;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new HelperLaunchError(`failed to launch helper: ${msg}`, 'launch', err);

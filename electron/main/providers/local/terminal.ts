@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import * as pty from 'node-pty';
 import { withNativeArch } from './nativeArch';
 import { tmuxSocket } from '../../instanceConfig';
+import { TERMINAL_TERM, tmuxServerOptionArgs, terminalPaneEnv } from '@shared/tmux';
 import type {
   TerminalDataHandler,
   TerminalExitHandler,
@@ -78,16 +79,22 @@ export class LocalTerminalManager {
     const key = opts.key ?? `t${++counter}`;
     const cwd = opts.cwd ?? this.rootPath;
     const name = this.sessionName(opts.kind ?? 'terminal', key);
-    const env = { ...process.env, TERM: 'xterm-color' } as Record<string, string>;
+    const env = terminalPaneEnv(process.env);
 
     // Run the session-creating child native arm64 when we're translated under
     // Rosetta on Apple Silicon (no-op elsewhere); the two branches share spawn
     // options, so wrap whichever target applies and spawn once.
     const { file, args } = hasTmux()
-      ? withNativeArch('tmux', ['-L', SOCKET, 'new-session', '-A', '-s', name, '-c', cwd])
+      ? withNativeArch('tmux', [
+          '-L', SOCKET,
+          // Apply the shared server options before the session (single source),
+          // so the session-per-tab backend gets history-limit/mouse/color too.
+          'start-server', ...tmuxServerOptionArgs(),
+          ';', 'new-session', '-A', '-s', name, '-c', cwd,
+        ])
       : withNativeArch(defaultShell(), []);
     const proc = pty.spawn(file, args, {
-      name: 'xterm-color',
+      name: TERMINAL_TERM,
       cols: opts.cols,
       rows: opts.rows,
       cwd,

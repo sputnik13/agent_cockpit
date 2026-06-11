@@ -7,8 +7,8 @@
  *     and accepts an unknown host under TOFU (FR8);
  *   - exec captures stdout/stderr separately, returns code (null on signal),
  *     never rejects on non-zero, rejects when not connected (OQ-3);
- *   - openPty uses xterm-256color + modes {ECHO:0,ISIG:0}; openShell uses
- *     xterm-color; resize maps to setWindow rows-first;
+ *   - openPty uses xterm-256color + modes {ECHO:0,ISIG:0}; openShell defaults
+ *     to xterm-256color; resize maps to setWindow rows-first;
  *   - execStream/openPty/openShell deliver raw bytes — a >0x7E powerline
  *     sequence (0xE2 0x96 0x88) survives unmodified end to end (FR4).
  */
@@ -287,9 +287,9 @@ describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
       expect(pty['rows']).toBe(50);
     });
 
-    it('openShell defaults term to xterm-color and resize maps to rows-first setWindow', async () => {
+    it('openShell defaults term to xterm-256color and resize maps to rows-first setWindow', async () => {
       const ch = await t.openShell({ cols: 80, rows: 24 });
-      expect(t.fake.shellCalls.at(-1)!.opts['term']).toBe('xterm-color');
+      expect(t.fake.shellCalls.at(-1)!.opts['term']).toBe('xterm-256color');
       ch.resize(120, 40);
       expect(t.fake.shellCalls.at(-1)!.channel.setWindowArgs).toEqual([40, 120, 0, 0]);
     });
@@ -303,6 +303,17 @@ describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
       call.channel.emit('data', powerline);
       await Promise.resolve();
       expect(Buffer.concat(received).equals(powerline)).toBe(true);
+    });
+
+    it('execStream exposes stderr and delivers its raw bytes undecoded', async () => {
+      const dup = await t.execStream('exec helper');
+      const call = t.fake.execCalls.at(-1)!;
+      const received: Buffer[] = [];
+      dup.stderr.on('data', (b: Buffer) => received.push(b));
+      const err = Buffer.from([0xe2, 0x96, 0x88]); // raw bytes on stderr
+      call.channel.stderr.emit('data', err);
+      await Promise.resolve();
+      expect(Buffer.concat(received).equals(err)).toBe(true);
     });
 
     it('openPty delivers raw >0x7E bytes undecoded (FR4)', async () => {

@@ -1,0 +1,66 @@
+/**
+ * Single source for the tmux global (`set -g`) server options and the
+ * per-terminal-pane environment, consumed by every opener (local/remote ×
+ * control-mode/session-per-tab).
+ *
+ * These configure the tmux/pty layer, NOT the renderer, so they are
+ * backend-agnostic — a pane rendered by xterm.js or by wterm inherits the same
+ * terminal type, color support, scrollback, and mouse behavior.
+ */
+import { TERMINAL_SCROLLBACK } from './scrollback';
+
+/** Terminal type advertised to the tmux client — 256-color for modern color. */
+export const TERMINAL_TERM = 'xterm-256color';
+/** Advertise 24-bit color so programs emit truecolor. */
+export const TERMINAL_COLORTERM = 'truecolor';
+
+interface TmuxServerOption {
+  name: string;
+  value: string;
+  /** Append (`set -ga`) instead of replace (`set -g`). */
+  append?: boolean;
+}
+
+/**
+ * Global tmux options applied to the shared server before the first session.
+ * Every entry must be valid on any tmux the app targets (an unknown-option error
+ * would break the remote `&&` opener chain) — `terminal-overrides` stores an
+ * arbitrary capability string, so the `:Tc` truecolor cap is safe on all versions.
+ */
+export const TMUX_SERVER_OPTIONS: readonly TmuxServerOption[] = [
+  // Keep the sessionless server alive between start-server and the first session.
+  { name: 'exit-empty', value: 'off' },
+  // Scrollback depth — single source with the capture-pane seed + renderer buffer.
+  { name: 'history-limit', value: String(TERMINAL_SCROLLBACK) },
+  // Wheel → mouse-aware apps; otherwise tmux copy-mode (tmux's scrollback).
+  { name: 'mouse', value: 'on' },
+  // 256-color terminfo for programs inside tmux (widely present everywhere).
+  { name: 'default-terminal', value: 'screen-256color' },
+  // Advertise 24-bit truecolor passthrough to the client.
+  { name: 'terminal-overrides', value: ',*:Tc', append: true },
+];
+
+/**
+ * Option args to chain after a tmux command (e.g. `start-server`), using `';'`
+ * as the literal tmux command separator (for argv-based spawns).
+ */
+export function tmuxServerOptionArgs(): string[] {
+  return TMUX_SERVER_OPTIONS.flatMap((o) => [';', 'set', o.append ? '-ga' : '-g', o.name, o.value]);
+}
+
+/**
+ * Option commands for a remote shell, joined with the literal `\;` separator the
+ * shell passes through to tmux. Values are single-quoted so glob/special chars
+ * (e.g. the `*` in `terminal-overrides`) reach tmux verbatim. Does NOT include a
+ * leading separator — callers chain it after `start-server`.
+ */
+export function tmuxServerOptionShell(): string {
+  return TMUX_SERVER_OPTIONS.map(
+    (o) => `set ${o.append ? '-ga' : '-g'} ${o.name} '${o.value}'`,
+  ).join(' \\; ');
+}
+
+/** Env for a terminal-hosting process (node-pty): modern TERM + truecolor. */
+export function terminalPaneEnv(base: Record<string, string | undefined>): Record<string, string> {
+  return { ...base, TERM: TERMINAL_TERM, COLORTERM: TERMINAL_COLORTERM } as Record<string, string>;
+}

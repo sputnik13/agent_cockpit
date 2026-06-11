@@ -10,3 +10,4 @@ export * from './layout';
 export * from './parser';
 export * from './commands';
 export * from './scrollback';
+export * from './terminalConfig';

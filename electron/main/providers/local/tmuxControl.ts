@@ -19,7 +19,9 @@ import * as pty from 'node-pty';
 import { withNativeArch } from './nativeArch';
 import { tmuxSocket } from '../../instanceConfig';
 import {
-  TERMINAL_SCROLLBACK,
+  TERMINAL_TERM,
+  tmuxServerOptionArgs,
+  terminalPaneEnv,
   TmuxControlParser,
   capturePane as capturePaneCmd,
   killPane as killPaneCmd,
@@ -119,7 +121,7 @@ export class LocalTmuxControlManager {
     if (!hasTmux()) throw new Error('tmux is not available');
     const cols = opts?.cols ?? 80;
     const rows = opts?.rows ?? 24;
-    const env = { ...process.env, TERM: 'xterm-256color' } as Record<string, string>;
+    const env = terminalPaneEnv(process.env);
     // Set the GLOBAL history-limit on the socket BEFORE the first new-session.
     // `new-session -A` creates the initial pane as part of session creation
     // (there is no pre-pane command slot), and `set-option` does NOT resize
@@ -146,8 +148,7 @@ export class LocalTmuxControlManager {
     const srv = withNativeArch('tmux', [
       '-L', SOCKET,
       'start-server',
-      ';', 'set', '-g', 'exit-empty', 'off',
-      ';', 'set', '-g', 'history-limit', String(TERMINAL_SCROLLBACK),
+      ...tmuxServerOptionArgs(),
     ]);
     spawnSync(srv.file, srv.args, { stdio: 'ignore' });
     // Wrap with arch -arm64 when translated under Rosetta (no-op otherwise) so
@@ -166,7 +167,7 @@ export class LocalTmuxControlManager {
       // string, those bytes become Unicode codepoints and `decodeOutput`'s
       // `c & 0xff` truncates each codepoint to its low byte, breaking any rich
       // TUI (claude, htop, vim, …). Raw bytes preserve the wire faithfully.
-      { name: 'xterm-256color', cols, rows, cwd: this.rootPath, env, encoding: null },
+      { name: TERMINAL_TERM, cols, rows, cwd: this.rootPath, env, encoding: null },
     );
     this.opened = true;
     this.sawInitialBlock = false;

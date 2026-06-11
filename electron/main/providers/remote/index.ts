@@ -55,7 +55,7 @@ import { logger } from '../../logger';
 import { createConnectionMachine, type ConnectionMachine } from '../connectionMachine';
 import { createWatchIngest } from '../../watch/ingest';
 import { deriveWatchSpec } from '@shared/watch/policy';
-import { TERMINAL_SCROLLBACK } from '@shared/tmux';
+import { TERMINAL_COLORTERM, tmuxServerOptionShell } from '@shared/tmux';
 
 
 /**
@@ -256,7 +256,7 @@ export class RemoteProvider implements WorkspaceProvider {
         // invocations and the first cold-start pane falls back to tmux's default
         // scrollback). The `-CC` step creates-or-attaches in control mode. See FR3.
         const baseCmd = [
-          `BYOBU_DISABLE=1 tmux -L ${CONTROL_SOCKET} start-server \\; set -g exit-empty off \\; set -g history-limit ${TERMINAL_SCROLLBACK}`,
+          `COLORTERM=${TERMINAL_COLORTERM} BYOBU_DISABLE=1 tmux -L ${CONTROL_SOCKET} start-server \\; ${tmuxServerOptionShell()}`,
           '&&',
           'BYOBU_DISABLE=1',
           'tmux',
@@ -356,7 +356,7 @@ export class RemoteProvider implements WorkspaceProvider {
     // execs it directly) mirrors the opener's first chained command.
     const devEnv = loadSettings().devEnv;
     const serverStartCmd =
-      `tmux -L ${CONTROL_SOCKET} start-server \\; set -g exit-empty off \\; set -g history-limit ${TERMINAL_SCROLLBACK}`;
+      `tmux -L ${CONTROL_SOCKET} start-server \\; ${tmuxServerOptionShell()}`;
     this.envLauncher = createEnvLauncher(devEnv, {
       transport: this.transport,
       scopeUnit: DEV_ENV_SCOPE_UNIT,

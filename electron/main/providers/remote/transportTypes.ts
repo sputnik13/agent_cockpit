@@ -76,14 +76,18 @@ export interface RemoteConnectOptions {
 }
 
 /**
- * Long-lived stdio duplex channel — the RPC transport. Pinned to the existing
- * `RpcStream` shape (`{ stdin, stdout }`) so `rpcClient.ts` consumes it
- * untouched: `stdout` emits Node `'data'` (raw `Buffer`), `'end'`, and
- * `'error'` (the RPC decoder's `failAll` depends on `end`/`error`).
+ * Long-lived stdio duplex channel — the RPC transport. `stdin`/`stdout` match the
+ * `RpcStream` shape (`{ stdin, stdout }`) so `rpcClient.ts` consumes it untouched:
+ * `stdout` emits Node `'data'` (raw `Buffer`), `'end'`, and `'error'` (the RPC
+ * decoder's `failAll` depends on `end`/`error`). `stderr` carries the remote
+ * command's stderr as raw bytes; the helper launcher drains it and surfaces it to
+ * the app so remote errors/panics are not silently dropped (an unread stderr
+ * stream can also apply backpressure to the remote process).
  */
 export interface DuplexChannel {
   readonly stdin: Writable;
   readonly stdout: Readable;
+  readonly stderr: Readable;
 }
 
 /**
@@ -121,7 +125,7 @@ export interface OpenPtyOptions {
 export interface OpenShellOptions {
   cols: number;
   rows: number;
-  /** Terminal type; defaults to `'xterm-color'`. */
+  /** Terminal type; defaults to `'xterm-256color'`. */
   term?: string;
 }
 

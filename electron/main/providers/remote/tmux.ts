@@ -24,6 +24,7 @@ import type {
 } from '../types';
 import type { PtyChannel, RemoteTransport } from './transportTypes';
 import { tmuxSocket } from '../../instanceConfig';
+import { TERMINAL_TERM, TERMINAL_COLORTERM, tmuxServerOptionShell } from '@shared/tmux';
 
 /** Backoff schedule (ms) for re-attaching after a transport drop. */
 const REATTACH_BACKOFF_MS = [500, 1_000, 2_000, 5_000];
@@ -50,13 +51,16 @@ interface RemoteTerminal {
 /** Build the attach-or-create tmux command for a project session. */
 function tmuxCommand(sessionName: string, cwd: string | undefined): string {
   const session = shellQuote(sessionName);
-  // `new-session -A` attaches if the session exists, else creates it. `-c` sets
-  // the start directory for a freshly created session. `-L` uses a dedicated
-  // socket so agent-cockpit sessions never mix with the user's tmux / byobu server.
+  // Apply the shared server options before the session (single source, so the
+  // session-per-tab backend gets history-limit/mouse/color too); COLORTERM lets
+  // the server advertise truecolor. `new-session -A` attaches if the session
+  // exists, else creates it (`-c` sets the start dir for a fresh one). `-L` uses
+  // a dedicated socket so cockpit sessions never mix with the user's tmux/byobu.
+  const prefix = `COLORTERM=${TERMINAL_COLORTERM} tmux -L ${SOCKET} start-server \\; ${tmuxServerOptionShell()} \\; new-session -A -s ${session}`;
   if (cwd) {
-    return `tmux -L ${SOCKET} new-session -A -s ${session} -c ${shellQuote(cwd)}`;
+    return `${prefix} -c ${shellQuote(cwd)}`;
   }
-  return `tmux -L ${SOCKET} new-session -A -s ${session}`;
+  return prefix;
 }
 
 /** Single-quote a value for safe interpolation into a remote shell command. */
@@ -112,7 +116,7 @@ export class RemoteTerminalManager {
   /** Open a shell channel and (re)attach the tmux session for this terminal. */
   private async attach(term: RemoteTerminal): Promise<void> {
     const channel = await this.transport.openShell({
-      term: 'xterm-color',
+      term: TERMINAL_TERM,
       cols: term.cols,
       rows: term.rows,
     });

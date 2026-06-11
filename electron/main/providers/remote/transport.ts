@@ -28,6 +28,7 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { ConnectionState, RemoteConnectionSpec } from '../types';
 import { resolveSshConfig } from './sshConfigResolve';
+import { TERMINAL_TERM } from '@shared/tmux';
 import {
   RemoteTransportError,
   type DuplexChannel,
@@ -294,7 +295,7 @@ export class Ssh2Transport implements RemoteTransport {
           reject(new RemoteTransportError(`execStream failed: ${err.message}`, '', 'connect', err));
           return;
         }
-        resolve({ stdin: channel, stdout: channel });
+        resolve({ stdin: channel, stdout: channel, stderr: channel.stderr });
       });
     });
   }
@@ -321,7 +322,7 @@ export class Ssh2Transport implements RemoteTransport {
         command,
         {
           pty: {
-            term: 'xterm-256color',
+            term: TERMINAL_TERM,
             cols: opts.cols,
             rows: opts.rows,
             width: 0,
@@ -342,14 +343,14 @@ export class Ssh2Transport implements RemoteTransport {
 
   /**
    * Open a login/interactive shell channel (raw bytes) — terminals. `term`
-   * defaults to `'xterm-color'`.
+   * defaults to `TERMINAL_TERM` (`xterm-256color`).
    */
   openShell(opts: OpenShellOptions): Promise<PtyChannel> {
     return new Promise<PtyChannel>((resolve, reject) => {
       const conn = this.tryClient(reject);
       if (!conn) return;
       conn.shell(
-        { term: opts.term ?? 'xterm-color', cols: opts.cols, rows: opts.rows },
+        { term: opts.term ?? TERMINAL_TERM, cols: opts.cols, rows: opts.rows },
         (err, channel) => {
           if (err) {
             reject(new RemoteTransportError(`openShell failed: ${err.message}`, '', 'connect', err));

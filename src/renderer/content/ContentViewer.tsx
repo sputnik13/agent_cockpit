@@ -142,7 +142,13 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                   <Spinner />
                 </Centered>
               ) : (
-                <DiffView patch={diff.patch} emptyHint="No textual diff for this file." />
+                <DiffView
+                  patch={diff.patch}
+                  emptyHint="No textual diff for this file."
+                  filePath={path}
+                  worktreePath={worktreePath}
+                  baseline={baseline}
+                />
               ))}
 
             {mode === 'rendered' &&

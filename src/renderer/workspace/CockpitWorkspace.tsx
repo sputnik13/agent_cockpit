@@ -131,6 +131,33 @@ export function CockpitWorkspace(): JSX.Element {
     if (apiRef.current) loadLayout(apiRef.current, activeId, next);
   };
 
+  // Keep a stable ref so the keydown handler below doesn't need re-registration
+  // when activeId changes (same pattern as viewRef).
+  const choosePresetRef = useRef(choosePreset);
+  choosePresetRef.current = choosePreset;
+
+  // Cmd+E → Edit view; Cmd+R → Review view (Ctrl+E/Ctrl+R on Win/Linux).
+  // Platform-gated to the PRIMARY modifier only: on macOS that is Cmd, so
+  // Ctrl+E/Ctrl+R stay with the focused terminal (end-of-line / reverse-i-search)
+  // instead of being stolen by the view switch.
+  useEffect(() => {
+    const isMac = navigator.platform.toUpperCase().includes('MAC');
+    const onKey = (e: KeyboardEvent): void => {
+      const primary = isMac ? e.metaKey : e.ctrlKey;
+      const other = isMac ? e.ctrlKey : e.metaKey;
+      if (!primary || other || e.altKey || e.shiftKey) return;
+      if (e.key === 'e' || e.key === 'E') {
+        e.preventDefault();
+        choosePresetRef.current('edit');
+      } else if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        choosePresetRef.current('review');
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+
   /** Reset the current view's layout to a proportional `1:center:1` default. */
   const resetTo = (center: (typeof COLUMN_RATIOS)[number]): void => {
     if (activeId) localStorage.removeItem(layoutKey(activeId, viewRef.current));

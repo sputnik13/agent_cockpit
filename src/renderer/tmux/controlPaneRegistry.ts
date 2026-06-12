@@ -20,6 +20,7 @@ import { createPaneRenderer, type PaneRenderer } from './paneRenderer';
 import { useTmuxStore } from './tmuxStore';
 import { whenReady } from './controlSession';
 import { extractScreenTitle, resetScreenTitleState } from './extractScreenTitle';
+import { encodeWheel } from './wheelEncode';
 
 /** A live control-mode pane terminal owned by the registry, not by React. The
  *  concrete terminal lives behind {@link PaneRenderer} (xterm today, wterm
@@ -95,22 +96,33 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
   // listener on the container, so it fires before the terminal's own wheel
   // handling and works for any backend (xterm.js or wterm). Only the visible
   // (active-project) pane receives wheel events.
+  // `paneSgr` tracks whether the app negotiated SGR (1006) vs the legacy
+  // X10/standard (1000) protocol — they are mutually unparseable, so the wheel
+  // must be encoded to match (see `wheelEncode`). Both flags are queried together;
+  // without this, X10-mode apps (e.g. vim, `mouse_sgr_flag=0`) silently dropped
+  // every SGR-encoded wheel and never scrolled.
   let paneHasMouse = false;
+  let paneSgr = false;
   let mouseFlagInFlight = false;
   const refreshMouseFlag = (): void => {
     if (mouseFlagInFlight) return;
     mouseFlagInFlight = true;
     void useTmuxStore
       .getState()
-      .command(`display-message -p -t ${paneId} '#{mouse_any_flag}'`)
+      .command(`display-message -p -t ${paneId} '#{mouse_any_flag} #{mouse_sgr_flag}'`)
       .then((r) => {
-        paneHasMouse = r.lines[0]?.trim() === '1';
+        const [any, sgr] = (r.lines[0]?.trim() ?? '').split(/\s+/);
+        paneHasMouse = any === '1';
+        paneSgr = sgr === '1';
       })
       .catch(() => {})
       .finally(() => {
         mouseFlagInFlight = false;
       });
   };
+  // Warm the flags eagerly so the first wheel of the first gesture is not lost
+  // while the lazy query round-trips.
+  refreshMouseFlag();
   const onWheel = (e: WheelEvent): void => {
     refreshMouseFlag();
     if (!paneHasMouse) return; // let the renderer scroll its own buffer
@@ -126,10 +138,11 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
       m && m.h > 0
         ? Math.min(Math.max(1, Math.floor((e.clientY - rect.top) / m.h) + 1), renderer.rows || 1)
         : 1;
-    const button = e.deltaY < 0 ? 64 : 65; // SGR wheel up / down (press-only)
     const ticks = Math.min(5, Math.max(1, Math.round(Math.abs(e.deltaY) / 40)));
-    let seq = '';
-    for (let i = 0; i < ticks; i++) seq += `\x1b[<${button};${col};${row}M`;
+    // Encode in the protocol the app negotiated (SGR vs X10) — emitting the
+    // wrong one is silently dropped. X10 produces raw high bytes, so this MUST
+    // travel as a Uint8Array (the string path would UTF-8-mangle it).
+    const seq = encodeWheel({ sgr: paneSgr, up: e.deltaY < 0, col, row }, ticks);
     void useTmuxStore.getState().sendInput(projectId, paneId, seq);
   };
   container.addEventListener('wheel', onWheel, { capture: true, passive: false });

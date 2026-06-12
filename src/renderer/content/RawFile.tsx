@@ -1,4 +1,8 @@
 import { useEffect, useState } from 'react';
+import { useSettingsStore } from '@renderer/settings/settingsStore';
+import { resolveLanguage } from './highlight/languages';
+import { useHighlightedTokens } from './highlight/useHighlightedTokens';
+import { CodeTokens } from './highlight/CodeTokens';
 
 interface RawFileProps {
   worktreePath: string;
@@ -51,24 +55,41 @@ export function RawFile({ worktreePath, filePath, gitRef }: RawFileProps): JSX.E
     case 'missing':
       return <div style={{ padding: 16, color: 'var(--fg-dim)' }}>File not found at ref.</div>;
     case 'text':
-      return (
-        <pre
-          style={{
-            margin: 0,
-            padding: 16,
-            fontFamily: 'var(--font-mono)',
-            fontSize: 'var(--mono-size)',
-            whiteSpace: 'pre',
-            background: 'var(--bg)',
-            color: 'var(--fg)',
-            overflow: 'auto',
-            height: '100%',
-          }}
-        >
-          {state.content}
-        </pre>
-      );
+      return <RawText content={state.content} filePath={filePath} />;
   }
+}
+
+/** Renders the text case with progressive Shiki highlighting when the file
+ *  extension maps to a supported language. Falls back to a plain <pre> for
+ *  unknown extensions. */
+function RawText({ content, filePath }: { content: string; filePath: string }): JSX.Element {
+  const theme = useSettingsStore((s) => s.settings.theme);
+  const lang = resolveLanguage(filePath);
+  const hl = useHighlightedTokens(content, lang, theme);
+
+  const preStyle = {
+    margin: 0,
+    padding: 16,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 'var(--mono-size)',
+    whiteSpace: 'pre' as const,
+    background: 'var(--bg)',
+    color: 'var(--fg)',
+    overflow: 'auto',
+    height: '100%',
+  };
+
+  if (lang !== null && hl.state === 'ready') {
+    return (
+      <CodeTokens
+        lines={hl.lines}
+        style={{ ...preStyle, background: hl.bg || preStyle.background, color: hl.fg || preStyle.color }}
+      />
+    );
+  }
+
+  // Plain fallback: unknown language, or tokens not yet ready (progressive first paint).
+  return <pre style={preStyle}>{content}</pre>;
 }
 
 function fmtSize(n: number): string {

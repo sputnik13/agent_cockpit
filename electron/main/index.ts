@@ -6,6 +6,7 @@ import { registerIpc } from './ipc';
 import { sessionManager } from './providers';
 import { startSessionReaper, type SessionReaperHandle } from './providers/sessionReaper';
 import { loadSettings } from './config';
+import { installApplicationMenu } from './menu';
 
 let mainWindow: BrowserWindow | null = null;
 let diagnosticsWindow: BrowserWindow | null = null;
@@ -31,6 +32,7 @@ export function openDiagnosticsWindow(): void {
 
 app.whenReady().then(() => {
   setupSecurity();
+  installApplicationMenu();
   getDb(); // open + migrate app-local store
   registerIpc(() => mainWindow, openDiagnosticsWindow);
   // Start the idle session reaper (the single periodic main-process timer). It

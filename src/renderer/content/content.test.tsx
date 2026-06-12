@@ -130,7 +130,12 @@ describe('ContentViewer', () => {
     await waitFor(() =>
       expect(readFile).toHaveBeenCalledWith('src/file.ts', { ref: 'HEAD' }),
     );
-    await screen.findByText('raw text body');
+    // The file renders via RawFile which may split content into token spans when
+    // Shiki highlighting is active. Match the concatenated text in any container.
+    await waitFor(() => {
+      const pre = document.querySelector('pre');
+      expect(pre?.textContent).toBe('raw text body');
+    });
     expect(screen.getByRole('tab', { name: 'Raw' })).toHaveAttribute('aria-selected', 'true');
   });
 

@@ -619,6 +619,166 @@ replaced: remote Changes panel not auto-refreshing on `br` flushes/commits/branc
 switches, remote workgraph panel not live-updating, and `.beads` entries
 cluttering the Changes list.
 
+## Content Panel Highlighting
+
+The Content panel supports **Shiki-based syntax highlighting** for the `raw` and `diff`
+views. Supported languages (TypeScript/TSX, JavaScript/JSX, Java, Python, Rust, Go, HTML,
+CSS, JSON, and shell — bash/sh/zsh) are defined entirely by the language registry below;
+extending the set is a registry-only change. Markdown highlighting uses a separate
+pipeline (`rehype-highlight` in `markdown.tsx`) and is not part of this subsystem.
+
+### Language Registry (single authoring site)
+
+`src/renderer/content/highlight/languages.ts` is the **one place** that maps file
+extensions to Shiki TextMate grammars. Adding a new language is two changes: one entry in
+the `ENTRIES` map + one fine-grained grammar import. No other module in the highlight
+pipeline changes. `resolveLanguage(filePath)` is the public API; it returns a `LangId`
+or `null` for plaintext fallback.
+
+### Highlighter core
+
+`src/renderer/content/highlight/highlighter.ts` holds a promise-memoized singleton
+(`shiki/core` + the pure-JavaScript RegExp engine — no Oniguruma WASM, no web workers)
+that loads both Solarized themes once. Language grammars are lazy-loaded on first use and
+promise-memoized. `tokenizeLines(code, langId, theme)` is the public entry point; it
+returns a `TokenizeResult` with per-line token arrays and theme `fg`/`bg` colors (not
+HTML — no `dangerouslySetInnerHTML`).
+
+### CodeTokens render boundary
+
+`src/renderer/content/highlight/CodeTokens.tsx` is the **render seam** that turns a
+`TokenLine[]` into React elements:
+
+- `CodeTokens` renders a whole `<pre><code>` block (used by `raw` mode).
+- `CodeLineTokens` renders one line's tokens as `<span>` elements (used by `diff` mode,
+  one line at a time).
+
+Text content is preserved verbatim inside `<span>` text nodes — no `dangerouslySetInnerHTML`
+— so the find-in-content pass (CSS Custom Highlight API over text nodes) works over
+highlighted code (AC5). This boundary is also the **future edit-toggle seam** (FR7): a
+future editable mode can mount a CodeMirror 6 renderer alongside this read path without
+changing any call site.
+
+### Progressive enhancement hook
+
+`useHighlightedTokens(content, lang, theme)` returns `{ state: 'plain' }` synchronously
+so first paint is immediately readable, then resolves tokens asynchronously and flips to
+`{ state: 'ready', lines, fg, bg }`. Re-runs on content, language, or theme change.
+
+### Raw mode wiring
+
+`RawFile.tsx` uses `resolveLanguage` + `useHighlightedTokens` + `CodeTokens` for the
+`text` case when a language is resolved. The plain `<pre>` is used for unknown extensions
+and for the progressive first-paint before tokens are ready. Loading/binary/too-large/missing
+cases are unchanged.
+
+### Diff mode wiring
+
+For a supported-language changed file, `DiffView.tsx` fetches the **full old content**
+(`readFile` at the baseline ref) and **full new content** (`readFile` at the working tree)
+and tokenizes each side in full via `tokenizeLines`. This preserves cross-line grammar
+state (multi-line strings, block comments, template literals). For each rendered diff line,
+`pickTokenLine` maps the 1-based `PatchLine.oldLine`/`newLine` to the correct token array
+entry (0-based index):
+
+- `del` lines → old-side token array (keyed by `oldLine`)
+- `add` lines → new-side token array (keyed by `newLine`)
+- `context` lines → new-side first, old-side fallback
+
+Add-only files (no baseline) tokenize only the new side; delete-only files tokenize only
+the old side; absent sides render plain. The existing add/delete background tints and
+old/new line-number gutters are preserved. Fallback to plain diff on unsupported language,
+files exceeding 256 KiB, or tokenize failure.
+
+### Theme reactivity
+
+Both `RawFile` and `DiffView` subscribe to `useSettingsStore(s => s.settings.theme)` so
+a Settings → theme toggle recolors live without a reload.
+
+### Bundle shape
+
+Shiki grammars are emitted as separate lazy chunks by Vite. Only the 8 initial grammars
+are in the bundle; adding a language is a registry entry + one new grammar import.
+
+## Explorer File Icons
+
+The Explorer file tree renders **VS Code-style icons** to differentiate folders from files
+and to show recognizable brand logos for known filetypes (replacing the earlier
+`▸`/`▾`/`·` glyphs). A curated subset of [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)
+SVGs (MIT) is **vendored into the repo** under `src/renderer/explorer/icons/svg/` — only the
+~24 icons actually rendered, not the full upstream set. `material-icon-theme` is a
+dev-only dependency used to source the SVGs; there is **no runtime dependency**, and the
+vendored copies plus license/version provenance are recorded in
+`src/renderer/explorer/icons/ATTRIBUTION.md`.
+
+### Color rule
+
+File-type brand logos render in their **own published colors** (the fill is baked into the
+SVG). The three theme-tinted glyphs — `folder`, `folder-open`, and the generic `file`
+fallback — have their fixed fill normalized to `fill="currentColor"` at vendor time, so the
+renderer tints them with the app `text-dim` token and they stay cohesive with the Solarized
+UI in either theme.
+
+### Icon registry (single authoring site)
+
+`src/renderer/explorer/icons/fileIcons.ts` is the **one place** that maps a file's base name
+to a vendored icon. Adding a new filetype icon is two changes: drop its SVG under `svg/` +
+add one import and one mapping entry. `resolveFileIcon(name)` is the public API and returns
+an `IconId` using this resolution order:
+
+1. **Exact lowercase filename** (`package.json` → `nodejs`, `Cargo.toml` → `rust`,
+   `Dockerfile` → `docker`, `.gitignore` → `git`, …) — so project-marker files beat their
+   bare extension.
+2. The **`tsconfig*.json` pattern** → `tsconfig`.
+3. **File extension** (`ts` → `typescript`, `tsx` → `react_ts`, `py` → `python`,
+   `sh`/`bash`/`zsh` → `console`, image extensions → `image`, …).
+4. The generic **`file`** fallback for everything else.
+
+`getIconSvg(id)` returns the raw SVG markup; `isTintedIcon(id)` reports whether an id is in
+the tinted set (`file`, `folder`, `folder-open`).
+
+### Render boundary
+
+`IconSvg.tsx` is the render primitive: it draws a vendored SVG (raw markup, injected via
+`dangerouslySetInnerHTML` — the assets are trusted and repo-vendored) inside a fixed 16px
+box, applying `text-dim` only when the icon is tinted. `FileTypeIcon` (resolves a filename
+to its icon) and `FolderIcon` (open/closed, always tinted) wrap that primitive.
+
+### Explorer wiring
+
+`ExplorerPanel.tsx` renders the icons in the `Row` `prefix` slot: `DirNode` shows the
+expand chevron plus a `FolderIcon` (open icon when expanded), and `FileNode` shows a
+chevron-width spacer plus a `FileTypeIcon`, keeping the icon column aligned across folders
+and files. Listing, selection, and reveal-scroll behavior are unchanged.
+
+## Application Menu
+
+The app installs a **custom Electron application menu** at `app.whenReady()` via
+`electron/main/menu.ts`. This replaces Electron's default menu and is an architectural
+fact because it governs which keyboard accelerators are owned by the menu vs. the renderer.
+
+The key difference from the default: `role: 'reload'` (Cmd/Ctrl+R) is **omitted** so the
+renderer's Cmd/Ctrl+R view-switch shortcut reaches the `keydown` handler in
+`CockpitWorkspace.tsx`. `role: 'forceReload'` (Cmd/Ctrl+Shift+R) is retained for developer
+use. All other standard menu roles and items (Edit, Window, Help, macOS app menu) are
+preserved. The menu is cross-platform (macOS app menu block + Win/Linux file/quit item).
+
+Future menu items (e.g. a "Go to project" action) should be added to `electron/main/menu.ts`.
+
+## Keyboard Shortcuts
+
+The app has two application-level view-layout shortcuts, handled by a `keydown` listener
+in `CockpitWorkspace.tsx`:
+
+- **Cmd/Ctrl+E** → `choosePreset('edit')` — switch to Edit workspace layout
+- **Cmd/Ctrl+R** → `choosePreset('review')` — switch to Review workspace layout
+
+`metaKey` is used on macOS; `ctrlKey` on Win/Linux; no other modifiers. Both call
+`preventDefault()`. These shortcuts persist the chosen layout per project via
+`localStorage` (existing `choosePreset` behavior). Cmd/Ctrl+R works reliably only because
+the custom application menu removes the `reload` accelerator from the Electron menu (see
+Application Menu above).
+
 ## Configuration and Environment Contracts
 
 - **Remote host prerequisites:** an SSH account, `tmux`, and the ability to run

@@ -3,6 +3,8 @@ import type { DirEntry } from '@shared/providers/types';
 import { agentCockpit, useProjectsStore, useSessionStore, isDisconnected } from '../providerClient';
 import { useContentSelection } from '../content';
 import { useExplorerStore } from './explorerStore';
+import { FileTypeIcon } from './icons/FileTypeIcon';
+import { FolderIcon } from './icons/FolderIcon';
 import { EmptyState, Panel, PanelBody, PanelHeader, Row, Spinner } from '../ui';
 
 const IGNORED = new Set(['.git', 'node_modules', '.DS_Store']);
@@ -86,7 +88,12 @@ function DirNode({ entry, depth }: { entry: DirEntry; depth: number }): JSX.Elem
     <>
       <Row
         onClick={() => activeId && toggle(activeId, entry.path)}
-        prefix={<span className="w-3 text-dim">{open ? '▾' : '▸'}</span>}
+        prefix={
+          <span className="flex items-center gap-1">
+            <span className="w-3 text-dim">{open ? '▾' : '▸'}</span>
+            <FolderIcon open={open} />
+          </span>
+        }
         style={{ paddingLeft: depth * INDENT + 8 }}
         title={entry.path}
       >
@@ -126,7 +133,13 @@ function FileNode({ entry, depth }: { entry: DirEntry; depth: number }): JSX.Ele
             select(activeId, { path: entry.path, worktreePath: '', baseline: 'HEAD', kind: 'file' });
           }
         }}
-        prefix={<span className="w-3 text-center text-dim">·</span>}
+        prefix={
+          <span className="flex items-center gap-1">
+            {/* spacer aligns the file icon under the folder chevron column */}
+            <span className="w-3" />
+            <FileTypeIcon name={entry.name} />
+          </span>
+        }
         style={{ paddingLeft: depth * INDENT + 8 }}
         title={entry.path}
       >

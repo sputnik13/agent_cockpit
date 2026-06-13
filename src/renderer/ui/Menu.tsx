@@ -27,7 +27,16 @@ export function DropdownMenu({ trigger, items }: { trigger: ReactNode; items: Me
     <RDropdown.Root>
       <RDropdown.Trigger asChild>{trigger}</RDropdown.Trigger>
       <RDropdown.Portal>
-        <RDropdown.Content className={CONTENT} sideOffset={4} align="start">
+        {/* Don't let Radix restore focus to the trigger on close: a selected
+            item may move keyboard focus into a panel (e.g. opening a panel), and
+            the default restore would steal it back to the button. */}
+        <RDropdown.Content
+          className={CONTENT}
+          sideOffset={4}
+          align="start"
+          onCloseAutoFocus={(e) => e.preventDefault()}
+        >
+
           {items.map((item, i) => (
             <RDropdown.Item
               key={i}

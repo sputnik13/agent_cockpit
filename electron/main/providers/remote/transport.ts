@@ -28,6 +28,7 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { ConnectionState, RemoteConnectionSpec } from '../types';
 import { resolveSshConfig } from './sshConfigResolve';
+import { logger } from '../../logger';
 import { TERMINAL_TERM } from '@shared/tmux';
 import {
   RemoteTransportError,
@@ -132,6 +133,13 @@ export class Ssh2Transport implements RemoteTransport {
     const conn = this.createClient();
     this.conn = conn;
 
+    // Display target: show the alias AND what it resolved to, so a failure makes
+    // it obvious whether ~/.ssh/config resolution happened.
+    const target =
+      config.host === spec.host
+        ? `${spec.host}:${config.port}`
+        : `${spec.host} -> ${config.host}:${config.port}`;
+
     return new Promise<void>((resolve, reject) => {
       let settled = false;
 
@@ -172,15 +180,15 @@ export class Ssh2Transport implements RemoteTransport {
         // A host-key rejection from our hostVerifier surfaces as an ssh2 error
         // whose message/level mentions host-key verification.
         if (/host key verification|hostkey|host-key/i.test(err.message)) {
-          fail('hostkey', `Host key verification failed for ${spec.host}: ${err.message}`, err);
+          fail('hostkey', `Host key verification failed for ${target}: ${err.message}`, err);
           return;
         }
         const phase = /authentication/i.test(err.message) ? 'auth' : 'connect';
-        fail(phase, `SSH connection to ${spec.host}:${spec.port} failed: ${err.message}`, err);
+        fail(phase, `SSH connection to ${target} failed: ${err.message}`, err);
       };
 
       const onTimeout = (): void => {
-        fail('timeout', `SSH connection to ${spec.host}:${spec.port} timed out`);
+        fail('timeout', `SSH connection to ${target} timed out`);
       };
 
       conn.once('ready', onReady);
@@ -190,7 +198,7 @@ export class Ssh2Transport implements RemoteTransport {
       try {
         conn.connect(config);
       } catch (err) {
-        fail('connect', `Failed to initiate SSH connection to ${spec.host}:${spec.port}`, err);
+        fail('connect', `Failed to initiate SSH connection to ${target}`, err);
       }
     });
   }
@@ -401,6 +409,18 @@ export class Ssh2Transport implements RemoteTransport {
     const port = spec.port === 22 ? (resolved.port ?? spec.port) : spec.port;
     const username = spec.user || resolved.user || spec.user;
     const identityPath = spec.identityPath ?? resolved.identityFile;
+
+    // Diagnostic: surface whether ~/.ssh/config resolved the host. A connect
+    // failure otherwise can't be told apart from "resolution never ran". No
+    // secrets — alias, resolved host/port/user and identity basename only.
+    logger.info(
+      `ssh-config resolve: "${spec.host}" -> host=${host} port=${port} user=${username} ` +
+        `identity=${identityPath ? basename(identityPath) : 'agent'} ` +
+        (resolved.hostName
+          ? '(resolved from ~/.ssh/config)'
+          : '(no HostName matched in ~/.ssh/config; using host as-is)'),
+      'remote-connect',
+    );
 
     const config: ConnectConfig = {
       host,

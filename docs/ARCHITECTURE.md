@@ -779,6 +779,49 @@ in `CockpitWorkspace.tsx`:
 the custom application menu removes the `reload` accelerator from the Electron menu (see
 Application Menu above).
 
+## Panel Focus
+
+Activating a panel has **two distinct concerns** that are deliberately separated:
+**visual focus** (which Dockview panel/tab is active) is owned entirely by Dockview
+(`panel.api.setActive()`); **keyboard focus** (DOM focus, so typing/Tab/shortcuts target the
+panel) is routed through one shared seam, `src/renderer/workspace/panelFocus.ts`.
+Without this seam, `api.addPanel()` would make a new panel visually active but leave keyboard
+focus wherever it was — the original "open a panel, can't type in it" bug.
+
+### Focus registry (single seam)
+
+`panelFocus.ts` maps a `PanelId` to a focus handler. It is a pure module (no React/DOM) with
+three behaviors that make it robust against real ordering/threading:
+
+- **Pending focus** — `focusPanel(id)` for a panel whose handler has not mounted yet (the
+  common `addPanel` case: the active-panel event fires before the new panel's effect
+  registers) records the id as pending; the handler fires the instant it registers.
+- **Suppression** — `setFocusSuppressed(true)` makes `focusPanel` a no-op so the cascade of
+  `setActive` calls during programmatic layout/preset application does not thrash focus.
+- **Force** — `focusPanelForce(id)` moves focus even while suppressed, for explicit intents
+  (project-switch restore, Ctrl+\`).
+
+### Focusable host + per-panel overrides
+
+`PanelHost` (`panels.tsx`) wraps every panel in a focusable root (`tabIndex={-1}`,
+layout-neutral) and registers a focus handler keyed by the panel id. The default handler
+focuses the wrapper **only when focus is not already inside the panel** (a containment guard,
+so clicking an element inside an inactive panel is not refocused away). A panel may override
+the default with its own target via `usePanelFocusOverride` (`panelFocusContext.tsx`): the
+**Terminal** panel overrides to dispatch `FOCUS_TERMINAL_EVENT` (focusing the active xterm
+pane through the existing, proven path that both the session and control-mode backends listen
+for), and the **Run** panel overrides to focus its command input.
+
+### Activation wiring
+
+`CockpitWorkspace.tsx` drives the seam at every activation site: `onDidActivePanelChange`
+calls `focusPanel(panel.id)` (covers tab clicks and menu-opens), `loadLayout` wraps layout
+application in `setFocusSuppressed(true)` cleared on the next animation frame, and
+`restoreFocusedPanel` + the Ctrl+\` handler call `focusPanelForce`. This generalized the
+former terminal-only `FOCUS_TERMINAL_EVENT` special case to all panels via their registered
+handlers. `focusMemory.ts` is unrelated — it is `localStorage` persistence of *which* panel
+was last active per project, not a focus mechanism.
+
 ## Configuration and Environment Contracts
 
 - **Remote host prerequisites:** an SSH account, `tmux`, and the ability to run

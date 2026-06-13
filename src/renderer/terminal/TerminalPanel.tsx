@@ -6,6 +6,7 @@ import * as registry from './terminalRegistry';
 import { SessionsDialog } from '../sessions';
 import { ControlTerminalPanel } from '../tmux/ControlTerminalPanel';
 import { useSettingsStore } from '../settings';
+import { usePanelFocusOverride } from '../workspace/panelFocusContext';
 import { Button, EmptyState, IconButton, TabbedPanelHeader, cn } from '../ui';
 
 /**
@@ -16,6 +17,9 @@ import { Button, EmptyState, IconButton, TabbedPanelHeader, cn } from '../ui';
  */
 export function TerminalPanel(): JSX.Element {
   const backend = useSettingsStore((s) => s.settings.terminalBackend);
+  // Activating the Terminal panel focuses the active xterm pane, reusing the
+  // proven FOCUS_TERMINAL_EVENT path that both backends already listen for.
+  usePanelFocusOverride(() => window.dispatchEvent(new Event(registry.FOCUS_TERMINAL_EVENT)));
   return backend === 'control-mode' ? <ControlTerminalPanel /> : <SessionTerminalPanel />;
 }
 

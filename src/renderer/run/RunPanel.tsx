@@ -3,6 +3,7 @@ import { agentCockpit, selectActiveProject, useProjectsStore } from '../provider
 import { XtermView } from '../terminal/XtermView';
 import * as registry from '../terminal/terminalRegistry';
 import { useSettingsStore } from '../settings';
+import { usePanelFocusOverride } from '../workspace/panelFocusContext';
 import { selectActiveView, useTmuxStore } from '../tmux/tmuxStore';
 import { PaneXterm, firstPaneId } from '../tmux/PaneXterm';
 import {
@@ -41,6 +42,11 @@ export function RunPanel(): JSX.Element {
   // Per-project guard so the on-demand create fires at most once per project
   // (runWindowId stays null until tmux's %window-add lands in the store).
   const creatingRunFor = useRef<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Activating the Run panel focuses the command input (no-ops before a project
+  // is selected, when the input is not rendered).
+  usePanelFocusOverride(() => inputRef.current?.focus());
 
   // Rebind the field when the active project (or its saved command) changes.
   useEffect(() => {
@@ -105,6 +111,7 @@ export function RunPanel(): JSX.Element {
     <div className="flex h-full min-h-0 flex-col bg-bg">
       <div className="flex shrink-0 items-center gap-1.5 border-b border-edge bg-panel px-2 py-1.5">
         <input
+          ref={inputRef}
           className={field}
           placeholder="Run command (e.g. npm run dev)"
           value={draft}

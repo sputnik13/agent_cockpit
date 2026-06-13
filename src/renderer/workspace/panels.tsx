@@ -1,5 +1,14 @@
-import { useEffect, useMemo, useReducer, type FunctionComponent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  type FunctionComponent,
+} from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
+import { registerPanelFocus } from './panelFocus';
+import { PanelFocusProvider } from './panelFocusContext';
 import { BeadsPanel, TaskDetail } from '../beads';
 import { ChangesPanel } from '../changes';
 import { ContentViewer, useContentSelection } from '../content';
@@ -56,10 +65,39 @@ function PanelHost(props: IDockviewPanelProps<{ panelId: PanelId }>): JSX.Elemen
     }),
     [api, isMaximized],
   );
-  const Comp = REGISTRY[props.params.panelId];
+  const panelId = props.params.panelId;
+  const Comp = REGISTRY[panelId];
+
+  // Keyboard-focus seam: a focusable wrapper root + a registered focus handler.
+  // A panel may override the default (terminal -> xterm, run -> input) via the
+  // PanelFocusProvider; otherwise the default focuses the wrapper, but only when
+  // focus is not already inside the panel (so clicking an inner element is not
+  // refocused away).
+  const rootRef = useRef<HTMLDivElement>(null);
+  const overrideRef = useRef<(() => void) | null>(null);
+  const setFocusOverride = useCallback((handler: (() => void) | null) => {
+    overrideRef.current = handler;
+  }, []);
+  useEffect(
+    () =>
+      registerPanelFocus(panelId, () => {
+        if (overrideRef.current) {
+          overrideRef.current();
+          return;
+        }
+        const root = rootRef.current;
+        if (root && !root.contains(document.activeElement)) root.focus();
+      }),
+    [panelId],
+  );
+
   return (
     <PanelFullscreenProvider value={fullscreen}>
-      {Comp ? <Comp /> : <EmptyState title="Unknown panel" hint={props.params.panelId} />}
+      <PanelFocusProvider value={setFocusOverride}>
+        <div ref={rootRef} tabIndex={-1} className="h-full min-h-0 outline-none">
+          {Comp ? <Comp /> : <EmptyState title="Unknown panel" hint={panelId} />}
+        </div>
+      </PanelFocusProvider>
     </PanelFullscreenProvider>
   );
 }

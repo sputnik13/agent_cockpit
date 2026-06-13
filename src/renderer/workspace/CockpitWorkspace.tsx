@@ -14,7 +14,7 @@ import { readFocus, writeFocus } from './focusMemory';
 import { PANEL_TITLES, PanelIds, type PanelId } from './panelIds';
 import { Button, DropdownMenu, Toolbar, ToolbarSpacer, type MenuItemDef } from '../ui';
 import { useProjectsStore } from '../providerClient';
-import { FOCUS_TERMINAL_EVENT } from '../terminal/terminalRegistry';
+import { focusPanel, focusPanelForce, setFocusSuppressed } from './panelFocus';
 
 /** Last view used for a project (defaults to edit). */
 function readView(projectId: string): PresetName {
@@ -35,35 +35,42 @@ export function CockpitWorkspace(): JSX.Element {
   const viewRef = useRef<PresetName>(view);
   viewRef.current = view;
 
+  // Applying a layout/preset activates panels in a cascade; suppress keyboard
+  // focus during it so it does not thrash, then clear on the next frame (covers
+  // both synchronous and deferred Dockview active-panel events). An explicit
+  // restoreFocusedPanel runs after and uses focusPanelForce to bypass this.
   const loadLayout = useCallback(
     (api: DockviewApi, projectId: string | null, which: PresetName) => {
-      const saved = projectId ? localStorage.getItem(layoutKey(projectId, which)) : null;
-      if (saved) {
-        try {
-          api.fromJSON(JSON.parse(saved));
-          return;
-        } catch {
-          /* fall through to preset */
+      setFocusSuppressed(true);
+      try {
+        const saved = projectId ? localStorage.getItem(layoutKey(projectId, which)) : null;
+        if (saved) {
+          try {
+            api.fromJSON(JSON.parse(saved));
+            return;
+          } catch {
+            /* fall through to preset */
+          }
         }
+        applyPreset(api, which);
+      } finally {
+        requestAnimationFrame(() => setFocusSuppressed(false));
       }
-      applyPreset(api, which);
     },
     [],
   );
 
   // Restore the panel that had focus for this project (remembered per project).
-  // Display-only routing: setActive makes it the active Dockview panel; for the
-  // Terminal panel we also nudge keyboard focus into the active pane (the
-  // control panel handles FOCUS_TERMINAL_EVENT once laid out — F1).
+  // setActive makes it the active Dockview panel; focusPanelForce moves keyboard
+  // focus into it through the shared seam (the panel's registered handler — the
+  // Terminal's override focuses its active xterm pane), bypassing suppression.
   const restoreFocusedPanel = useCallback((api: DockviewApi, projectId: string | null) => {
     const saved = readFocus('panel', projectId);
     if (!saved) return;
     const panel = api.getPanel(saved);
     if (!panel) return;
     panel.api.setActive();
-    if (saved === PanelIds.terminal) {
-      requestAnimationFrame(() => window.dispatchEvent(new Event(FOCUS_TERMINAL_EVENT)));
-    }
+    focusPanelForce(saved as PanelId);
   }, []);
 
   const onReady = useCallback(
@@ -75,10 +82,27 @@ export function CockpitWorkspace(): JSX.Element {
         const id = useProjectsStore.getState().activeId;
         if (id) localStorage.setItem(layoutKey(id, viewRef.current), JSON.stringify(event.api.toJSON()));
       });
-      // Remember which panel has focus per project, so a switch-back restores it.
+      // Remember which panel has focus per project, so a switch-back restores it,
+      // and move keyboard focus into the newly active panel (tab click, menu-open
+      // via addPanel). Suppressed during layout/preset application.
+      //
+      // Only move focus on a GENUINE active-panel change. Dockview re-emits this
+      // for the SAME panel when focus churns within it (e.g. a terminal split
+      // remounts panes); re-running focusPanel then would dispatch the terminal's
+      // focus override against the lagging active pane and steal focus back to the
+      // old split. writeFocus stays unconditional.
+      let lastActivePanelId: string | null = null;
       event.api.onDidActivePanelChange((panel) => {
         const id = useProjectsStore.getState().activeId;
         if (id && panel) writeFocus('panel', id, panel.id);
+        if (!panel) {
+          lastActivePanelId = null;
+          return;
+        }
+        if (panel.id !== lastActivePanelId) {
+          lastActivePanelId = panel.id;
+          focusPanel(panel.id as PanelId);
+        }
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -107,8 +131,8 @@ export function CockpitWorkspace(): JSX.Element {
 
   // Ctrl+` focuses the Terminal panel from anywhere (VS Code convention) AND
   // moves keyboard focus into the active terminal so the user can type at once.
-  // setActive only activates the Dockview panel; the mounted terminal panel
-  // handles FOCUS_TERMINAL_EVENT to focus its active xterm once it is laid out.
+  // setActive only activates the Dockview panel; focusPanelForce routes through
+  // the shared seam to the Terminal's override (focus the active xterm pane).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.ctrlKey && !e.metaKey && !e.altKey && e.code === 'Backquote') {
@@ -116,7 +140,7 @@ export function CockpitWorkspace(): JSX.Element {
         if (panel) {
           e.preventDefault();
           panel.api.setActive();
-          requestAnimationFrame(() => window.dispatchEvent(new Event(FOCUS_TERMINAL_EVENT)));
+          focusPanelForce(PanelIds.terminal);
         }
       }
     };
@@ -128,7 +152,15 @@ export function CockpitWorkspace(): JSX.Element {
     setView(next);
     viewRef.current = next;
     if (activeId) localStorage.setItem(activeViewKey(activeId), next);
-    if (apiRef.current) loadLayout(apiRef.current, activeId, next);
+    if (apiRef.current) {
+      loadLayout(apiRef.current, activeId, next);
+      // loadLayout lays panels out with focus suppressed; move keyboard focus
+      // into the view's active panel (e.g. the terminal) so a keyboard
+      // view-switch is immediately typeable without a click. focusPanelForce
+      // bypasses the suppression; the pending path handles a not-yet-mounted panel.
+      const active = apiRef.current.activePanel?.id as PanelId | undefined;
+      if (active) focusPanelForce(active);
+    }
   };
 
   // Keep a stable ref so the keydown handler below doesn't need re-registration

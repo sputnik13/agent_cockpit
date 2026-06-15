@@ -62,8 +62,16 @@ export function PaneXterm({
     // toggle does not re-acquire/re-attach the pane (the transition effect below
     // owns ongoing focus). Captures the mount-time value to focus a pane that is
     // already active on mount (the reconnect-rebuild case).
-    let raf = 0;
-    if (activeRef.current) raf = requestAnimationFrame(() => entry.renderer.focus());
+    // Re-check `active` at FIRE time, not schedule time: a split restructures the
+    // layout tree and remounts the pre-existing panes, so a pane that mounts
+    // already-active can be superseded by the new split's pane before this frame
+    // runs. Focusing on the stale schedule-time value let the remounting old pane
+    // steal focus back from the new split (a race — sometimes it won). Only focus
+    // if this pane is STILL the active one when the frame fires.
+    const raf = requestAnimationFrame(() => {
+      if (!activeRef.current) return;
+      entry.renderer.focus();
+    });
     return () => {
       if (raf) cancelAnimationFrame(raf);
       ro.disconnect();
@@ -72,8 +80,18 @@ export function PaneXterm({
     };
   }, [projectId, paneId]);
 
-  // Move keyboard focus to the pane when it becomes active (split navigation).
+  // Move keyboard focus to the pane when it BECOMES active after mount (arrow-key
+  // split navigation / click). The mount run is skipped: a fresh or remounted
+  // pane's initial focus is owned by the mount effect above (which re-checks
+  // `active` at fire time). Without skipping, a pane that remounts already-active
+  // during a sibling split would synchronously re-focus itself and steal focus
+  // from the new split.
+  const firstActiveRun = useRef(true);
   useEffect(() => {
+    if (firstActiveRun.current) {
+      firstActiveRun.current = false;
+      return;
+    }
     if (active) entryRef.current?.renderer.focus();
   }, [active]);
 

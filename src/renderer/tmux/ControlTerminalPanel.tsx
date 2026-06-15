@@ -188,7 +188,14 @@ export function ControlTerminalPanel(): JSX.Element {
       void id2;
     });
     return () => cancelAnimationFrame(id1);
-  }, [isOpen, fontFamily, fontSize]);
+    // activeId is included so a PROJECT SWITCH re-pushes the client size: on
+    // switch the host pixel size and isOpen are unchanged, so neither the host
+    // ResizeObserver nor the font effect fires, and tmux would otherwise keep the
+    // previous project's pane width while the reattached xterm fits to the current
+    // window — a width mismatch that corrupts the display until a manual resize.
+    // The double-rAF lets the reattached panes fit (term.cols ready) before
+    // clientCells reads them.
+  }, [isOpen, fontFamily, fontSize, activeId]);
 
   // Terminal tabs are every window except the hidden reserved ones and windows
   // that do not have a layout yet (mid-creation): a tab without a layout would

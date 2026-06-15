@@ -16,6 +16,7 @@ import type {
   BeadsCreateInput,
   BeadsIssue,
   BeadsTaskGraph,
+  BranchPoint,
   Changeset,
   WorktreeRecord,
 } from '../ipc/channels';
@@ -192,6 +193,13 @@ export interface WorkspaceProvider {
   listWorktrees(): Promise<WorktreeRecord[]>;
   getChangeset(worktreePath: string, baseline?: string): Promise<Changeset>;
   getFileDiff(worktreePath: string, filePath: string, baseline?: string): Promise<string>;
+  /**
+   * Resolve the branch-point baseline for a worktree. The parent is the
+   * configured upstream (@{upstream}) if set, otherwise the repo default branch
+   * (origin/HEAD → main → master). Returns null when no parent can be resolved
+   * (orphan branch, unrelated histories, or no upstream and no default branch).
+   */
+  resolveBranchPoint(worktreePath: string): Promise<BranchPoint | null>;
 
   // Filesystem (read-only)
   readFile(path: string, opts?: FileReadOptions): Promise<FileReadResult>;

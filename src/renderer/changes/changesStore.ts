@@ -1,7 +1,11 @@
 import { create } from 'zustand';
-import type { Changeset, WorktreeRecord } from '@shared/ipc/channels';
+import type { BranchPoint, Changeset, WorktreeRecord } from '@shared/ipc/channels';
 import { agentCockpit, useProjectsStore } from '@renderer/providerClient';
 import { readFocus, writeFocus } from '@renderer/workspace/focusMemory';
+
+/** Diff target for the Changes view. `head` = working tree vs HEAD (default);
+ *  `branchPoint` = working tree vs the merge-base with the parent branch. */
+export type DiffTarget = 'head' | 'branchPoint';
 
 /**
  * Renderer store for the Changes panel, keyed per project (`byProject`). Each
@@ -24,6 +28,14 @@ export interface ChangesSlice {
   changeset: Changeset | null;
   loading: boolean;
   selectedPath: string | null;
+  /** The selected diff target (default: 'head'). */
+  target: DiffTarget;
+  /**
+   * The resolved branch-point from the last refresh when target === branchPoint.
+   * null = no parent resolvable (orphan, no upstream + no remote default).
+   * undefined = not yet resolved / not in branchPoint mode.
+   */
+  branchPoint: BranchPoint | null | undefined;
 }
 
 function emptySlice(): ChangesSlice {
@@ -34,6 +46,8 @@ function emptySlice(): ChangesSlice {
     changeset: null,
     loading: false,
     selectedPath: null,
+    target: 'head',
+    branchPoint: undefined,
   };
 }
 
@@ -44,6 +58,8 @@ interface ChangesState {
   setWorktree: (projectId: string, path: string) => Promise<void>;
   refresh: (projectId: string) => Promise<void>;
   select: (projectId: string, path: string) => void;
+  /** Set the diff target and trigger a refresh. */
+  setTarget: (projectId: string, target: DiffTarget) => Promise<void>;
   /** Reset a project's slice to the disconnected (empty) state, keeping the key
    *  so its panel shows an explicit disconnected affordance (FR4). */
   clearForDisconnect: (projectId: string) => void;
@@ -105,17 +121,33 @@ export const useChangesStore = create<ChangesState>((set, get) => {
     refresh: async (projectId) => {
       const slice = get().byProject[projectId];
       if (!slice) return;
-      const { activeWorktree, baseline } = slice;
+      const { activeWorktree, target } = slice;
       if (activeWorktree === null) {
         patch(projectId, { changeset: null });
         return;
       }
       patch(projectId, { loading: true });
       try {
+        // Re-resolve the branch-point on every refresh so it tracks new commits.
+        let baseline: string | undefined;
+        let branchPoint: BranchPoint | null | undefined = slice.branchPoint;
+        if (target === 'branchPoint') {
+          const resolved = await agentCockpit.provider.resolveBranchPoint(activeWorktree, projectId);
+          // Stale guard: slice may have been evicted while awaiting the RPC.
+          if (!get().byProject[projectId]) return;
+          branchPoint = resolved;
+          baseline = resolved?.mergeBase;
+          patch(projectId, { branchPoint });
+        } else {
+          // HEAD mode: clear any stale branch-point and use the provider default.
+          baseline = undefined;
+          branchPoint = undefined;
+        }
+
         const changeset = await agentCockpit.provider.getChangeset(activeWorktree, baseline, projectId);
         // Stale-resolution guard: discard if the slice was evicted mid-load.
         if (!get().byProject[projectId]) return;
-        patch(projectId, { changeset, loading: false });
+        patch(projectId, { changeset, baseline, branchPoint, loading: false });
         // Restore the per-project selected file, but only when nothing is
         // selected yet (don't clobber an active selection) and it still exists.
         if (get().byProject[projectId]?.selectedPath == null) {
@@ -134,6 +166,11 @@ export const useChangesStore = create<ChangesState>((set, get) => {
     select: (projectId, path) => {
       writeFocus('ch-sel', projectId, path);
       patch(projectId, { selectedPath: path });
+    },
+
+    setTarget: async (projectId, target) => {
+      patch(projectId, { target, changeset: null, selectedPath: null });
+      await get().refresh(projectId);
     },
 
     clearForDisconnect: (projectId) =>

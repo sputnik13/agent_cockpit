@@ -7,6 +7,7 @@ import type {
   BeadsComment,
   BeadsIssue,
   BeadsTaskGraph,
+  BranchPoint,
   Changeset,
   WorktreeRecord,
 } from '../ipc/channels';
@@ -34,6 +35,7 @@ export interface FakeProviderData {
   taskGraph?: BeadsTaskGraph;
   issues?: Record<string, BeadsIssue>;
   hasBeads?: boolean;
+  branchPoint?: BranchPoint | null;
 }
 
 const EMPTY_GRAPH: BeadsTaskGraph = {
@@ -143,6 +145,9 @@ export class FakeProvider implements WorkspaceProvider {
   }
   async getFileDiff(_worktreePath: string, filePath: string): Promise<string> {
     return this.data.fileDiffs?.[filePath] ?? '';
+  }
+  async resolveBranchPoint(_worktreePath: string): Promise<BranchPoint | null> {
+    return this.data.branchPoint ?? null;
   }
 
   // Filesystem

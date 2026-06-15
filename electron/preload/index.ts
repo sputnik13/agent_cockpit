@@ -77,6 +77,11 @@ const api: RendererApi = {
       ),
     getStatuses: () =>
       invoke<{ statuses: never }>(Channels.providerGetStatuses).then((r) => r.statuses),
+    resolveBranchPoint: (worktreePath, projectId) =>
+      invoke<{ branchPoint: never }>(Channels.providerResolveBranchPoint, {
+        worktreePath,
+        projectId,
+      }).then((r) => r.branchPoint),
   },
 
   terminal: {

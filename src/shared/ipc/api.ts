@@ -3,6 +3,7 @@ import type {
   BeadsCreateInput,
   BeadsIssue,
   BeadsTaskGraph,
+  BranchPoint,
   Changeset,
   LogEntry,
   NoteRecord,
@@ -85,6 +86,12 @@ export interface RendererApi {
     /** Snapshot of every live session's current connection status, keyed by
      *  projectId. Used to hydrate the session store on renderer (re)load. */
     getStatuses(): Promise<Record<string, ConnectionStatus>>;
+    /**
+     * Resolve the branch-point baseline for a worktree. Returns the parent
+     * branch reference and merge-base SHA, or null when no parent can be
+     * resolved (orphan branch, unrelated histories, no upstream + no default).
+     */
+    resolveBranchPoint(worktreePath: string, projectId?: string): Promise<BranchPoint | null>;
   };
 
   terminal: {

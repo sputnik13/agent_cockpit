@@ -619,6 +619,68 @@ replaced: remote Changes panel not auto-refreshing on `br` flushes/commits/branc
 switches, remote workgraph panel not live-updating, and `.beads` entries
 cluttering the Changes list.
 
+## Changes View — Diff Targets
+
+The Changes view supports two selectable diff targets, toggled by a toolbar `Select` in
+[`src/renderer/changes/ChangesPanel.tsx`](src/renderer/changes/ChangesPanel.tsx):
+
+- **Working tree vs HEAD** (default): the existing baseline-undefined path — `getChangeset`
+  with no baseline, which the providers interpret as HEAD.
+- **Branch point**: working tree vs `merge-base(HEAD, parentBranch)`. The parent branch
+  is the current HEAD's configured upstream (`@{upstream}`) if set, otherwise
+  `origin/HEAD → origin/main → origin/master` (remote-tracking refs only; bare
+  `main`/`master` are not used because they would match local branches in a repo
+  with no remote, producing a self-referential merge-base equal to HEAD).
+
+### Provider Capability
+
+`resolveBranchPoint(worktreePath, projectId?)` is a first-class method on `WorkspaceProvider`
+([`src/shared/providers/types.ts`](src/shared/providers/types.ts)):
+- **Local**: `electron/main/git/branchPoint.ts` — runs `git rev-parse --abbrev-ref @{upstream}`,
+  then `git symbolic-ref refs/remotes/origin/HEAD`, then tries `origin/main`/`origin/master`
+  in order; then runs `git merge-base HEAD <parentRef>`.
+- **Remote**: Go handler `handleGitBranchPoint` in `remote-helper/commands.go` applies
+  the same rule over the helper RPC (`gitBranchPoint` method, `HelperRpcClient`
+  in [`electron/main/providers/remote/rpcClient.ts`](electron/main/providers/remote/rpcClient.ts)).
+- Returns `{ parentRef, parentKind: 'upstream' | 'default', mergeBase }` or `null`
+  (orphan branch, unrelated histories, or no resolvable parent).
+
+The channel is `provider:resolve-branch-point`; the IPC contract lives in
+[`src/shared/ipc/channels.ts`](src/shared/ipc/channels.ts).
+
+### Liveness Invariant
+
+The branch-point baseline stays **live**: on every watch-triggered or manual refresh,
+`changesStore.refresh()` re-resolves `resolveBranchPoint` before calling `getChangeset`.
+HEAD and the parent branch both advance on new commits; re-resolving on each refresh
+keeps the diff correct without freezing a SHA at selection time.
+
+When `resolveBranchPoint` returns `null` (orphan, no upstream + no remote default),
+the store falls back to HEAD diff automatically and sets `branchPoint: null` in the
+slice so the panel can surface a "no parent" affordance rather than silently showing
+an incorrect result.
+
+### Store Integration
+
+`changesStore` ([`src/renderer/changes/changesStore.ts`](src/renderer/changes/changesStore.ts))
+extends each `ChangesSlice` with:
+- `target: 'head' | 'branchPoint'` — the selected diff target (default `'head'`).
+- `branchPoint: BranchPoint | null | undefined` — the last resolved branch point
+  (`undefined` = not in branchPoint mode; `null` = no parent resolvable).
+
+The `setTarget(projectId, target)` action patches target, clears the current selection,
+and triggers a refresh. `refresh()` derives the `baseline` from the resolved `mergeBase`
+(or `undefined` for head/null), then calls `getChangeset` and `getFileDiff` with that
+baseline — so the row list and per-file diffs always agree on the same diff target.
+
+### Regression Check
+
+On a branch tracking `origin/main` with local commits, branch-point mode must show
+exactly the changes since the branch diverged — not uncommitted-only (HEAD mode), not
+the entire repo history. Making a new commit while in branch-point mode and triggering
+a watch-refresh must update the diff without requiring the user to reselect the target.
+`resolveBranchPoint` should not be called at all when target is `head`.
+
 ## Content Panel Highlighting
 
 The Content panel supports **Shiki-based syntax highlighting** for the `raw` and `diff`

@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
   "protocolVersion": 1,
-  "sourceHash": "902f8eb6d1e04b6830cef229fa28feb894cf24cd5808706af4d626d5af4b0b75",
-  "binaries": [{"os":"linux","arch":"amd64","filename":"helper-0.1.0-linux-amd64","sha256":"baa66aa902478ab31a6b410419daebb7b865568487b9625da13c33d7ef95a858"},{"os":"linux","arch":"arm64","filename":"helper-0.1.0-linux-arm64","sha256":"a157352cac34c22306e8f9c6a4b5ab523282fc019693063ec62535011ea294d1"},{"os":"darwin","arch":"arm64","filename":"helper-0.1.0-darwin-arm64","sha256":"dcf4798d27cccbe24ebc69e424fae14c8905b09d926fbc750107477f18a1e833"}]
+  "sourceHash": "7dc2e219b4585f2f88505c4339935419731bca7342038631f1b4da975e8c890d",
+  "binaries": [{"os":"linux","arch":"amd64","filename":"helper-0.1.0-linux-amd64","sha256":"0e481bc81d6a000907ad1ebe77d7036da0638063df3faef418b9c47df196cc76"},{"os":"linux","arch":"arm64","filename":"helper-0.1.0-linux-arm64","sha256":"df9632b18cd28d8209d14ef12170ea6bd201f1ef29ea77b75f670452a10e6260"},{"os":"darwin","arch":"arm64","filename":"helper-0.1.0-darwin-arm64","sha256":"30c9362e333fa009fe6e4fac27fc034e63d57eb420525ccde79c8b6868c78405"}]
 }

@@ -392,6 +392,95 @@ func handleListDir(raw json.RawMessage) (interface{}, error) {
 	return result, nil
 }
 
+// --- gitBranchPoint ---
+//
+// Resolves the branch-point (parent branch ref + merge-base SHA) for a
+// worktree, mirroring the TypeScript branchPoint.ts parent-resolution rule:
+//  1. upstream: git rev-parse --abbrev-ref @{upstream}
+//  2. default:  git symbolic-ref refs/remotes/origin/HEAD → "origin/<branch>",
+//               else try origin/main, origin/master, main, master in order.
+//
+// Returns an empty parentRef ("") as the null sentinel when no parent can be
+// resolved or the merge-base fails (orphan branch, unrelated histories).
+
+type gitBranchPointParams struct {
+	Cwd string `json:"cwd"`
+}
+
+type gitBranchPointResult struct {
+	ParentRef  string `json:"parentRef"`
+	ParentKind string `json:"parentKind"` // "upstream" | "default"
+	MergeBase  string `json:"mergeBase"`
+}
+
+func handleGitBranchPoint(raw json.RawMessage) (interface{}, error) {
+	var p gitBranchPointParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("gitBranchPoint: decode params: %w", err)
+	}
+	if p.Cwd == "" {
+		return nil, fmt.Errorf("gitBranchPoint: cwd must not be empty")
+	}
+
+	// null sentinel: an empty parentRef tells the TypeScript caller to return null.
+	null := gitBranchPointResult{}
+
+	// 1. Try upstream (@{upstream}).
+	parentRef := ""
+	parentKind := "upstream"
+	if out, err := runCommand(p.Cwd, "git", "rev-parse", "--abbrev-ref", "@{upstream}"); err == nil {
+		parentRef = strings.TrimSpace(out)
+	}
+
+	// 2. Fallback: resolve the repo default branch.
+	if parentRef == "" {
+		parentKind = "default"
+		// Try origin/HEAD symbolic ref.
+		if out, err := runCommand(p.Cwd, "git", "symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+			sym := strings.TrimSpace(out)
+			const prefix = "refs/remotes/"
+			if strings.HasPrefix(sym, prefix) {
+				parentRef = sym[len(prefix):]
+			} else if sym != "" {
+				parentRef = sym
+			}
+		}
+		// Well-known remote fallback names (remote-tracking refs only; we do not
+		// use bare "main"/"master" because those would match local branches in a
+		// repo with no remotes, producing a self-referential merge-base that
+		// always equals HEAD).
+		if parentRef == "" {
+			for _, candidate := range []string{"origin/main", "origin/master"} {
+				if _, err := runCommand(p.Cwd, "git", "rev-parse", candidate); err == nil {
+					parentRef = candidate
+					break
+				}
+			}
+		}
+	}
+
+	if parentRef == "" {
+		return null, nil
+	}
+
+	// Compute merge-base between HEAD and parentRef.
+	mbOut, err := runCommand(p.Cwd, "git", "merge-base", "HEAD", parentRef)
+	if err != nil {
+		// Orphan or unrelated histories → null.
+		return null, nil
+	}
+	mergeBase := strings.TrimSpace(mbOut)
+	if mergeBase == "" {
+		return null, nil
+	}
+
+	return gitBranchPointResult{
+		ParentRef:  parentRef,
+		ParentKind: parentKind,
+		MergeBase:  mergeBase,
+	}, nil
+}
+
 // splitNUL splits a NUL-delimited string into records, dropping a trailing
 // empty field produced by a terminating NUL.
 func splitNUL(s string) []string {

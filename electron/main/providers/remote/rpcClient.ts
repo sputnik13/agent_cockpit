@@ -70,6 +70,14 @@ export interface GitDiffResult {
   patch: string;
 }
 
+/** Result of the gitBranchPoint RPC call. Null-sentinel is indicated by an
+ *  empty parentRef (the Go handler returns {} for null). */
+export interface GitBranchPointResult {
+  parentRef: string;
+  parentKind: 'upstream' | 'default';
+  mergeBase: string;
+}
+
 export interface WorktreeEntry {
   path: string;
   branch: string;
@@ -274,6 +282,12 @@ export class HelperRpcClient {
     const params: Record<string, unknown> = { cwd, path };
     if (baseline !== undefined) params['baseline'] = baseline;
     return this.call<GitDiffResult>('gitDiff', params);
+  }
+
+  /** Resolve the branch-point (parent ref + merge-base SHA) for a worktree.
+   *  Returns null-sentinel (parentRef === '') when no parent can be resolved. */
+  gitBranchPoint(cwd: string): Promise<GitBranchPointResult> {
+    return this.call<GitBranchPointResult>('gitBranchPoint', { cwd });
   }
 
   listWorktrees(cwd: string): Promise<WorktreeEntry[]> {

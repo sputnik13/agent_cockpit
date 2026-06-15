@@ -292,3 +292,159 @@ func TestListDirErrors(t *testing.T) {
 		t.Fatal("expected error for non-existent dir")
 	}
 }
+
+// --- gitBranchPoint tests ---
+
+// initRepoWithUpstream creates a temp repo with a simulated upstream so that
+// @{upstream} resolves. It initialises a "bare" clone (via --separate-git-dir
+// tricks would be complex), so we simulate with a local branch and a separate
+// origin clone approach using a local path.
+func initRepoWithBranch(t *testing.T) (repoDir string, run func(dir string, args ...string)) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	run = func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Logf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	dir := t.TempDir()
+	run(dir, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	run(dir, "add", "f.txt")
+	run(dir, "commit", "-m", "initial")
+	return dir, run
+}
+
+func TestGitBranchPointEmptyCwd(t *testing.T) {
+	if _, err := handleGitBranchPoint(json.RawMessage(`{"cwd":""}`)); err == nil {
+		t.Fatal("expected error for empty cwd")
+	}
+}
+
+func TestGitBranchPointNoUpstreamNoDefault(t *testing.T) {
+	// A fresh repo with no remote and no upstream: should return the null sentinel.
+	dir, _ := initRepoWithBranch(t)
+	res, err := handleGitBranchPoint(json.RawMessage(`{"cwd":` + jstr(dir) + `}`))
+	if err != nil {
+		t.Fatalf("gitBranchPoint: %v", err)
+	}
+	r := res.(gitBranchPointResult)
+	if r.ParentRef != "" {
+		t.Fatalf("expected null sentinel (empty parentRef), got %+v", r)
+	}
+}
+
+func TestGitBranchPointDefaultBranchFallback(t *testing.T) {
+	// Create an "origin" bare-ish local repo and clone it so origin/main is set.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	originDir := t.TempDir()
+	cloneDir := t.TempDir()
+	gitEnv := []string{
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	}
+	runIn := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), gitEnv...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+		}
+	}
+
+	// Initialise origin with a commit on main.
+	runIn(originDir, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(originDir, "f.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runIn(originDir, "add", "f.txt")
+	runIn(originDir, "commit", "-m", "initial")
+
+	// Clone into cloneDir; this sets origin/HEAD → origin/main.
+	runIn(cloneDir, "clone", originDir, ".")
+	// Create a new feature branch so HEAD is NOT origin/main (no upstream set).
+	runIn(cloneDir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(cloneDir, "new.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runIn(cloneDir, "add", "new.txt")
+	runIn(cloneDir, "commit", "-m", "feature commit")
+
+	res, err := handleGitBranchPoint(json.RawMessage(`{"cwd":` + jstr(cloneDir) + `}`))
+	if err != nil {
+		t.Fatalf("gitBranchPoint: %v", err)
+	}
+	r := res.(gitBranchPointResult)
+	if r.ParentRef == "" {
+		t.Fatalf("expected non-empty parentRef for repo with origin/main, got null sentinel")
+	}
+	if r.ParentKind != "default" {
+		t.Fatalf("expected parentKind=default, got %q", r.ParentKind)
+	}
+	if r.MergeBase == "" {
+		t.Fatalf("expected non-empty mergeBase")
+	}
+}
+
+func TestGitBranchPointUpstream(t *testing.T) {
+	// Clone a local origin and set the upstream for the feature branch explicitly.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	originDir := t.TempDir()
+	cloneDir := t.TempDir()
+	gitEnv := []string{
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	}
+	runIn := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), gitEnv...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+		}
+	}
+
+	runIn(originDir, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(originDir, "f.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runIn(originDir, "add", "f.txt")
+	runIn(originDir, "commit", "-m", "initial")
+	runIn(cloneDir, "clone", originDir, ".")
+	// Create a feature branch that tracks origin/main explicitly.
+	runIn(cloneDir, "checkout", "-b", "feature", "--track", "origin/main")
+	if err := os.WriteFile(filepath.Join(cloneDir, "new.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runIn(cloneDir, "add", "new.txt")
+	runIn(cloneDir, "commit", "-m", "feature commit")
+
+	res, err := handleGitBranchPoint(json.RawMessage(`{"cwd":` + jstr(cloneDir) + `}`))
+	if err != nil {
+		t.Fatalf("gitBranchPoint: %v", err)
+	}
+	r := res.(gitBranchPointResult)
+	if r.ParentRef == "" {
+		t.Fatalf("expected non-empty parentRef, got null sentinel")
+	}
+	if r.ParentKind != "upstream" {
+		t.Fatalf("expected parentKind=upstream, got %q", r.ParentKind)
+	}
+	if r.MergeBase == "" {
+		t.Fatalf("expected non-empty mergeBase")
+	}
+}

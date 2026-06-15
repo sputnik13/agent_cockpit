@@ -48,6 +48,8 @@ import {
 import { LocalWatchManager } from './watch';
 import { LocalTerminalManager } from './terminal';
 import { createConnectionMachine, type ConnectionMachine } from '../connectionMachine';
+import { resolveBranchPoint as gitResolveBranchPoint } from '../../git/branchPoint';
+import type { BranchPoint } from '@shared/ipc/channels';
 
 export class LocalProvider implements WorkspaceProvider {
   readonly kind: ProjectKind = 'local';
@@ -104,6 +106,9 @@ export class LocalProvider implements WorkspaceProvider {
   }
   getFileDiff(worktreePath: string, filePath: string, baseline?: string): Promise<string> {
     return localFileDiff(worktreePath || this.rootPath, filePath, baseline);
+  }
+  resolveBranchPoint(worktreePath: string): Promise<BranchPoint | null> {
+    return gitResolveBranchPoint(worktreePath || this.rootPath);
   }
 
   // Filesystem (read-only)

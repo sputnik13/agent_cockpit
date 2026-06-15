@@ -389,6 +389,14 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     }
     return { statuses };
   });
+  ipcMain.handle(
+    Channels.providerResolveBranchPoint,
+    async (_e, req: { worktreePath: string; projectId?: string }) => ({
+      branchPoint: await providerFor(req?.projectId).resolveBranchPoint(
+        requireString(req?.worktreePath, 'worktreePath'),
+      ),
+    }),
+  );
 
   // ---- Terminal (active project) ----
   ipcMain.handle(Channels.terminalOpen, async (_e, req: { opts: never }) => {

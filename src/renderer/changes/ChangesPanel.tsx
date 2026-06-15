@@ -12,7 +12,7 @@ import {
   Toolbar,
   cn,
 } from '@renderer/ui';
-import { useActiveChanges, useChangesStore } from './changesStore';
+import { useActiveChanges, useChangesStore, type DiffTarget } from './changesStore';
 import { useContentSelection } from '@renderer/content';
 import { useProjectsStore, useSessionStore, isDisconnected } from '@renderer/providerClient';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
@@ -57,9 +57,11 @@ function matchesMode(file: FileChange, mode: FilterMode): boolean {
 }
 
 export function ChangesPanel(): JSX.Element {
-  const { worktrees, activeWorktree, changeset, loading, selectedPath, baseline } = useActiveChanges();
+  const { worktrees, activeWorktree, changeset, loading, selectedPath, baseline, target, branchPoint } =
+    useActiveChanges();
   const setWorktree = useChangesStore((s) => s.setWorktree);
   const select = useChangesStore((s) => s.select);
+  const setTarget = useChangesStore((s) => s.setTarget);
   const selectContent = useContentSelection((s) => s.select);
   const activeId = useProjectsStore((s) => s.activeId);
   const disconnected = useSessionStore(isDisconnected(activeId));
@@ -104,6 +106,19 @@ export function ChangesPanel(): JSX.Element {
     label: w.branch ?? w.path,
   }));
 
+  // Diff-target selector options. The branch-point label shows the resolved
+  // parent ref so the user sees exactly what they're comparing against.
+  const branchPointLabel =
+    target === 'branchPoint' && branchPoint
+      ? `Branch point (vs ${branchPoint.parentRef})`
+      : target === 'branchPoint' && branchPoint === null
+        ? 'Branch point (no parent)'
+        : 'Branch point';
+  const targetOptions: { value: DiffTarget; label: string }[] = [
+    { value: 'head', label: 'Working tree vs HEAD' },
+    { value: 'branchPoint', label: branchPointLabel },
+  ];
+
   const count = `${filtered.length}/${surfaced.length}`;
 
   return (
@@ -124,6 +139,13 @@ export function ChangesPanel(): JSX.Element {
             className="max-w-[220px] shrink"
           />
         )}
+        <Select
+          aria-label="Diff target"
+          value={target}
+          onValueChange={(v) => activeId && void setTarget(activeId, v as DiffTarget)}
+          options={targetOptions}
+          className="shrink"
+        />
         <input
           aria-label="Filter files"
           type="text"

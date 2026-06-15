@@ -59,6 +59,9 @@ export const Channels = {
   /** Snapshot of every live session's current connection status (for renderer
    *  reload hydration; main's ConnectionMachine stays the single source). */
   providerGetStatuses: 'provider:get-statuses',
+  /** Resolve the branch-point (merge-base between HEAD and parent branch) for a
+   *  worktree; null when no parent can be resolved (orphan, unrelated histories). */
+  providerResolveBranchPoint: 'provider:resolve-branch-point',
 
   terminalOpen: 'terminal:open',
   terminalWrite: 'terminal:write',
@@ -125,6 +128,23 @@ export interface WorktreeRecord {
   locked: boolean;
   prunable: boolean;
   detached: boolean;
+}
+
+/**
+ * Resolved branch-point for the working tree: the parent branch reference and
+ * the merge-base SHA between HEAD and that parent. `parentKind` indicates
+ * whether the parent was the configured upstream (@{upstream}) or the repo
+ * default branch (origin/HEAD → main/master).
+ * Returned by `resolveBranchPoint`; null when no parent can be resolved
+ * (orphan branch, unrelated histories, or no upstream and no default branch).
+ */
+export interface BranchPoint {
+  /** The branch/ref used as the parent (e.g. "origin/main"). */
+  parentRef: string;
+  /** How the parent was resolved. */
+  parentKind: 'upstream' | 'default';
+  /** The merge-base commit SHA between HEAD and parentRef. */
+  mergeBase: string;
 }
 
 export type FileChangeStatus =
@@ -340,6 +360,10 @@ export interface IpcContract {
   [Channels.providerGetStatuses]: {
     request: void;
     response: { statuses: Record<string, ConnectionStatus> };
+  };
+  [Channels.providerResolveBranchPoint]: {
+    request: { worktreePath: string; projectId?: string };
+    response: { branchPoint: BranchPoint | null };
   };
 
   [Channels.terminalOpen]: { request: { opts: TerminalOpenOptions }; response: { terminalId: string } };

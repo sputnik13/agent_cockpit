@@ -19,6 +19,7 @@ import type {
   BeadsDep,
   BeadsIssue,
   BeadsTaskGraph,
+  BranchPoint,
   Changeset,
   FileChange,
   FileChangeStatus,
@@ -442,6 +443,13 @@ export class RemoteProvider implements WorkspaceProvider {
     const cwd = worktreePath || this.spec.remotePath;
     const res = await this.rpc().gitDiff(cwd, filePath, baseline);
     return res.patch;
+  }
+  async resolveBranchPoint(worktreePath: string): Promise<BranchPoint | null> {
+    const cwd = worktreePath || this.spec.remotePath;
+    const res = await this.rpc().gitBranchPoint(cwd);
+    // The Go handler returns an empty parentRef as the null sentinel.
+    if (!res.parentRef) return null;
+    return { parentRef: res.parentRef, parentKind: res.parentKind, mergeBase: res.mergeBase };
   }
 
   // Filesystem (read-only) — helper RPC reads (br h7a.7.3).

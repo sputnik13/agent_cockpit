@@ -486,6 +486,22 @@ The provider seam realizes the primary flows as follows:
     to changeset rows. `.git`/`.beads` are hidden by default; the `showAllChanges`
     setting (`src/shared/settings.ts`) reveals them. The changeset is complete in
     main — surfacing is a renderer display concern.
+  - **Diff-target selector**: a toolbar `Select` in `ChangesPanel` lets the user choose
+    between *Working tree vs HEAD* (default) and *Branch point (vs `<parentRef>`)*.
+    The branch-point target uses `getChangeset` / `getFileDiff` with the resolved
+    `mergeBase` SHA as the `baseline` param — the same baseline param already consumed
+    by both the local and remote providers. The resolved `parentRef` is shown in the
+    selector label so the user sees exactly what branch they are comparing against.
+    The diff target, resolved `BranchPoint`, and current `baseline` are stored per-project
+    in `changesStore.byProject[projectId].{target, branchPoint, baseline}`. On every
+    watch-triggered or manual refresh, `changesStore.refresh()` re-calls
+    `provider.resolveBranchPoint(worktreePath, projectId)` before issuing `getChangeset`,
+    keeping the branch-point live as HEAD and the parent advance. When
+    `resolveBranchPoint` returns `null` (orphan branch or no remote-tracking parent),
+    the store falls back to HEAD diff and surfaces a "no parent" label. `getFileDiff`
+    for the per-file view receives the same `baseline` from the content selection, so
+    the row list and file diff always agree. For the provider capability and Go handler
+    details, see the architecture doc: [Changes View — Diff Targets](ARCHITECTURE.md).
   - Each live session owns exactly one watch subscription (main-owned, started on
     `connected`, stopped on disconnect/eviction); every live session fans out its
     `projectId`-tagged events, and the renderer `panelDataSync` routes by

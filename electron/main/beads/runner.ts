@@ -13,6 +13,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import type { BeadsComment, BeadsCreateInput } from '@shared/ipc/channels';
+import { resolveBin } from '../pathBootstrap';
 
 /**
  * `br` argv builders (without the leading `br` or the trailing `--json`). Shared
@@ -89,7 +90,14 @@ export function beadsErrorMessage(stdout: string | null, stderr: string | null):
  */
 export function runBr(cwd: string, args: string[]): string {
   const res = spawnSync('br', [...args, '--json'], { cwd, encoding: 'utf8' });
-  if (res.error) throw new Error(`br ${args[0] ?? ''}: ${res.error.message}`);
+  if (res.error) {
+    // ENOENT here almost always means br is installed but not on the PATH the
+    // app inherited (e.g. a Dock launch with launchd's minimal PATH). Name the
+    // effective PATH so it reads as a setup issue, not an app bug.
+    const enoent = (res.error as NodeJS.ErrnoException).code === 'ENOENT';
+    const hint = enoent && !resolveBin('br') ? ` (br not found on PATH: ${process.env.PATH ?? ''})` : '';
+    throw new Error(`br ${args[0] ?? ''}: ${res.error.message}${hint}`);
+  }
   if (res.status !== 0) {
     throw new Error(
       beadsErrorMessage(res.stdout, res.stderr) ?? `br ${args.join(' ')} exited ${String(res.status)}`,

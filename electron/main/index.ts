@@ -7,6 +7,7 @@ import { sessionManager } from './providers';
 import { startSessionReaper, type SessionReaperHandle } from './providers/sessionReaper';
 import { loadSettings } from './config';
 import { installApplicationMenu } from './menu';
+import { bootstrapPath } from './pathBootstrap';
 
 let mainWindow: BrowserWindow | null = null;
 let diagnosticsWindow: BrowserWindow | null = null;
@@ -30,6 +31,11 @@ export function openDiagnosticsWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // Restore a realistic PATH BEFORE anything spawns tmux/br by bare name. A
+  // Dock/Finder launch inherits launchd's minimal PATH (no Homebrew / ~/.local/bin),
+  // so without this the terminal (tmux) and task detail pane (br) fail to find
+  // their tools even though they are installed. See pathBootstrap.ts.
+  bootstrapPath();
   setupSecurity();
   installApplicationMenu();
   getDb(); // open + migrate app-local store

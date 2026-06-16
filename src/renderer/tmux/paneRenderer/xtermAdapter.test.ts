@@ -15,6 +15,7 @@ const h = vi.hoisted(() => {
     refresh = vi.fn();
     clearTextureAtlas = vi.fn();
     loadAddon = vi.fn();
+    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
     open = vi.fn();
     dispose = vi.fn();
     constructor(opts: Record<string, unknown>) {

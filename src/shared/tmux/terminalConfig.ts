@@ -34,10 +34,23 @@ export const TMUX_SERVER_OPTIONS: readonly TmuxServerOption[] = [
   { name: 'history-limit', value: String(TERMINAL_SCROLLBACK) },
   // Wheel → mouse-aware apps; otherwise tmux copy-mode (tmux's scrollback).
   { name: 'mouse', value: 'on' },
+  // Forward DECSET 1004 focus-in/out to the focused pane's app. tmux defaults
+  // this OFF, so without it apps that rely on focus reporting (e.g. Claude Code)
+  // report focus events as unavailable. Safe on every tmux ≥ 1.9.
+  { name: 'focus-events', value: 'on' },
   // 256-color terminfo for programs inside tmux (widely present everywhere).
   { name: 'default-terminal', value: 'screen-256color' },
   // Advertise 24-bit truecolor passthrough to the client.
   { name: 'terminal-overrides', value: ',*:Tc', append: true },
+  // System-clipboard integration: on copy, tmux emits an OSC 52 sequence to the
+  // client to set the system clipboard (so a mouse selection lands on the OS
+  // clipboard, not only tmux's paste-buffer). `set-clipboard on` enables it, and
+  // the `Ms` terminfo cap advertises OSC 52 support so tmux actually sends it —
+  // `default-terminal screen-256color` lacks `Ms`, so we add it as an arbitrary
+  // capability override (same mechanism as `:Tc`, safe on all tmux versions).
+  // The renderer xterm turns the incoming OSC 52 into a clipboard write.
+  { name: 'set-clipboard', value: 'on' },
+  { name: 'terminal-overrides', value: ',*:Ms=\\E]52;%p1%s;%p2%s\\007', append: true },
 ];
 
 /**

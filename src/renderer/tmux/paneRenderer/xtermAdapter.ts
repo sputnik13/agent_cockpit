@@ -16,6 +16,7 @@ import { TERMINAL_SCROLLBACK } from '@shared/tmux';
 import { useSettingsStore } from '../../settings';
 import { XTERM_THEMES } from '../../terminal/terminalRegistry';
 import { createOscLinkHandler } from '../oscLinkHandler';
+import { decodeOsc52Write } from '../osc52';
 import type { CellMetrics, PaneRenderer, PaneRendererOptions, RendererDisposable } from './index';
 
 export class XtermPaneRenderer implements PaneRenderer {
@@ -43,6 +44,17 @@ export class XtermPaneRenderer implements PaneRenderer {
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
+
+    // OSC 52 → system clipboard. tmux emits OSC 52 to the client on copy when
+    // `set-clipboard on` + the `Ms` cap are set (see terminalConfig), so a
+    // selection lands on the OS clipboard. Only honor SET (writes); read
+    // requests are ignored by decodeOsc52Write so a program can't read the
+    // clipboard. Clipboard write is permitted by the app (security.ts).
+    this.term.parser.registerOscHandler(52, (data: string): boolean => {
+      const text = decodeOsc52Write(data);
+      if (text !== null) void navigator.clipboard?.writeText(text).catch(() => {});
+      return true; // handled (don't pass through to other handlers)
+    });
 
     this.container = document.createElement('div');
     this.container.className = 'ac-term h-full w-full bg-bg';

@@ -42,6 +42,9 @@ interface GraphViewProps {
   /** Tree/graph focus anchor (FA-5). When set and present, the graph anchors on
    *  it and expands to the full reachable subgraph instead of the fixed 2 hops. */
   focusId?: string | null;
+  /** Search needle (case-insensitive). Matching nodes are highlighted; non-matching
+   *  nodes are dimmed. Empty = no filtering. */
+  searchNeedle?: string;
 }
 
 /**
@@ -52,7 +55,7 @@ interface GraphViewProps {
  * state-coloured node cards. Read-only: clicking a node re-anchors by selecting
  * it. Pure in its props so it renders without the store.
  */
-export function GraphView({ graph, selectedId, onSelect, focusId }: GraphViewProps): JSX.Element {
+export function GraphView({ graph, selectedId, onSelect, focusId, searchNeedle }: GraphViewProps): JSX.Element {
   // Focus mode (FA-5 "option B"): anchor on the focused node and expand the full
   // reachable subgraph (Infinity hops). Otherwise anchor on the selection (or a
   // sensible default) at the normal 2-hop neighbourhood.
@@ -66,6 +69,19 @@ export function GraphView({ graph, selectedId, onSelect, focusId }: GraphViewPro
 
   if (center == null || laid == null || laid.nodes.length === 0) {
     return <EmptyState title="No task selected" hint="Select an issue to focus the graph." />;
+  }
+
+  const needle = searchNeedle?.trim().toLowerCase() ?? '';
+
+  /** Returns true when the node matches the search needle (id, short suffix, or title). */
+  function matchesNeedle(n: LaidOutNode): boolean {
+    if (!needle) return true;
+    const shortId = n.id.split('-').pop() ?? n.id;
+    return (
+      n.id.toLowerCase().includes(needle) ||
+      shortId.toLowerCase().includes(needle) ||
+      n.issue.title.toLowerCase().includes(needle)
+    );
   }
 
   const pos = new Map(laid.nodes.map((n) => [n.id, n]));
@@ -130,6 +146,7 @@ export function GraphView({ graph, selectedId, onSelect, focusId }: GraphViewPro
             key={n.id}
             node={n}
             active={n.id === selectedId || n.id === center}
+            dimmed={needle ? !matchesNeedle(n) : false}
             onSelect={onSelect}
           />
         ))}
@@ -154,19 +171,23 @@ function edgePoints(
 function NodeCard({
   node,
   active,
+  dimmed,
   onSelect,
 }: {
   node: LaidOutNode;
   active: boolean;
+  /** True when a search needle is active and this node does not match. */
+  dimmed: boolean;
   onSelect: (id: string) => void;
 }): JSX.Element {
   const tone = STATE_COLOR[node.state];
+  const shortId = node.id.split('-').pop() ?? node.id;
   return (
-    <foreignObject x={node.x} y={node.y} width={NODE_W} height={NODE_H}>
+    <foreignObject x={node.x} y={node.y} width={NODE_W} height={NODE_H} opacity={dimmed ? 0.3 : 1}>
       <button
         type="button"
         onClick={() => onSelect(node.id)}
-        title={node.issue.title}
+        title={`${node.id} · ${node.issue.title}`}
         className="flex h-full w-full flex-col justify-center gap-0.5 rounded border bg-panel px-2 text-left"
         style={{
           borderColor: active ? 'var(--color-accent)' : 'var(--color-edge)',
@@ -175,7 +196,9 @@ function NodeCard({
         }}
       >
         <span className="flex items-center gap-1 text-[10px] text-dim">
-          <span>{node.id}</span>
+          <code className="rounded bg-elev px-0.5 font-mono text-[9px]" title={node.id}>
+            {shortId}
+          </code>
           <span>·</span>
           <span>{priorityLabel(node.issue.priority)}</span>
         </span>

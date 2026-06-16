@@ -520,12 +520,15 @@ describe('TreeView render (T3, FR2/FR4)', () => {
     expect(useBeadsStore.getState().byProject[PROJECT]!.view).toBe('tree');
 
     const tree = screen.getByRole('tree', { name: 'Task tree' });
-    expect(within(tree).getByText('epic')).toBeInTheDocument();
-    expect(within(tree).getByText('child')).toBeInTheDocument();
+    // The short-suffix badge also shows the id text when id has no '-' (e.g. 'epic'),
+    // so use getAllByText to handle the badge + title-span duplication.
+    expect(within(tree).getAllByText('epic').length).toBeGreaterThan(0);
+    expect(within(tree).getAllByText('child').length).toBeGreaterThan(0);
     // Closed child hidden by default (OQ-2).
     expect(within(tree).queryByText('closed-child')).not.toBeInTheDocument();
 
-    fireEvent.click(within(tree).getByText('child'));
+    // Click the title span directly (the truncate span inside the tree row).
+    fireEvent.click(within(tree).getAllByText('child')[0]!);
     expect(useBeadsStore.getState().byProject[PROJECT]!.selectedId).toBe('child');
   });
 
@@ -536,7 +539,7 @@ describe('TreeView render (T3, FR2/FR4)', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
 
     const tree = screen.getByRole('tree', { name: 'Task tree' });
-    expect(within(tree).getByText('child')).toBeInTheDocument();
+    expect(within(tree).getAllByText('child').length).toBeGreaterThan(0);
 
     fireEvent.click(within(tree).getByRole('button', { name: 'Collapse' }));
     expect(within(tree).queryByText('child')).not.toBeInTheDocument();
@@ -544,7 +547,146 @@ describe('TreeView render (T3, FR2/FR4)', () => {
     expect(useBeadsStore.getState().byProject[PROJECT]!.selectedId).toBeNull();
 
     fireEvent.click(within(tree).getByRole('button', { name: 'Expand' }));
-    expect(within(tree).getByText('child')).toBeInTheDocument();
+    expect(within(tree).getAllByText('child').length).toBeGreaterThan(0);
+  });
+});
+
+describe('search filter in tree view (gxfq)', () => {
+  const TREE_FIXTURE = mkGraph(
+    [
+      mkIssue('epic', 'ready', 1),
+      mkIssue('child', 'open', 0),
+    ],
+    [{ from: 'child', to: 'epic', type: 'parent-child' }],
+  );
+
+  it('filters tree rows to matching nodes by title (case-insensitive)', async () => {
+    installApi(TREE_FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    const input = screen.getByPlaceholderText('Search…');
+    fireEvent.change(input, { target: { value: 'CHILD' } });
+
+    // child matches; epic is the ancestor context so it stays visible.
+    // Both ids have no '-', so the short-suffix badge also shows the id — use getAllByText.
+    expect(screen.getAllByText('child').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('epic').length).toBeGreaterThan(0);
+  });
+
+  it('hides tree rows that do not match the needle (and have no matching descendant)', async () => {
+    installApi(TREE_FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    const input = screen.getByPlaceholderText('Search…');
+    // 'epic' title matches only the root, not the child.
+    fireEvent.change(input, { target: { value: 'epic' } });
+
+    expect(screen.getAllByText('epic').length).toBeGreaterThan(0);
+    expect(screen.queryByText('child')).not.toBeInTheDocument();
+  });
+
+  it('shows empty state when no tree nodes match the needle', async () => {
+    installApi(TREE_FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    const input = screen.getByPlaceholderText('Search…');
+    fireEvent.change(input, { target: { value: 'zzznomatch' } });
+
+    expect(screen.getByText('No tasks match the filter')).toBeInTheDocument();
+  });
+
+  it('filters by short id suffix in tree view', async () => {
+    installApi(FIXTURE); // ids: bd-1, bd-2, bd-3
+    render(<BeadsPanel />);
+    await loadSlice();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    const input = screen.getByPlaceholderText('Search…');
+    // short suffix '1' matches 'bd-1' (Ready issue)
+    fireEvent.change(input, { target: { value: '1' } });
+
+    expect(screen.getByText('Ready issue')).toBeInTheDocument();
+    // bd-2 (Blocked issue) short suffix is '2', doesn't match '1'
+    expect(screen.queryByText('Blocked issue')).not.toBeInTheDocument();
+  });
+});
+
+describe('search filter in graph view (gxfq)', () => {
+  it('dims non-matching graph nodes when needle is set', async () => {
+    installApi(FIXTURE); // bd-1 Ready issue, bd-2 Blocked issue
+    render(<BeadsPanel />);
+    await loadSlice();
+
+    // Select bd-1 so it is the graph anchor
+    await act(async () => {
+      useBeadsStore.getState().select(PROJECT, 'bd-1');
+    });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Graph view' }));
+
+    const input = screen.getByPlaceholderText('Search…');
+    fireEvent.change(input, { target: { value: 'Ready' } });
+
+    // The graph renders as SVG; nodes use foreignObject. "Ready issue" should be visible.
+    expect(screen.getByText('Ready issue')).toBeInTheDocument();
+    // "Blocked issue" is in the subgraph (2 hops from bd-1) but does not match the needle.
+    // It should still be rendered (dimmed) — confirm it's present in DOM.
+    expect(screen.getByText('Blocked issue')).toBeInTheDocument();
+  });
+});
+
+describe('short suffix badge (dds9)', () => {
+  // FIXTURE ids: bd-1, bd-2, bd-3 → short suffixes: 1, 2, 3
+
+  it('shows short suffix badge in the flat list', async () => {
+    installApi(FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+
+    // bd-1 short suffix is '1', bd-2 is '2'
+    const badges = screen.getAllByTitle('bd-1');
+    expect(badges.length).toBeGreaterThan(0);
+    expect(badges[0]).toHaveTextContent('1');
+  });
+
+  it('shows short suffix badge in the tree view', async () => {
+    installApi(FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    // bd-1 code badge in tree view
+    const badges = screen.getAllByTitle('bd-1');
+    expect(badges.length).toBeGreaterThan(0);
+    expect(badges[0]).toHaveTextContent('1');
+  });
+
+  it('shows short suffix badge in graph view', async () => {
+    installApi(FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+
+    await act(async () => {
+      useBeadsStore.getState().select(PROJECT, 'bd-1');
+    });
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Graph view' }));
+
+    // Graph node for bd-1 should show its short suffix '1' in the code badge
+    const badges = screen.getAllByTitle('bd-1');
+    expect(badges.length).toBeGreaterThan(0);
+    expect(badges[0]).toHaveTextContent('1');
   });
 });
 

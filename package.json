@@ -6,6 +6,9 @@
   "license": "Apache-2.0",
   "main": "out/main/index.js",
   "scripts": {
+    "helper:build": "bash remote-helper/build.sh",
+    "predev": "npm run helper:build",
+    "prebuild": "npm run helper:build",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
@@ -14,6 +17,7 @@
     "package:linux": "npm run build && electron-builder --linux",
     "package:dir": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
     "typecheck": "tsc -b --noEmit",
+    "audit": "npm audit --omit=dev --audit-level=high",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -22,6 +26,7 @@
     "screenshots": "npm run build && node scripts/screenshots/capture.mjs"
   },
   "dependencies": {
+    "@hpcc-js/wasm-graphviz": "^1.22.1",
     "@radix-ui/react-context-menu": "^2.2.16",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
@@ -80,7 +85,6 @@
     "eslint-plugin-react-hooks": "^5.0.0",
     "globals": "^15.13.0",
     "jsdom": "^29.1.1",
-    "material-icon-theme": "^5.35.0",
     "prettier": "^3.4.0",
     "tailwindcss": "^4.3.0",
     "typescript": "^5.7.0",

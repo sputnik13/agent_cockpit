@@ -264,9 +264,15 @@ export function clientCells(host: HTMLElement): { cols: number; rows: number } {
   // internal pane separator.
   const view = selectActiveView(useTmuxStore.getState());
   const projectId = view !== null ? useTmuxStore.getState().activeProjectId : null;
-  const layout = view.activeWindowId
-    ? (view.windows[view.activeWindowId]?.layout ?? null)
-    : null;
+  // Size from the VISIBLE (zoom-aware) layout — the tree the renderer actually
+  // mounts and fits (renderLayout). When a pane is zoomed, tmux shows only that
+  // pane at full window size, so only it is mounted + fit; summing the FULL split
+  // layout would double-count — the zoomed pane fit to full height PLUS the
+  // detached split-sibling's stale term.rows — pushing an oversized window to
+  // tmux and clipping the zoomed pane's bottom. visibleLayout mirrors the full
+  // layout when not zoomed, so this is a no-op outside zoom.
+  const win = view.activeWindowId ? (view.windows[view.activeWindowId] ?? null) : null;
+  const layout = win?.visibleLayout ?? win?.layout ?? null;
   if (projectId && layout) {
     const fromPanes = clientCellsFromLayout(layout, projectId);
     if (fromPanes) return fromPanes;

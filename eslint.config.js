@@ -80,9 +80,15 @@ export default [
     },
   },
   {
-    files: ['**/*.cjs', '**/*.js'],
+    // Plain JS/MJS/CJS (build scripts, screenshot tooling). `.mjs` must be
+    // listed explicitly — it is matched by neither the `{ts,tsx}` block nor a
+    // bare `**/*.js` glob, so without this it falls through to js.recommended
+    // with no env globals and every `process`/`console`/`window` is no-undef.
+    // Browser globals are included for page-context callbacks (e.g. Playwright
+    // `page.evaluate`) in the screenshot scripts.
+    files: ['**/*.cjs', '**/*.js', '**/*.mjs'],
     languageOptions: {
-      globals: { ...globals.node },
+      globals: { ...globals.node, ...globals.browser },
     },
   },
 ];

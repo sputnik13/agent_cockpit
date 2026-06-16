@@ -14,11 +14,12 @@ import type { Root as HastRoot, Element as HastElement } from 'hast';
 import 'highlight.js/styles/base16/solarized-dark.css';
 import type { Root, RootContent, Code } from 'mdast';
 import { MermaidFrame } from './mermaid';
+import { GraphvizFrame } from './graphviz';
 import { openLinkTarget, type LinkContext } from '../links/openLinkTarget';
 
 export interface RenderedBlock {
   id: string;
-  kind: 'heading' | 'paragraph' | 'code' | 'mermaid' | 'list' | 'table' | 'other';
+  kind: 'heading' | 'paragraph' | 'code' | 'mermaid' | 'graphviz' | 'list' | 'table' | 'other';
   startLine: number;
   endLine: number;
   source?: string;
@@ -44,6 +45,7 @@ const sanitize = (html: string): string =>
       'data-start-line',
       'data-end-line',
       'data-mermaid-id',
+      'data-graphviz-id',
       'data-external',
       'data-inert',
       'data-localpath',
@@ -61,6 +63,7 @@ interface MermaidEntry {
 interface PreparedDoc {
   html: string;
   mermaidById: Map<string, MermaidEntry>;
+  graphvizById: Map<string, MermaidEntry>;
 }
 
 // Single whole-document pass: parse once with GFM, replace top-level mermaid
@@ -73,6 +76,8 @@ async function renderDoc(source: string): Promise<PreparedDoc> {
   const tree = unified().use(remarkParse).use(remarkGfm).parse(source) as Root;
   const mermaidById = new Map<string, MermaidEntry>();
   let mid = 0;
+  const graphvizById = new Map<string, MermaidEntry>();
+  let gid = 0;
 
   const children: RootContent[] = tree.children.map((node) => {
     const startLine = node.position?.start.line ?? 0;
@@ -89,6 +94,24 @@ async function renderDoc(source: string): Promise<PreparedDoc> {
           hName: 'div',
           hProperties: {
             'data-mermaid-id': id,
+            'data-start-line': startLine,
+            'data-end-line': endLine,
+          },
+        },
+      } as RootContent;
+    }
+
+    if (node.type === 'code' && ((node as Code).lang === 'dot' || (node as Code).lang === 'graphviz')) {
+      const id = `g${gid++}`;
+      graphvizById.set(id, { source: (node as Code).value, startLine, endLine });
+      return {
+        type: 'paragraph',
+        children: [],
+        position: node.position,
+        data: {
+          hName: 'div',
+          hProperties: {
+            'data-graphviz-id': id,
             'data-start-line': startLine,
             'data-end-line': endLine,
           },
@@ -116,7 +139,7 @@ async function renderDoc(source: string): Promise<PreparedDoc> {
     .use(rehypeStringify);
   const hast = await processor.run(tree);
   const html = processor.stringify(hast) as string;
-  return { html: sanitize(html), mermaidById };
+  return { html: sanitize(html), mermaidById, graphvizById };
 }
 
 // rehype transform: harden anchors + images.
@@ -258,15 +281,25 @@ export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
         const endLine = Number(el.getAttribute('data-end-line') ?? 0);
         const mermaidId = el.getAttribute('data-mermaid-id');
         const mermaidEntry = mermaidId ? doc!.mermaidById.get(mermaidId) : null;
+        const graphvizId = el.getAttribute('data-graphviz-id');
+        const graphvizEntry = graphvizId ? doc!.graphvizById.get(graphvizId) : null;
         const tag = el.tagName.toLowerCase();
-        const kind: RenderedBlock['kind'] = mermaidEntry ? 'mermaid' : kindFromTag(tag);
+        const kind: RenderedBlock['kind'] = mermaidEntry
+          ? 'mermaid'
+          : graphvizEntry
+            ? 'graphviz'
+            : kindFromTag(tag);
         const id = `b${i}`;
         const block: RenderedBlock = {
           id,
           kind,
           startLine,
           endLine,
-          ...(mermaidEntry ? { source: mermaidEntry.source, language: 'mermaid' } : {}),
+          ...(mermaidEntry
+            ? { source: mermaidEntry.source, language: 'mermaid' }
+            : graphvizEntry
+              ? { source: graphvizEntry.source, language: 'graphviz' }
+              : {}),
         };
         const changed =
           props.changedLineSet &&
@@ -287,6 +320,14 @@ export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
             <div key={id} style={wrapStyle} onClick={onClick}>
               {changed && <ChangedTag />}
               <MermaidFrame source={mermaidEntry.source} />
+            </div>
+          );
+        }
+        if (graphvizEntry) {
+          return (
+            <div key={id} style={wrapStyle} onClick={onClick}>
+              {changed && <ChangedTag />}
+              <GraphvizFrame source={graphvizEntry.source} />
             </div>
           );
         }

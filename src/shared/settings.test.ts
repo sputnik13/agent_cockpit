@@ -114,3 +114,20 @@ describe('normalizeSettings — terminalRenderer', () => {
     expect(normalizeSettings({ terminalRenderer: 'wterm' }).terminalRenderer).toBe('wterm');
   });
 });
+
+describe('normalizeSettings — followTerminalCwd', () => {
+  it('defaults to false when absent', () => {
+    expect(normalizeSettings({}).followTerminalCwd).toBe(false);
+    expect(DEFAULT_SETTINGS.followTerminalCwd).toBe(false);
+  });
+
+  it('keeps true verbatim', () => {
+    expect(normalizeSettings({ followTerminalCwd: true }).followTerminalCwd).toBe(true);
+  });
+
+  it('coerces non-true (incl. truthy non-boolean) to false', () => {
+    expect(normalizeSettings({ followTerminalCwd: false }).followTerminalCwd).toBe(false);
+    expect(normalizeSettings({ followTerminalCwd: 1 as unknown as boolean }).followTerminalCwd).toBe(false);
+    expect(normalizeSettings({ followTerminalCwd: 'yes' as unknown as boolean }).followTerminalCwd).toBe(false);
+  });
+});

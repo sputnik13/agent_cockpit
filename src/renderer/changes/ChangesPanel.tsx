@@ -13,6 +13,7 @@ import {
   cn,
 } from '@renderer/ui';
 import { useActiveChanges, useChangesStore, type DiffTarget } from './changesStore';
+import { useFollowTerminalCwd } from './followCwd';
 import { useContentSelection } from '@renderer/content';
 import { useProjectsStore, useSessionStore, isDisconnected } from '@renderer/providerClient';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
@@ -57,6 +58,9 @@ function matchesMode(file: FileChange, mode: FilterMode): boolean {
 }
 
 export function ChangesPanel(): JSX.Element {
+  // Auto-follow the active terminal pane's cwd when the toggle is on.
+  useFollowTerminalCwd();
+
   const { worktrees, activeWorktree, changeset, loading, selectedPath, baseline, target, branchPoint } =
     useActiveChanges();
   const setWorktree = useChangesStore((s) => s.setWorktree);

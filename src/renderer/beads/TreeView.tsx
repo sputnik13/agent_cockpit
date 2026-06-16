@@ -18,6 +18,23 @@ import type { BeadsTaskGraph } from '@shared/ipc/channels';
 /** Every state — used to suspend the filter inside focus mode (FA-5). */
 const ALL_STATES: Set<WorkgraphState> = new Set(WG_STATES);
 
+/** True when a node's id (or short suffix) or title matches the needle. */
+function nodeMatchesNeedle(id: string, title: string, needle: string): boolean {
+  const shortId = id.split('-').pop() ?? id;
+  return (
+    id.toLowerCase().includes(needle) ||
+    shortId.toLowerCase().includes(needle) ||
+    title.toLowerCase().includes(needle)
+  );
+}
+
+/** True when the node or any descendant matches the needle (ancestor-context
+ *  pruning: keep parent if a child matches so the tree stays legible). */
+function subtreeMatchesNeedle(node: TreeNode, needle: string): boolean {
+  if (nodeMatchesNeedle(node.issue.id, node.issue.title, needle)) return true;
+  return node.children.some((c) => subtreeMatchesNeedle(c, needle));
+}
+
 interface TreeViewProps {
   graph: BeadsTaskGraph;
   selectedId: string | null;
@@ -30,6 +47,9 @@ interface TreeViewProps {
   onFocus?: (id: string) => void;
   /** Leave focus (double-click the focused row, or banner ×/Escape). */
   onExitFocus?: () => void;
+  /** Search needle (case-insensitive). Filters tree to matching nodes with
+   *  ancestor context. Empty = no filtering. */
+  searchNeedle?: string;
 }
 
 /**
@@ -55,6 +75,7 @@ export function TreeView({
   focusId,
   onFocus,
   onExitFocus,
+  searchNeedle,
 }: TreeViewProps): JSX.Element {
   const focusNode = focusId ? findTreeNode(buildTree(graph), focusId) : null;
 
@@ -82,7 +103,15 @@ export function TreeView({
               </span>
             }
           >
-            {ancestor.title}
+            <span className="flex min-w-0 items-baseline gap-1.5">
+              <code
+                className="shrink-0 rounded bg-elev px-0.5 font-mono text-[9px] text-dim"
+                title={ancestor.id}
+              >
+                {ancestor.id.split('-').pop() ?? ancestor.id}
+              </code>
+              <span className="truncate">{ancestor.title}</span>
+            </span>
           </Row>
         ))}
         <TreeRow
@@ -101,13 +130,19 @@ export function TreeView({
     );
   }
 
-  const roots = buildTree(graph).filter((n) => visibleStates.has(deriveState(graph, n.issue)));
+  const needle = searchNeedle?.trim().toLowerCase() ?? '';
+
+  const roots = buildTree(graph).filter(
+    (n) =>
+      visibleStates.has(deriveState(graph, n.issue)) &&
+      (!needle || subtreeMatchesNeedle(n, needle)),
+  );
 
   if (roots.length === 0) {
     return (
       <EmptyState
         title="No tasks match the filter"
-        hint="Adjust the state filter to show more tasks."
+        hint={needle ? 'Adjust the search text or state filter.' : 'Adjust the state filter to show more tasks.'}
       />
     );
   }
@@ -126,6 +161,7 @@ export function TreeView({
           focusId={focusId ?? null}
           onFocus={onFocus}
           onExitFocus={onExitFocus}
+          searchNeedle={needle}
         />
       ))}
     </div>
@@ -144,6 +180,8 @@ interface TreeRowProps {
   onExitFocus?: () => void;
   /** Inside the focused subtree: always expanded (collapse ignored). */
   focusMode?: boolean;
+  /** Propagated needle for child subtree pruning. */
+  searchNeedle?: string;
 }
 
 function TreeRow({
@@ -157,6 +195,7 @@ function TreeRow({
   onFocus,
   onExitFocus,
   focusMode = false,
+  searchNeedle,
 }: TreeRowProps): JSX.Element {
   const [collapsed, setCollapsed] = useState(false);
   // Focus mode ignores collapse so the full ancestor path/subtree stays visible.
@@ -166,7 +205,11 @@ function TreeRow({
   const isFocused = issue.id === focusId;
   const blockerN = openBlockerCount(graph, issue);
   const childN = openChildCount(graph, issue);
-  const visibleChildren = node.children.filter((c) => visibleStates.has(deriveState(graph, c.issue)));
+  const visibleChildren = node.children.filter(
+    (c) =>
+      visibleStates.has(deriveState(graph, c.issue)) &&
+      (!searchNeedle || subtreeMatchesNeedle(c, searchNeedle)),
+  );
   const hasChildren = visibleChildren.length > 0;
 
   function toggle(e: MouseEvent): void {
@@ -223,7 +266,15 @@ function TreeRow({
           ) : undefined
         }
       >
-        {issue.title}
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <code
+            className="shrink-0 rounded bg-elev px-0.5 font-mono text-[9px] text-dim"
+            title={issue.id}
+          >
+            {issue.id.split('-').pop() ?? issue.id}
+          </code>
+          <span className="truncate">{issue.title}</span>
+        </span>
       </Row>
       {hasChildren && expanded && (
         <div role="group">
@@ -240,6 +291,7 @@ function TreeRow({
               onFocus={onFocus}
               onExitFocus={onExitFocus}
               focusMode={focusMode}
+              searchNeedle={searchNeedle}
             />
           ))}
         </div>

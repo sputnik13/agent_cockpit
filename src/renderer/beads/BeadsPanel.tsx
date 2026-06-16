@@ -297,7 +297,15 @@ function renderBody({
   }
 
   if (view === 'graph') {
-    return <GraphView graph={graph} selectedId={selectedId} onSelect={select} focusId={focusId} />;
+    return (
+      <GraphView
+        graph={graph}
+        selectedId={selectedId}
+        onSelect={select}
+        focusId={focusId}
+        searchNeedle={searchText}
+      />
+    );
   }
 
   if (view === 'tree') {
@@ -310,6 +318,7 @@ function renderBody({
         focusId={focusId}
         onFocus={onFocus}
         onExitFocus={onExitFocus}
+        searchNeedle={searchText}
       />
     );
   }
@@ -321,10 +330,14 @@ function renderBody({
     .map(({ state, issues }) => ({
       state,
       issues: needle
-        ? issues.filter(
-            (i) =>
-              i.id.toLowerCase().includes(needle) || i.title.toLowerCase().includes(needle),
-          )
+        ? issues.filter((i) => {
+            const shortId = i.id.split('-').pop() ?? i.id;
+            return (
+              i.id.toLowerCase().includes(needle) ||
+              shortId.toLowerCase().includes(needle) ||
+              i.title.toLowerCase().includes(needle)
+            );
+          })
         : issues,
     }))
     .filter((g) => g.issues.length > 0);
@@ -376,7 +389,15 @@ function renderBody({
                   ) : undefined
                 }
               >
-                {issue.title}
+                <span className="flex min-w-0 items-baseline gap-1.5">
+                  <code
+                    className="shrink-0 rounded bg-elev px-0.5 font-mono text-[9px] text-dim"
+                    title={issue.id}
+                  >
+                    {issue.id.split('-').pop() ?? issue.id}
+                  </code>
+                  <span className="truncate">{issue.title}</span>
+                </span>
               </Row>
             );
           })}

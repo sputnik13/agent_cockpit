@@ -88,6 +88,12 @@ export interface AppSettings {
    * shortcuts are unaffected and coexist.
    */
   byobuKeybindings: boolean;
+  /**
+   * When on, the Changes view auto-selects the worktree matching the active
+   * terminal pane's current directory (longest-prefix match against the known
+   * worktree list). Updates within ~1.5 s of a `cd`. Off by default.
+   */
+  followTerminalCwd: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -101,6 +107,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sessionIdleTimeoutMin: 20,
   devEnv: { mode: 'systemd-scope', memoryMaxMb: 16384 },
   byobuKeybindings: false,
+  followTerminalCwd: false,
 };
 
 /** Upper sanity bound for the idle timeout (minutes) — one day. */
@@ -175,6 +182,7 @@ export function normalizeSettings(input: unknown): AppSettings {
   const showAllChanges = o.showAllChanges === true;
   const showRunPanel = o.showRunPanel === true;
   const byobuKeybindings = o.byobuKeybindings === true;
+  const followTerminalCwd = o.followTerminalCwd === true;
   // Idle timeout: 0 = disabled; reject negatives/non-numbers -> default; clamp
   // to an upper sanity bound. Mirrors the fontSize precedent (validate then
   // fall back to the default on invalid input).
@@ -204,5 +212,6 @@ export function normalizeSettings(input: unknown): AppSettings {
     sessionIdleTimeoutMin,
     devEnv,
     byobuKeybindings,
+    followTerminalCwd,
   };
 }

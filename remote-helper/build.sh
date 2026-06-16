@@ -16,9 +16,6 @@ TARGETS=(
   "darwin/arm64"
 )
 
-rm -rf "${DIST}"
-mkdir -p "${DIST}"
-
 # sha256 helper that works on both macOS and Linux.
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -52,6 +49,28 @@ compute_source_hash() {
 
 SOURCE_HASH="$(compute_source_hash)"
 echo "source hash: ${SOURCE_HASH}"
+
+# Short-circuit: predev/prebuild run this on every dev/build start, but only
+# changed Go source should trigger a recompile. If the existing dist already
+# matches the current source hash and every target binary is present, skip the
+# (cross-compile) rebuild so warm starts are instant.
+if [ -f "${DIST}/manifest.json" ]; then
+  existing_hash="$(grep -o '[0-9a-f]\{64\}' "${DIST}/manifest.json" | head -1 || true)"
+  if [ "${existing_hash}" = "${SOURCE_HASH}" ]; then
+    all_present=1
+    for target in "${TARGETS[@]}"; do
+      os="${target%/*}"; arch="${target#*/}"
+      [ -f "${DIST}/helper-${VERSION}-${os}-${arch}" ] || all_present=0
+    done
+    if [ "${all_present}" = "1" ]; then
+      echo "remote-helper dist up-to-date (source hash unchanged); skipping rebuild"
+      exit 0
+    fi
+  fi
+fi
+
+rm -rf "${DIST}"
+mkdir -p "${DIST}"
 
 entries=()
 for target in "${TARGETS[@]}"; do

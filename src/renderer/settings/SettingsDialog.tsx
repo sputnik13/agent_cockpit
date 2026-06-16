@@ -103,6 +103,17 @@ export function SettingsDialog(): JSX.Element {
           />
         </Field>
         <Field
+          label="Changes panel follows terminal cwd"
+          help="When on, the Changes panel auto-selects the worktree matching the active terminal pane's current directory (longest-prefix match). Updates within ~1.5 s of a cd. Off by default."
+        >
+          <input
+            type="checkbox"
+            aria-label="Changes panel follows terminal cwd"
+            checked={settings.followTerminalCwd ?? false}
+            onChange={(e) => void set({ followTerminalCwd: e.target.checked })}
+          />
+        </Field>
+        <Field
           label="Show Run panel"
           help="Show the Run panel and create its dedicated tmux window. Off by default."
         >

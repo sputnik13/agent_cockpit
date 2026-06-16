@@ -93,7 +93,7 @@ surfaces.
 5. `ChangesPanel` lists files (status badges, filter/search). Selecting one
    loads it into `ContentViewer`, which picks a mode by extension: unified diff
    via `parsePatch`, rendered Markdown with `mapHunksToBlocks` changed-block
-   callouts, Mermaid (sandboxed iframe), raw, or image-compare.
+   callouts (with inline Mermaid + Graphviz diagrams), raw, or image-compare.
 6. The user marks reviewed state, leaves notes (`notes:create`), and the
    since-seen queue separates "changed now" from "already reviewed".
 
@@ -507,17 +507,22 @@ The provider seam realizes the primary flows as follows:
     `projectId`-tagged events, and the renderer `panelDataSync` routes by
     `(projectId, category)` to the right `byProject` slice.
 - **Content viewer.** `ContentViewer` selects a mode by extension and content:
-  `DiffView` (`parsePatch`), `markdown.tsx`, `mermaid.tsx` (sandboxed iframe),
-  `RawFile`, `ImageCompare`. The Markdown renderer runs one whole-document
+  `DiffView` (`parsePatch`), `markdown.tsx`, `mermaid.tsx`/`graphviz.tsx`
+  (inline diagrams), `RawFile`, `ImageCompare`. The Markdown renderer runs one whole-document
   unified pass (`remark-parse` → `remark-gfm` → `remark-rehype` →
   `rehype-highlight` → a local safe-link/image transform → `rehype-stringify`)
   so reference link definitions, footnotes, and reference images resolve
   across blocks. Top-level mdast nodes attach `data.hProperties` with
   `data-start-line`/`data-end-line`, which the renderer reads off the parsed
-  DOM to drive `hunkMap` changed-block callouts. Mermaid `code` nodes are
-  swapped pre-rehype for sentinel `<div data-mermaid-id="…">` placeholders,
-  then substituted with `MermaidFrame` (sandboxed iframe) React components
-  at render time. External anchors get `target="_blank"` +
+  DOM to drive `hunkMap` changed-block callouts. Mermaid (` ```mermaid `) and
+  Graphviz (` ```dot `/` ```graphviz `) `code` nodes are swapped pre-rehype for
+  sentinel `<div data-mermaid-id="…">` / `<div data-graphviz-id="…">`
+  placeholders, then substituted with `MermaidFrame` / `GraphvizFrame` React
+  components at render time. Both render to SVG (mermaid in `securityLevel:
+  'strict'`; graphviz via the bundled, inlined `@hpcc-js/wasm-graphviz`), which
+  is DOMPurify-sanitized before insertion and shown in a shared zoom/pan/source
+  `DiagramFrame`; no CDN or network is used (the inlined WASM loads same-origin
+  under the strict `script-src 'self' 'wasm-unsafe-eval'` CSP). External anchors get `target="_blank"` +
   `rel="noopener noreferrer"` and a delegated click handler routes them
   through `window.open` (Electron's `setWindowOpenHandler` funnels that to
   `shell.openExternal`); relative/`javascript:` anchors get `data-inert`;

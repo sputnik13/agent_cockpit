@@ -15,7 +15,6 @@ let sessionReaper: SessionReaperHandle | null = null;
 // Defense in depth: a late async emit (e.g. a node-pty chunk arriving during
 // window teardown) must never take down the whole process.
 process.on('uncaughtException', (err) => {
-  // eslint-disable-next-line no-console
   console.error('[main:uncaughtException]', err);
 });
 

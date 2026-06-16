@@ -57,9 +57,11 @@ write surface; everything else is read-only):
 
 ## Installation
 
-**Prerequisites:** Node.js ≥ 20 on macOS or Linux. The native modules
-(`better-sqlite3`, `node-pty`, `ssh2`) are rebuilt against Electron's ABI
-automatically.
+**Prerequisites:** Node.js ≥ 20 and a Go toolchain (≥ 1.21) on macOS or Linux.
+The native modules (`better-sqlite3`, `node-pty`, `ssh2`) are rebuilt against
+Electron's ABI automatically, and the remote-helper binaries are cross-compiled
+from source by the `predev`/`prebuild` npm hooks (they are not checked in). Go is
+a **build-time** requirement only — users of a packaged app do not need it.
 
 Run from source (dev mode, hot-reload, nothing installed system-wide):
 

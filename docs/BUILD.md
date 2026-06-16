@@ -5,6 +5,18 @@ and packaged into standalone distributables by
 [electron-builder](https://www.electron.build). Supported dev/build platforms:
 macOS and Linux.
 
+## Prerequisites
+
+- **Node.js ≥ 20** (see [`.nvmrc`](../.nvmrc), matching Electron 33).
+- **Go ≥ 1.21** — required to build the remote-helper binaries. They are
+  cross-compiled from source (CGO disabled) for `linux/amd64`, `linux/arm64`, and
+  `darwin/arm64` by [`remote-helper/build.sh`](../remote-helper/build.sh), which
+  the `predev`/`prebuild` npm hooks run automatically before every `npm run dev`,
+  `build`, or `package`. The binaries are **not checked in**; the script
+  short-circuits when the Go source hash is unchanged, so warm builds skip the
+  recompile. Go is a **build-time** requirement only — users of a packaged app do
+  not need it.
+
 ## Run from source (dev mode)
 
 ```sh

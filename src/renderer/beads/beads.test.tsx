@@ -570,6 +570,23 @@ describe('TreeView render (T3, FR2/FR4)', () => {
     fireEvent.click(within(focused).getByRole('button', { name: 'Expand' }));
     expect(within(focused).getAllByText('child').length).toBeGreaterThan(0);
   });
+
+  it('focus view honors the state filter — closed child hidden by default (arsa)', async () => {
+    installApi(TREE_FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    const tree = screen.getByRole('tree', { name: 'Task tree' });
+    fireEvent.doubleClick(within(tree).getAllByText('epic')[0]!);
+
+    // The focused subtree applies the state filter (default hides done), so the
+    // open child shows but the closed child does NOT — the old focus mode used
+    // ALL_STATES and would have shown it.
+    const focused = screen.getByRole('tree', { name: 'Task tree (focused)' });
+    expect(within(focused).getAllByText('child').length).toBeGreaterThan(0);
+    expect(within(focused).queryByText('closed-child')).not.toBeInTheDocument();
+  });
 });
 
 describe('search filter in tree view (gxfq)', () => {

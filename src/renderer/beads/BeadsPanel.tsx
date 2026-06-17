@@ -255,6 +255,9 @@ function StatesDropdown({
               key={group}
               checked={visibleStates.has(group)}
               onCheckedChange={() => onToggle(group)}
+              // Keep the menu open across toggles so several states can be flipped
+              // in one pass; it still closes on Escape / outside click.
+              onSelect={(e) => e.preventDefault()}
               className="flex cursor-pointer select-none items-center gap-2 rounded px-2 py-1 outline-none data-[highlighted]:bg-accent/20"
             >
               <RDropdown.ItemIndicator>
@@ -337,6 +340,7 @@ function renderBody({
         searchNeedle={searchText}
         pinnedEpicIds={pinnedEpicIds}
         onTogglePin={onTogglePin}
+        visibleStates={visibleStates}
       />
     );
   }

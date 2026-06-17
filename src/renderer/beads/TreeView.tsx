@@ -10,14 +10,10 @@ import {
   openChildCount,
   priorityLabel,
   STATE_TONE,
-  WG_STATES,
   type WorkgraphState,
   type TreeNode,
 } from './graphSelectors';
 import type { BeadsTaskGraph } from '@shared/ipc/channels';
-
-/** Every state — used to suspend the filter inside focus mode (FA-5). */
-const ALL_STATES: Set<WorkgraphState> = new Set(WG_STATES);
 
 /** True when a node's id (or short suffix) or title matches the needle. */
 function nodeMatchesNeedle(id: string, title: string, needle: string): boolean {
@@ -139,8 +135,9 @@ export function TreeView({
 
   const focusNode = focusId ? findTreeNode(buildTree(graph), focusId) : null;
 
-  // Focus mode: ancestor breadcrumb (context) + the focused subtree, filter
-  // suspended and always expanded.
+  // Focus mode: ancestor breadcrumb (context) + the focused subtree. The state
+  // filter IS honored within the subtree (TreeRow filters its children); the
+  // focused root node and the ancestor breadcrumb always render as context.
   if (focusId && focusNode) {
     const path = ancestorsOf(graph, focusId);
     return (
@@ -180,7 +177,7 @@ export function TreeView({
           graph={graph}
           selectedId={selectedId}
           onSelect={onSelect}
-          visibleStates={ALL_STATES}
+          visibleStates={visibleStates}
           focusId={focusId}
           onFocus={onFocus}
           onExitFocus={onExitFocus}

@@ -7,7 +7,7 @@ import {
   type GraphEdgeKind,
   type LaidOutNode,
 } from './graphLayout';
-import { priorityLabel, resolveAnchorId, STATE_COLOR } from './graphSelectors';
+import { priorityLabel, resolveAnchorId, STATE_COLOR, type WorkgraphState } from './graphSelectors';
 import { PinButton } from './PinButton';
 
 const { NODE_W, NODE_H } = layoutConsts;
@@ -51,6 +51,9 @@ interface GraphViewProps {
   /** Toggle an epic's Columns focus-set membership. When provided, epic nodes
    *  show a pin toggle. */
   onTogglePin?: (id: string) => void;
+  /** Derived-state visibility filter, shared with the other views. Nodes whose
+   *  state is hidden are dropped (and their incident edges with them). */
+  visibleStates: Set<WorkgraphState>;
 }
 
 /**
@@ -69,6 +72,7 @@ export function GraphView({
   searchNeedle,
   pinnedEpicIds,
   onTogglePin,
+  visibleStates,
 }: GraphViewProps): JSX.Element {
   // Focus mode (FA-5 "option B"): anchor on the focused node and expand the full
   // reachable subgraph (Infinity hops). Otherwise anchor on the selection (or a
@@ -98,7 +102,19 @@ export function GraphView({
     );
   }
 
-  const pos = new Map(laid.nodes.map((n) => [n.id, n]));
+  // Honor the shared state filter: drop nodes whose derived state is hidden;
+  // edges to a dropped node fall away automatically (the edge render skips any
+  // endpoint missing from `pos`).
+  const visibleNodes = laid.nodes.filter((n) => visibleStates.has(n.state));
+  if (visibleNodes.length === 0) {
+    return (
+      <EmptyState
+        title="No tasks match the filter"
+        hint="Adjust the state filter to show more of the graph."
+      />
+    );
+  }
+  const pos = new Map(visibleNodes.map((n) => [n.id, n]));
 
   return (
     <svg
@@ -155,7 +171,7 @@ export function GraphView({
             </line>
           );
         })}
-        {laid.nodes.map((n) => (
+        {visibleNodes.map((n) => (
           <NodeCard
             key={n.id}
             node={n}

@@ -470,6 +470,59 @@ The provider seam realizes the primary flows as follows:
   node/row in any view — or any column — selects it). The view flag persists per
   project in `localStorage`. The views are read-only navigation; beads mutation
   lives only in `TaskDetail` (comments / add-child / lifecycle).
+- **Bead lifecycle states & transitions.** What an agent picks up is driven by
+  `br ready`, defined by `br` as **`open` AND unblocked AND not-deferred** — so
+  **only `open` is ever ready**. `br`'s `Status` is a JSON-Schema enum of eight
+  canonical values (`open`, `in_progress`, `blocked`, `deferred`, `draft`,
+  `closed`, `tombstone`, `pinned`) `anyOf`'d with a bare string — i.e. the enum is
+  advisory and **any free-text status validates** (`br update --status done`
+  succeeds). `--status` only refuses `closed`/`tombstone`, forcing `br close` /
+  `br delete`. The cockpit supports the canonical set in three buckets:
+
+  - **Ready-eligible:** `open` (shows in the workgraph as Ready only when
+    unblocked and not deferred).
+  - **Active / pending (not ready, returns to ready):** `in_progress` (claimed),
+    `blocked` (open with unresolved blocking deps — normally *derived* from
+    `br dep`, not hand-set), `deferred` (snoozed until a date), `draft` (captured
+    but not ready to start), `pinned` (special/sticky).
+  - **Terminal (done):** `closed`, `tombstone`.
+
+  ```mermaid
+  stateDiagram-v2
+    [*] --> draft: create --status draft
+    [*] --> open: create (default)
+    draft --> open: promote (--status open)
+    open --> in_progress: br update --claim
+    in_progress --> open: release (--status open)
+    open --> deferred: br defer
+    deferred --> open: br undefer / date passes
+    open --> blocked: blocking dep added
+    blocked --> open: blockers close
+    open --> closed: br close
+    in_progress --> closed: br close
+    closed --> open: br reopen
+    open --> [*]: br delete (tombstone)
+    closed --> [*]: br delete (tombstone)
+  ```
+
+  **Agent rules (the consistent set to use):** claim with `br update --claim`
+  (→ `in_progress`); finish ONLY with `br close` (→ `closed`) — that is the one
+  state that is both not-ready and truly terminal, and it is what unblocks
+  dependents and feeds `br changelog`; snooze with `br defer`/`br undefer`; leave
+  `blocked` to dependency edges. **Never** `br update --status <free-text>` (e.g.
+  `done`/`completed`): `br` accepts it, but the bead is then neither `open` (so it
+  never shows ready again — looks abandoned) nor `closed` (so it keeps blocking its
+  dependents and is excluded from changelogs) — a limbo state.
+
+  **Cockpit rendering** is derived from status in the single source
+  `graphSelectors.ts` (`deriveState`/`isTerminal`/`statusGroup`): `closed`/
+  `tombstone` are terminal (hidden by default); `in_progress` and stored `blocked`
+  map to their states; `open` (unblocked) → Ready. **Known gap:** `deriveState`
+  currently maps any unrecognized status — including the valid `deferred`/`draft`
+  and any free-text value — to **Ready**, so a deferred/draft/`done`-status bead is
+  shown as actionable. Aligning the renderer to this canonical set (treat
+  `deferred`/`draft` as their own non-ready buckets; surface free-text statuses as
+  a flagged "not properly closed" state rather than Ready) is the consistency fix.
 - **Sessions.** `SessionsDialog` is a management modal (opened from a Sessions
   button in the Terminal panel header, mirroring Manage Projects — not a dock
   panel) that lists `tmux` sessions on the cockpit socket via `sessions:list` and

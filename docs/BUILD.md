@@ -54,6 +54,18 @@ Equivalent npm scripts: `npm run package`, `package:mac`, `package:linux`,
 `package:dir`. Each runs `npm run build` first, then electron-builder. Artifacts
 are written to `release/` (gitignored).
 
+### Version
+
+The packaged app's `<version>` comes from the **`vX.Y.Z` release tag**, not the
+static `package.json` version. Each package script passes
+`-c.extraMetadata.version="$(node scripts/release-version.mjs)"` to
+electron-builder; the helper resolves the `vX.Y.Z` tag reachable from `HEAD`, else
+the highest `vX.Y.Z` tag in the repo (git tags are shared across worktrees, so the
+tag the release flow puts on the public commit is found even when packaging from
+`main`), falling back to `package.json` when no release tag exists. Release tags
+are created per public/GitHub release by the publish flow (semver, patch
+auto-bumped); see the publish-to-github workflow.
+
 Output:
 
 - **macOS:** `release/Agent Cockpit-<version>-arm64.dmg` and `...-arm64-mac.zip`,

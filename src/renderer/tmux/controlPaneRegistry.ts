@@ -13,7 +13,7 @@
  * sink, and disposal is explicit (pane/window close) or via the idle reaper.
  */
 import { type AppSettings } from '@shared/settings';
-import { TERMINAL_SCROLLBACK, type LayoutNode } from '@shared/tmux';
+import { TERMINAL_SCROLLBACK, listPanesAltScreen, type LayoutNode } from '@shared/tmux';
 import { agentCockpit } from '../providerClient';
 import { useSettingsStore } from '../settings';
 import { createPaneRenderer, type PaneRenderer } from './paneRenderer';
@@ -169,17 +169,7 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
       // reaper / app restart) the captured content is non-blank, so the
       // seed still restores scrollback.
       if (!lines.some((line) => line.trim().length > 0)) return;
-      // Capture reply lines come from the parser's latin1Decode path (each JS
-      // char code IS the original byte 0..255). Passing the string straight to
-      // term.write would make xterm interpret bytes ≥ 0x80 as Unicode codepoints
-      // (so 0x9B becomes U+009B / CSI when interpreted as a codepoint, putting
-      // xterm's VT parser into states it cannot recover from — the "Parsing
-      // error: [object Object]" log). Re-encode to bytes so xterm sees the
-      // original byte stream and UTF-8-decodes glyphs correctly. See CLAUDE.md.
-      const text = lines.join('\r\n') + '\r\n';
-      const bytes = new Uint8Array(text.length);
-      for (let i = 0; i < text.length; i += 1) bytes[i] = text.charCodeAt(i) & 0xff;
-      renderer.write(bytes);
+      renderer.write(seedBytesFromCapture(lines));
     })
     .catch(() => {
       /* sink is already bound; nothing to do */
@@ -407,6 +397,19 @@ export function applyAppearance(entry: PaneEntry, settings: AppSettings): void {
   invalidateCellSize();
 }
 
+/** Re-encode `capture-pane` reply lines back to the raw byte stream xterm
+ *  expects. The parser stores reply lines via its latin1Decode path (each JS char
+ *  code IS the original byte 0..255); passing the string straight to `term.write`
+ *  would make xterm read bytes ≥ 0x80 as Unicode codepoints (0x9B → U+009B/CSI),
+ *  wedging the VT parser ("Parsing error: [object Object]"). Re-encoding to bytes
+ *  and joining rows with CRLF reproduces the wire faithfully. See CLAUDE.md. */
+function seedBytesFromCapture(lines: string[]): Uint8Array {
+  const text = lines.join('\r\n') + '\r\n';
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i += 1) bytes[i] = text.charCodeAt(i) & 0xff;
+  return bytes;
+}
+
 /** Non-destructively recover a display-corrupted pane: refit to the host and
  *  repaint every visible row from the renderer's OWN buffer — the same primitives
  *  a window-resize or {@link applyAppearance} already uses. It MUST NOT dispose
@@ -430,6 +433,88 @@ export function recoverTab(projectId: string, windowId: string | null): void {
   for (const paneId of collectLayoutPaneIds(layout)) {
     const e = entries.get(compositeId(projectId, paneId));
     if (e) recover(e);
+  }
+}
+
+// ESC[3J ESC[2J ESC[H — clear scrollback, clear screen, home cursor. Written
+// before a re-seed so the captured buffer replaces the stale content instead of
+// appending after it.
+const CLEAR_BEFORE_SEED = new Uint8Array([
+  0x1b, 0x5b, 0x33, 0x4a, 0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x48,
+]);
+
+/**
+ * DESTRUCTIVELY re-seed a pane from tmux's current `capture-pane` output: clear
+ * the renderer buffer, then re-write the captured content (reusing the latin1
+ * re-encode seed path — see {@link seedBytesFromCapture} and the CLAUDE.md
+ * raw-byte invariant), then refit and repaint.
+ *
+ * The caller MUST have confirmed the pane is on the NORMAL screen
+ * (`#{alternate_on}` == 0). Re-seeding a live alternate-screen TUI (vim, htop,
+ * Claude Code) makes the app's own redraw overlay the seeded lines and scroll
+ * them away — the runaway-scroll hazard that {@link recover} exists to avoid.
+ * This is the deep-desync path that otherwise needs a full renderer reload.
+ */
+export async function reseedPane(entry: PaneEntry): Promise<void> {
+  const lines = await agentCockpit.tmuxControl.capturePane(entry.paneId, TERMINAL_SCROLLBACK);
+  entry.renderer.write(CLEAR_BEFORE_SEED);
+  if (lines.length > 0 && lines.some((line) => line.trim().length > 0)) {
+    entry.renderer.write(seedBytesFromCapture(lines));
+  }
+  fit(entry);
+  entry.renderer.repaintFromBuffer();
+  invalidateCellSize();
+}
+
+/** Parse a `list-panes … '#{pane_id} #{alternate_on}'` reply into
+ *  paneId → isAlternateScreen. Unparseable lines are skipped. */
+export function parseAltScreenReply(lines: string[]): Map<string, boolean> {
+  const byPane = new Map<string, boolean>();
+  for (const line of lines) {
+    const [pane, alt] = line.trim().split(/\s+/);
+    if (pane) byPane.set(pane, alt === '1');
+  }
+  return byPane;
+}
+
+/** Whether a pane may be DESTRUCTIVELY re-seeded — only when positively known to
+ *  be on the normal screen. Unknown (`undefined`, e.g. query failed) or alternate
+ *  (`true`) → false, so a live TUI is never re-seeded. */
+export function mayReseed(alt: boolean | undefined): boolean {
+  return alt === false;
+}
+
+/**
+ * HARD-recover every pane in the active tab: re-seed panes on the NORMAL screen
+ * from `capture-pane`, and cheap-repaint panes on the ALTERNATE screen (whose
+ * correct hard fix is the client resize round-trip the panel issues alongside
+ * this — its SIGWINCH makes the TUI redraw itself). One `list-panes` round-trip
+ * learns each pane's `#{alternate_on}`. Safe default ({@link mayReseed}): a pane
+ * is re-seeded ONLY when positively known to be on the normal screen; unknown /
+ * query-failed / alternate all fall back to the non-destructive repaint.
+ */
+export async function hardRecoverTab(projectId: string, windowId: string | null): Promise<void> {
+  if (!windowId) return;
+  const layout = useTmuxStore.getState().byProject[projectId]?.windows[windowId]?.layout ?? null;
+  const paneIds = collectLayoutPaneIds(layout);
+  if (paneIds.length === 0) return;
+
+  let altById = new Map<string, boolean>();
+  try {
+    const reply = await useTmuxStore.getState().command(listPanesAltScreen(windowId));
+    if (!reply.error) altById = parseAltScreenReply(reply.lines);
+  } catch {
+    /* query failed; every pane falls back to the safe repaint below */
+  }
+
+  for (const paneId of paneIds) {
+    const e = entries.get(compositeId(projectId, paneId));
+    if (!e) continue;
+    if (mayReseed(altById.get(paneId))) {
+      await reseedPane(e); // positively normal-screen: full re-seed is safe
+    } else {
+      recover(e); // alt-screen / unknown: non-destructive repaint only
+    }
   }
 }
 

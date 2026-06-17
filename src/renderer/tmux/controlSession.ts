@@ -330,6 +330,29 @@ export function pushClientSize(host: HTMLElement | null): void {
   if (cols > 0 && rows > 0) void store().resize(cols, rows);
 }
 
+/**
+ * Force a real client-size round-trip so tmux re-emits `%output` and SIGWINCHes
+ * the pane apps. tmux only re-emits when the client size actually CHANGES — a
+ * same-size push is a no-op, which is why a plain repaint+push rarely fixes
+ * reflow/size desync. This shrinks the client by one row NOW (synchronously, so
+ * it targets the project active at call time — a deferred push could resize the
+ * wrong project after a fast switch, see CLAUDE.md), then restores the true size
+ * on the next frame, but only if the same project is still active. Equivalent to
+ * nudging the window border and back; one-shot + user-initiated, so it cannot
+ * self-loop the way layout-ack-driven nudges did.
+ */
+export function nudgeClientSize(host: HTMLElement | null): void {
+  if (!host) return;
+  const { cols, rows } = clientCells(host);
+  if (cols <= 0 || rows <= 0) return;
+  const projectId = useTmuxStore.getState().activeProjectId;
+  void store().resize(cols, Math.max(1, rows - 1));
+  requestAnimationFrame(() => {
+    if (useTmuxStore.getState().activeProjectId !== projectId) return;
+    pushClientSize(host);
+  });
+}
+
 // ---- Project-scoped lifecycle (single shared subscription) ----
 let subscription: (() => void) | null = null;
 /** Projects whose windows have been initialized (non-bail `ensureWindows`) this

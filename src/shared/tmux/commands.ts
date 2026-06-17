@@ -85,6 +85,17 @@ export function listPanes(): string {
   return `list-panes -s -F '#{window_id} #{pane_id} #{pane_width} #{pane_height} #{pane_active}'`;
 }
 
+/**
+ * List a window's panes with their alternate-screen flag, for hard-refresh
+ * gating. A pane on the alternate screen (`#{alternate_on}` == 1) is running a
+ * full-screen TUI (vim, htop, Claude Code) and MUST NOT be re-seeded from
+ * `capture-pane` — the app's own redraw would overlay the seeded lines and scroll
+ * them away. Reply lines: `%<n> <0|1>`.
+ */
+export function listPanesAltScreen(windowId: string): string {
+  return `list-panes -t ${windowId} -F '#{pane_id} #{alternate_on}'`;
+}
+
 /** True when the value is already a space-separated lowercase hex-pair string. */
 function isHex(v: string | Uint8Array): boolean {
   return typeof v === 'string' && /^([0-9a-f]{2})( [0-9a-f]{2})*$/.test(v);

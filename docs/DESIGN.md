@@ -372,16 +372,28 @@ The provider seam realizes the primary flows as follows:
     SCREEN-style title (`\ek...\e\\`, extracted by
     [`extractScreenTitle`](../src/renderer/tmux/extractScreenTitle.ts)) over
     the window name when the running program sets one.
-  - **In-place tab refresh (display recovery).** The tab toolbar has a refresh
-    control that repairs a display-corrupted tab **non-destructively** via
-    `recoverTab(projectId, windowId)` in `controlPaneRegistry` — refit + glyph-
-    atlas rebuild + `term.refresh()` repaint from xterm's OWN buffer, the same
-    primitives a window-resize uses. It never disposes the xterm, re-seeds from
-    `capture-pane`, or remounts (a re-seed would cause runaway scroll on a live
-    alt-screen TUI). The follow-up `pushClientSize(host)` runs **synchronously**
-    at click time so it targets the project active at click time, and a
-    structured diagnostic entry (project/window/pane ids, sizes, layout,
-    `trigger=manual-refresh`) is logged — no buffer dump. tmux state is untouched.
+  - **In-place tab refresh (two tiers).** The tab toolbar refresh control has two
+    modes (`refreshActiveTab(hard)`). Both repaint every pane from xterm's OWN
+    buffer (`recoverTab` — refit + glyph-atlas rebuild + `term.refresh()`, never a
+    dispose/remount) and then force a real client resize round-trip
+    (`nudgeClientSize`: shrink one row, restore next frame). The round-trip is the
+    key fix for size/reflow desync: tmux only re-emits `%output` (and SIGWINCHes
+    the pane apps) when the client size actually CHANGES, so a same-size push is a
+    no-op — which is why a plain repaint rarely fixed mis-wrapped output. The
+    resize starts **synchronously** at click time so it targets the project active
+    then; the next-frame restore is guarded on `activeProjectId` so a fast project
+    switch never resizes the wrong project. **Shift-click** is a *hard refresh*
+    (`hardRecoverTab`): one `list-panes` round-trip reads each pane's
+    `#{alternate_on}`, then panes positively on the NORMAL screen are
+    destructively re-seeded from `capture-pane` (`reseedPane` — clear + re-write,
+    reusing the latin1 re-encode seed path) for deep desync, while alternate-screen
+    panes (a live TUI) get only the non-destructive repaint and rely on the resize
+    round-trip's redraw — re-seeding them would runaway-scroll. Safe default
+    (`mayReseed`): re-seed ONLY when positively normal-screen; unknown /
+    query-failed / alternate fall back to repaint. A structured diagnostic entry
+    (project/window/pane ids, sizes, layout, `trigger=manual-refresh|hard-refresh`)
+    is logged — no buffer dump. Both modes work identically on local and remote
+    (`capturePane`/`resizeClient`/`command` exist on both transports).
   - **New-split focus.** A split issues `split-window … -P -F '#{pane_id}'` and
     records the reply's pane id as a pending-active pane; the active-pane
     resolution prefers it once it appears in `layout`, moving **both** the visual
@@ -459,14 +471,24 @@ The provider seam realizes the primary flows as follows:
     `isHiddenFromChanges`, and `WATCH_DEBOUNCE_MS`. No Node deps; importable by
     main and renderer.
   - **Local mechanism** (`electron/main/providers/local/watch.ts`): three watchers
-    per subscription, all policy-driven — (1) a chokidar instance over the
-    worktree (exclusions from `WatchSpec`); (2) a native Node `fs.watch` on
-    `.git/` non-recursive for `HEAD`/`packed-refs` events; (3) a native Node
-    `fs.watch` on `.git/refs` recursive. Directory-level `fs.watch` routes through
-    libuv's FSEvents on macOS, detecting git's atomic temp+rename pattern
-    deterministically — chokidar v4's per-file kqueue watches miss the inode rename.
-    No per-file descent into `.git`/`.beads`, no FD pin on `beads.db`. Both
-    `.git` watchers fail silently on non-git repos.
+    per subscription, all policy-driven — (1) a **working-tree watcher**
+    (`workingTreeWatcher.ts`); (2) a native Node `fs.watch` on `.git/`
+    non-recursive for `HEAD`/`packed-refs` events; (3) a native Node `fs.watch`
+    on `.git/refs` recursive. The working-tree watcher is platform-split: on
+    **macOS/Windows** it is a single OS-level recursive `fs.watch(root,
+    {recursive:true})` (FSEvents / ReadDirectoryChangesW) — one handle for the
+    whole subtree, no upfront tree walk, no per-file FD; on **Linux** it is
+    chokidar, because Linux has no recursive inotify (`fs.watch({recursive:true})`
+    is emulated per-directory and cannot prune `node_modules` before adding
+    watches, so chokidar's `ignored`-pruned descent adds fewer inotify watches).
+    The whole-tree *coverage* (tracked + untracked, so new files are caught) is
+    required for the Changes panel; the per-FD cost on macOS was only chokidar
+    v4's walk-and-watch-per-dir implementation, removed by the native path. Both
+    paths apply the same `gitignore + excluded-segment` predicate (the native
+    path filters in the event callback; chokidar via `ignored`). Directory-level
+    `fs.watch` routes through libuv's FSEvents on macOS, detecting git's atomic
+    temp+rename pattern deterministically. No per-file descent into `.git`/`.beads`,
+    no FD pin on `beads.db`. Both `.git` watchers fail silently on non-git repos.
   - **Remote mechanism** (`remote/index.ts` + `rpcClient.ts`): sends the derived
     `WatchSpec` in the `watch.subscribe` RPC. The Go helper (`remote-helper/watch.go`)
     is driven by the received spec — it does not hardcode its own `excludedDirs`.

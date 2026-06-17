@@ -11,18 +11,18 @@
  * session ends), so there is no warm/hot pause state: a watch either runs or is
  * torn down. The previous `setPaused` gating was removed with `suspend()`.
  */
-import chokidar, { type FSWatcher } from 'chokidar';
 import { watch as fsWatch, type FSWatcher as NodeFSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { deriveWatchSpec } from '@shared/watch/policy';
 import { createGitignoreFilter } from '../../git/gitignoreFilter';
 import { createWatchIngest, type WatchIngest } from '../../watch/ingest';
+import { createWorkingTreeWatcher, type WorkingTreeWatcher } from './workingTreeWatcher';
 import type { WatchEvent, WatchHandler, WatchSubscription } from '../types';
 
 let counter = 0;
 
 interface ActiveWatch {
-  watcher: FSWatcher;
+  workingTree: WorkingTreeWatcher;
   gitWatchers: NodeFSWatcher[];
   ingest: WatchIngest;
 }
@@ -32,7 +32,7 @@ export class LocalWatchManager {
 
   constructor(private readonly rootPath: string) {}
 
-  subscribe(globs: string[], handler: WatchHandler): WatchSubscription {
+  subscribe(_globs: string[], handler: WatchHandler): WatchSubscription {
     const token = `local-watch-${++counter}`;
     const spec = deriveWatchSpec();
     const gitignored = createGitignoreFilter(this.rootPath);
@@ -53,14 +53,15 @@ export class LocalWatchManager {
     };
 
     // Directory-granularity (`.git`, `.beads`) and never-recurse (`node_modules`)
-    // segments are excluded from the chokidar per-file walk anywhere they appear.
-    // For `.beads` this is load-bearing: chokidar v4 holds a per-file read handle
-    // on every entry it walks, so descending into `.beads/` pins an open FD on
-    // `beads.db` (+ -wal/-shm) for the life of the app — blocking
-    // `br doctor --repair`'s exclusive lock and contributing to index corruption
-    // (local_repo_explorer-fg5z). For `.git` the per-file kqueue watches lose the
-    // inode on atomic ref renames. Both are watched at directory granularity via
-    // the native fs.watch watchers below instead.
+    // segments are dropped from the working-tree mechanism anywhere they appear.
+    // For `.beads` this is load-bearing: it must not pin an open FD on `beads.db`
+    // (+ -wal/-shm) — blocking `br doctor --repair`'s exclusive lock and
+    // contributing to index corruption (local_repo_explorer-fg5z). For `.git` the
+    // ref signals need atomic temp+rename detection. Both are watched at directory
+    // granularity via the native fs.watch watchers below instead. (The
+    // single-handle native recursive path holds no per-file FD, but we keep this
+    // exclusion so behavior is identical to the chokidar/Linux path and the
+    // dedicated watchers remain the single source of git-state/beads signals.)
     const excludedSegments = new Set<string>([...spec.directoryGranularity, ...spec.neverRecurse]);
     const isExcludedPath = (p: string): boolean =>
       p
@@ -68,16 +69,17 @@ export class LocalWatchManager {
         .split('/')
         .some((seg) => excludedSegments.has(seg));
 
-    const watcher = chokidar.watch(globs.length ? globs : ['.'], {
-      cwd: this.rootPath,
-      ignoreInitial: true,
-      ignored: (p: string) => gitignored(p) || isExcludedPath(p),
+    // Working-tree mechanism: one native recursive fs.watch on macOS/Windows, a
+    // chokidar instance on Linux (see workingTreeWatcher.ts). globs is no longer
+    // honored — chokidar v4 dropped glob support and callers only ever pass `['.']`.
+    const workingTree = createWorkingTreeWatcher({
+      rootPath: this.rootPath,
+      shouldIgnore: (p: string) => gitignored(p) || isExcludedPath(p),
+      onPath: feed,
     });
 
-    const active: ActiveWatch = { watcher, gitWatchers: [], ingest };
+    const active: ActiveWatch = { workingTree, gitWatchers: [], ingest };
     this.watches.set(token, active);
-
-    watcher.on('all', (_event, path) => feed(path));
 
     // `.git` non-recursive: top-level rewrites (HEAD on branch switch, packed-refs
     // on `git pack-refs`). We forward every filename and let the shared policy
@@ -148,7 +150,7 @@ export class LocalWatchManager {
             /* already closed */
           }
         }
-        await w.watcher.close();
+        await w.workingTree.close();
       },
     };
   }
@@ -165,7 +167,7 @@ export class LocalWatchManager {
           /* already closed */
         }
       }
-      await w.watcher.close();
+      await w.workingTree.close();
     }
   }
 }

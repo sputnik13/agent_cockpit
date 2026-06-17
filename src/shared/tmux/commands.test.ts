@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { capturePane, TERMINAL_SCROLLBACK } from './index';
+import { capturePane, listPanesAltScreen, TERMINAL_SCROLLBACK } from './index';
+
+describe('listPanesAltScreen builder (hard-refresh gating)', () => {
+  it('targets the window and formats pane id + alternate-screen flag', () => {
+    expect(listPanesAltScreen('@2')).toBe("list-panes -t @2 -F '#{pane_id} #{alternate_on}'");
+  });
+});
 
 describe('capturePane builder (history-seed depth)', () => {
   it('omits -S when no startLine is given (visible-screen seed, today’s behavior)', () => {

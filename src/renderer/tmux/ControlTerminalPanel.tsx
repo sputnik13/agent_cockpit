@@ -16,6 +16,7 @@ import {
   acquireControlSession,
   controlBridgeReady,
   isHiddenWindow,
+  nudgeClientSize,
   pushClientSize,
   releaseControlSession,
   resetControlSession,
@@ -301,28 +302,37 @@ export function ControlTerminalPanel(): JSX.Element {
   };
   const target = activePaneId ?? '';
 
-  // Non-destructive in-place tab refresh (FR1–FR3): recover every pane in the
-  // active tab (refit + atlas rebuild + repaint from xterm's OWN buffer — no
-  // dispose, no capture-pane re-seed, no remount), then push the client size
-  // SYNCHRONOUSLY so it targets the project active at CLICK time (a deferred
-  // rAF could resize the wrong project after a switch). Emits a structured
+  // Two-tier in-place tab refresh. Both repaint every pane from xterm's OWN
+  // buffer (no remount) and force a real client resize round-trip
+  // (`nudgeClientSize`) so tmux actually re-emits %output and SIGWINCHes the
+  // apps — a same-size push is a tmux no-op, which is why a plain repaint rarely
+  // fixed reflow/size desync. The size round-trip starts SYNCHRONOUSLY so it
+  // targets the project active at CLICK time. `hard` (shift-click) additionally
+  // re-seeds normal-screen panes from capture-pane for deep desync; alternate-
+  // screen panes are left to the resize round-trip's redraw (re-seeding a live
+  // TUI would runaway-scroll — gated inside hardRecoverTab). Emits a structured
   // diagnostic entry — no buffer/screen dump.
-  const recoverActiveTab = (): void => {
+  const refreshActiveTab = (hard: boolean): void => {
     const projectId = activeId;
     const windowId = currentWindow;
     if (!projectId || !windowId) return;
     const ids = paneIds(layout);
-    paneRegistry.recoverTab(projectId, windowId);
-    pushClientSize(hostRef.current);
+    if (hard) {
+      void paneRegistry.hardRecoverTab(projectId, windowId).catch(() => {});
+    } else {
+      paneRegistry.recoverTab(projectId, windowId);
+    }
+    nudgeClientSize(hostRef.current);
     const sizes = ids.map((id) => {
       const s = paneRegistry.getPaneTermSize(projectId, id);
       return s ? `${id}:${s.cols}x${s.rows}` : `${id}:?`;
     });
+    const mode = hard ? 'hard-refresh' : 'manual-refresh';
     logDiagnostic(
       'info',
       'control-terminal',
-      `manual-refresh project=${projectId} window=${windowId} active=${target || '-'} ` +
-        `panes=[${sizes.join(',')}] layout=${ids.join('|')} trigger=manual-refresh`,
+      `${mode} project=${projectId} window=${windowId} active=${target || '-'} ` +
+        `panes=[${sizes.join(',')}] layout=${ids.join('|')} trigger=${mode}`,
     );
   };
 
@@ -595,10 +605,10 @@ export function ControlTerminalPanel(): JSX.Element {
         actions={
           <>
             <IconButton
-              label="Refresh tab (repaint without touching tmux)"
+              label="Refresh tab: repaint + resize round-trip. Shift-click for a hard refresh (re-seed shell panes from tmux)."
               size="sm"
               disabled={!layout}
-              onClick={recoverActiveTab}
+              onClick={(e) => refreshActiveTab(e.shiftKey)}
             >
               ⟳
             </IconButton>

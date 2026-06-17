@@ -114,6 +114,21 @@ export function SettingsDialog(): JSX.Element {
           />
         </Field>
         <Field
+          label="Workgraph side-by-side columns"
+          help="Comfortable number of epic columns in the workgraph Columns view. Up to this many pinned-epic columns fill the panel; pinning more is still allowed but shows a density hint. Raise it (e.g. to 3) if you routinely compare more epics. Default 2."
+        >
+          <input
+            type="number"
+            min={1}
+            max={6}
+            step={1}
+            aria-label="Workgraph side-by-side columns"
+            className="w-20 rounded border border-dim bg-bg px-2 py-1 text-right text-[13px] text-fg"
+            value={settings.workgraphColumnsSoftCap ?? 2}
+            onChange={(e) => void set({ workgraphColumnsSoftCap: Number(e.target.value) })}
+          />
+        </Field>
+        <Field
           label="Show Run panel"
           help="Show the Run panel and create its dedicated tmux window. Off by default."
         >

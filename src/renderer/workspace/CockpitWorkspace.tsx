@@ -190,10 +190,10 @@ export function CockpitWorkspace(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
-  /** Reset the current view's layout to a proportional `1:center:1` default. */
-  const resetTo = (center: (typeof COLUMN_RATIOS)[number]): void => {
+  /** Reset the current view's layout to a proportional `left:center:right` default. */
+  const resetTo = (ratio: (typeof COLUMN_RATIOS)[number]): void => {
     if (activeId) localStorage.removeItem(layoutKey(activeId, viewRef.current));
-    if (apiRef.current) applyPreset(apiRef.current, viewRef.current, center);
+    if (apiRef.current) applyPreset(apiRef.current, viewRef.current, ratio);
   };
 
   /** Reopen a panel that was closed (or focus it if already open). */
@@ -242,9 +242,9 @@ export function CockpitWorkspace(): JSX.Element {
               Reset ▾
             </Button>
           }
-          items={COLUMN_RATIOS.map((center) => ({
-            label: `Columns ${ratioLabel(center)}`,
-            onSelect: () => resetTo(center),
+          items={COLUMN_RATIOS.map((ratio) => ({
+            label: `Columns ${ratioLabel(ratio)}`,
+            onSelect: () => resetTo(ratio),
           }))}
         />
       </Toolbar>

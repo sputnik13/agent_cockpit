@@ -15,6 +15,8 @@ import {
   ancestorsOf,
   findTreeNode,
   buildTree,
+  compareBeadId,
+  compareIssues,
 } from './graphSelectors';
 
 function mkIssue(id: string, status: string, opts: Partial<BeadsIssue> = {}): BeadsIssue {
@@ -36,6 +38,36 @@ function mkIssue(id: string, status: string, opts: Partial<BeadsIssue> = {}): Be
 function mkGraph(issues: BeadsIssue[], deps: BeadsDep[] = []): BeadsTaskGraph {
   return { source: { kind: 'jsonl', path: '' }, schemaCompatible: true, issues, deps };
 }
+
+describe('compareBeadId (natural / numeric-aware id order)', () => {
+  it('orders a .<n> sequence by numeric value, not lexically (9 before 10)', () => {
+    const ids = ['proj-x.10', 'proj-x.2', 'proj-x.9', 'proj-x.1'];
+    expect(ids.slice().sort(compareBeadId)).toEqual([
+      'proj-x.1',
+      'proj-x.2',
+      'proj-x.9',
+      'proj-x.10',
+    ]);
+  });
+
+  it('is stable for ids without numeric tails', () => {
+    expect(compareBeadId('proj-abc', 'proj-abd')).toBeLessThan(0);
+    expect(compareBeadId('proj-abc', 'proj-abc')).toBe(0);
+  });
+
+  it('compareIssues breaks priority ties by natural id order', () => {
+    const issues = [
+      mkIssue('proj-x.10', 'open', { priority: 1 }),
+      mkIssue('proj-x.9', 'open', { priority: 1 }),
+      mkIssue('proj-x.1', 'open', { priority: 0 }),
+    ];
+    expect(issues.slice().sort(compareIssues).map((i) => i.id)).toEqual([
+      'proj-x.1', // P0 first
+      'proj-x.9', // then P1, 9 before 10
+      'proj-x.10',
+    ]);
+  });
+});
 
 describe('isTerminal', () => {
   it('treats closed, tombstone, and deleted identically as terminal', () => {

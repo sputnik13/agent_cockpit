@@ -433,24 +433,43 @@ The provider seam realizes the primary flows as follows:
   `run-1`, and the duplicate-`run-N` dedup in `reconcile()` is unchanged — the
   setting gates **creation only**.
 - **Workgraph.** `BeadsPanel` renders the active project's beads task graph
-  (`provider:getTaskGraph`) in one of **three** per-project, persisted views
-  (`WorkgraphView = flat | graph | tree`) toggled from the panel header. The
-  **flat** view is a status-grouped list ordered **blocked → in_progress → ready →
-  closed** (attention-needing work first); the "blocked" group is **derived** — a
-  non-terminal issue with open `blocks` predecessors (`hasOpenBlockers`) groups as
-  blocked regardless of its stored status, so a dep-blocked `open` task no longer
-  hides in `ready`. Within any group, ordering is the status order, then priority
-  ascending, then id. The **graph** view (`GraphView`) anchors on the selected
-  issue (or a sensible default via `resolveAnchorId`), lays out a few hops around
-  it with `focusedSubgraph`, and draws SVG `blocks` edges plus status-toned node
-  cards; clicking a node re-anchors by selecting it. The **tree** view
-  (`TreeView`) renders the parent-child hierarchy (`parent`/`parent-child` deps):
-  roots (no parent) at top level, children nested and collapsible (cycle-guarded),
-  each row reusing the flat row's status color + priority + open-blocker badge and
-  the FR3 sibling ordering. All three share `selectedId`/`select()` with
-  `TaskDetail` (clicking a node/row selects it). The view flag persists per
-  project in `localStorage`. The three views are read-only navigation; beads
-  mutation lives only in `TaskDetail` (comments / add-child / lifecycle).
+  (`provider:getTaskGraph`) in one of **four** per-project, persisted views
+  (`WorkgraphView = flat | graph | tree | columns`) toggled from the panel header.
+  The **flat** view is a status-grouped list ordered **blocked → in_progress →
+  ready → closed** (attention-needing work first); the "blocked" group is
+  **derived** — a non-terminal issue with open `blocks` predecessors
+  (`hasOpenBlockers`) groups as blocked regardless of its stored status, so a
+  dep-blocked `open` task no longer hides in `ready`. Within any group, ordering is
+  the status order, then priority ascending, then **natural (numeric-aware) id
+  order** (`compareBeadId`, Intl `{ numeric: true }`) so a `.9` sequence suffix
+  sorts before `.10` instead of lexically. The **graph** view (`GraphView`) anchors
+  on the selected issue (or a sensible default via `resolveAnchorId`), lays out a
+  few hops around it with `focusedSubgraph`, and draws SVG `blocks` edges plus
+  status-toned node cards; clicking a node re-anchors by selecting it. The **tree**
+  view (`TreeView`) renders the parent-child hierarchy (`parent`/`parent-child`
+  deps): roots (no parent) at top level, children nested and collapsible
+  (cycle-guarded) — **including inside the single-node focus view** — each row
+  reusing the flat row's status color + priority + open-blocker badge and the FR3
+  sibling ordering.
+
+  The **columns** view (`ColumnsView`) is a side-by-side layout for working two (or
+  more) epics in parallel: one independently-scrollable column per pinned epic,
+  each rendering that epic's subtree via `TreeView` in single-root mode (`rootId`).
+  The pinned set is the per-project **focus set** `focusEpicIds` (pin order),
+  persisted via the `wg-focus-set` focusMemory key and reconciled on each graph
+  load to ids that still exist **and** are epics. Epics are pinned/unpinned with a
+  ★/☆ toggle (`PinButton`) on epic rows (List, Tree) and epic graph nodes, or
+  unpinned from a column header's ×; `pinEpic`/`unpinEpic`/`clearFocusSet` own the
+  set. The comfortable column count is the global setting
+  `workgraphColumnsSoftCap` (default 2, clamped [1,6]); the layout is N-capable and
+  **warn-and-allow** — beyond the cap the column is still shown with a non-blocking
+  density notice, and raising the setting suppresses it at the higher count. An
+  empty focus set shows a pin-epics prompt.
+
+  All four views share `selectedId`/`select()` with `TaskDetail` (clicking a
+  node/row in any view — or any column — selects it). The view flag persists per
+  project in `localStorage`. The views are read-only navigation; beads mutation
+  lives only in `TaskDetail` (comments / add-child / lifecycle).
 - **Sessions.** `SessionsDialog` is a management modal (opened from a Sessions
   button in the Terminal panel header, mirroring Manage Projects — not a dock
   panel) that lists `tmux` sessions on the cockpit socket via `sessions:list` and

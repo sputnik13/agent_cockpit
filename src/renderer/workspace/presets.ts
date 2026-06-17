@@ -28,7 +28,7 @@ function addPanel(
  *   [ Workgraph / Task / Run ] [ Terminal ] [ Changes·Explorer / Content ]
  * The agent works in the center terminal; the diff/content updates to its right.
  */
-function applyEdit(api: DockviewApi, center: ColumnRatio): void {
+function applyEdit(api: DockviewApi, ratio: ColumnRatio): void {
   api.clear();
   // Build the three columns first (beads is the left column), then stack
   // taskDetail and run below beads so they land in the left column rather than
@@ -47,7 +47,7 @@ function applyEdit(api: DockviewApi, center: ColumnRatio): void {
   // tab of the right column in Edit view.
   api.getPanel(PanelIds.changes)?.api.setActive();
   api.getPanel(PanelIds.terminal)?.api.setActive();
-  sizeColumns(api, center);
+  sizeColumns(api, ratio);
 }
 
 /**
@@ -55,7 +55,7 @@ function applyEdit(api: DockviewApi, center: ColumnRatio): void {
  *   [ Workgraph / Task / Run ] [ Content ] [ Changes · Explorer · Notes ]
  * Content takes the center; the right column tabs the review surfaces.
  */
-function applyReview(api: DockviewApi, center: ColumnRatio): void {
+function applyReview(api: DockviewApi, ratio: ColumnRatio): void {
   api.clear();
   // Columns first (beads = left column), then stack taskDetail and run below
   // beads so they occupy the left column, not full-width bottom rows.
@@ -71,44 +71,64 @@ function applyReview(api: DockviewApi, center: ColumnRatio): void {
   }
   // Changes (not Notes/Explorer) is the default tab of the right column.
   api.getPanel(PanelIds.changes)?.api.setActive();
-  sizeColumns(api, center);
+  sizeColumns(api, ratio);
 }
 
 export function applyPreset(
   api: DockviewApi,
   name: PresetName,
-  center: ColumnRatio = DEFAULT_COLUMN_RATIO,
+  ratio: ColumnRatio = DEFAULT_COLUMN_RATIO,
 ): void {
-  if (name === 'review') applyReview(api, center);
-  else applyEdit(api, center);
+  if (name === 'review') applyReview(api, ratio);
+  else applyEdit(api, ratio);
 }
-
-/** Column ratios offered by Reset, as the center's share in a `1:center:1` split. */
-export const COLUMN_RATIOS = [3, 2, 1] as const;
-export type ColumnRatio = (typeof COLUMN_RATIOS)[number];
-export const DEFAULT_COLUMN_RATIO: ColumnRatio = 3;
-
-/** Human label for a ratio, e.g. 3 -> "1:3:1". */
-export const ratioLabel = (center: ColumnRatio): string => `1:${center}:1`;
 
 /**
- * Width for each side column in a `1:center:1` (left:center:right) split:
- * total is divided into `center + 2` parts and each side takes one. Proportional
- * to the workspace width rather than a fixed pixel value.
+ * Column ratios offered by Reset, as `[left, center, right]` shares. The first
+ * three are symmetric (`1:c:1`); `2:3:1` gives the left column (Workgraph) extra
+ * width — useful for the side-by-side Columns view — at the right column's
+ * expense.
  */
-export function sideColumnWidth(totalWidth: number, center: ColumnRatio = DEFAULT_COLUMN_RATIO): number {
-  return Math.max(1, Math.round(totalWidth / (center + 2)));
+export const COLUMN_RATIOS = [
+  [1, 3, 1],
+  [1, 2, 1],
+  [1, 1, 1],
+  [2, 3, 1],
+] as const;
+export type ColumnRatio = (typeof COLUMN_RATIOS)[number];
+export const DEFAULT_COLUMN_RATIO: ColumnRatio = COLUMN_RATIOS[0];
+
+/** Human label for a ratio, e.g. `[1,3,1]` -> "1:3:1". */
+export const ratioLabel = (ratio: ColumnRatio): string => ratio.join(':');
+
+/**
+ * Left/right side-column widths for a `[left:center:right]` split; the center
+ * group auto-takes the remainder. Each side is its share of the total
+ * (`total * share / (left+center+right)`), proportional to the workspace width
+ * rather than a fixed pixel value.
+ */
+export function sideColumnWidths(
+  totalWidth: number,
+  ratio: ColumnRatio = DEFAULT_COLUMN_RATIO,
+): { left: number; right: number } {
+  const [l, c, r] = ratio;
+  const parts = l + c + r;
+  return {
+    left: Math.max(1, Math.round((totalWidth * l) / parts)),
+    right: Math.max(1, Math.round((totalWidth * r) / parts)),
+  };
 }
 
-/** Size the side columns for a `1:center:1` split (center auto-takes the rest).
- *  Proportional to the live workspace width; defers a frame if not measured. */
-function sizeColumns(api: DockviewApi, center: ColumnRatio = DEFAULT_COLUMN_RATIO): void {
+/** Size the side columns for a `[left:center:right]` split (center auto-takes the
+ *  rest). Proportional to the live workspace width; defers a frame if not
+ *  measured. */
+function sizeColumns(api: DockviewApi, ratio: ColumnRatio = DEFAULT_COLUMN_RATIO): void {
   const total = api.width;
   if (total <= 0) {
-    requestAnimationFrame(() => sizeColumns(api, center));
+    requestAnimationFrame(() => sizeColumns(api, ratio));
     return;
   }
-  const side = sideColumnWidth(total, center);
-  api.getPanel(PanelIds.beads)?.group.api.setSize({ width: side });
-  api.getPanel(PanelIds.changes)?.group.api.setSize({ width: side });
+  const { left, right } = sideColumnWidths(total, ratio);
+  api.getPanel(PanelIds.beads)?.group.api.setSize({ width: left });
+  api.getPanel(PanelIds.changes)?.group.api.setSize({ width: right });
 }

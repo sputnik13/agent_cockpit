@@ -40,14 +40,30 @@ function sameGraph(a: BeadsTaskGraph, b: BeadsTaskGraph): boolean {
   return true;
 }
 
-/** Flat status-grouped list, focused dependency-graph, or parent-child tree. */
-export type WorkgraphView = 'flat' | 'graph' | 'tree';
+/** Flat status-grouped list, focused dependency-graph, parent-child tree, or the
+ *  side-by-side columns view (one column per pinned epic). */
+export type WorkgraphView = 'flat' | 'graph' | 'tree' | 'columns';
 
 const VIEW_VERSION = 1;
 const viewKey = (projectId: string): string =>
   `agent-cockpit:workgraph-view:v${VIEW_VERSION}:${projectId}`;
 
-const VIEWS: readonly WorkgraphView[] = ['flat', 'graph', 'tree'];
+const VIEWS: readonly WorkgraphView[] = ['flat', 'graph', 'tree', 'columns'];
+
+/** focusMemory namespace for the per-project side-by-side focus set (the pinned
+ *  epic ids, comma-joined — same pattern as the `wg-filter` set). */
+const FOCUS_SET_NS = 'wg-focus-set';
+
+/** Read the persisted focus set (pinned epic ids, pin order preserved). */
+function readFocusSet(projectId: string | null): string[] {
+  const raw = readFocus(FOCUS_SET_NS, projectId);
+  return raw ? raw.split(',').filter(Boolean) : [];
+}
+
+/** Persist the focus set (or clear it when empty). */
+function writeFocusSet(projectId: string | null, ids: string[]): void {
+  writeFocus(FOCUS_SET_NS, projectId, ids.length ? ids.join(',') : null);
+}
 function isView(v: string | null): v is WorkgraphView {
   return v != null && (VIEWS as readonly string[]).includes(v);
 }
@@ -86,6 +102,10 @@ export interface BeadsSlice {
   /** Tree/graph focus anchor (FA-5). Persisted per project via `wg-focus`;
    *  null = not focused. Sticky across project switches and app restarts. */
   focusId: string | null;
+  /** Side-by-side focus set: pinned epic ids (pin order), rendered as columns in
+   *  the `columns` view. Persisted per project via `wg-focus-set`; reconciled
+   *  against the loaded graph (only ids that still exist AND are epics survive). */
+  focusEpicIds: string[];
   view: WorkgraphView;
 }
 
@@ -96,6 +116,7 @@ function emptySlice(projectId: string | null): BeadsSlice {
     error: null,
     selectedId: null,
     focusId: readFocus('wg-focus', projectId),
+    focusEpicIds: readFocusSet(projectId),
     view: readView(projectId),
   };
 }
@@ -113,6 +134,13 @@ interface BeadsState {
   select: (projectId: string, id: string | null) => void;
   /** Set (or clear, with null) the tree/graph focus anchor for a project. */
   setFocus: (projectId: string, id: string | null) => void;
+  /** Pin an epic into the side-by-side focus set (idempotent, appends in pin
+   *  order). */
+  pinEpic: (projectId: string, id: string) => void;
+  /** Remove an epic from the focus set. */
+  unpinEpic: (projectId: string, id: string) => void;
+  /** Clear the entire focus set. */
+  clearFocusSet: (projectId: string) => void;
   setView: (projectId: string, view: WorkgraphView) => void;
   // Beads writes (FA-6b). Each calls the provider's `br` seam, then reloads the
   // graph on success so the view reflects the change. Mutations resolve to an
@@ -175,7 +203,14 @@ export const useBeadsStore = create<BeadsState>((set, get) => {
           const savedFocus = readFocus('wg-focus', projectId);
           const focusId =
             savedFocus && graph.issues.some((i) => i.id === savedFocus) ? savedFocus : null;
-          patch(projectId, { graph, loading: false, error: null, selectedId, focusId });
+          // Reconcile the side-by-side focus set: keep only ids that still exist
+          // AND are still epics (pin order preserved); re-persist if it changed.
+          const isEpic = new Set(
+            graph.issues.filter((i) => i.issueType === 'epic').map((i) => i.id),
+          );
+          const focusEpicIds = readFocusSet(projectId).filter((id) => isEpic.has(id));
+          writeFocusSet(projectId, focusEpicIds);
+          patch(projectId, { graph, loading: false, error: null, selectedId, focusId, focusEpicIds });
         }
       } catch (e) {
         if (!get().byProject[projectId]) return;
@@ -200,6 +235,24 @@ export const useBeadsStore = create<BeadsState>((set, get) => {
     setFocus: (projectId, id) => {
       writeFocus('wg-focus', projectId, id);
       patch(projectId, { focusId: id });
+    },
+
+    pinEpic: (projectId, id) => {
+      const cur = get().byProject[projectId]?.focusEpicIds ?? readFocusSet(projectId);
+      if (cur.includes(id)) return; // idempotent, preserve existing order
+      const next = [...cur, id];
+      writeFocusSet(projectId, next);
+      patch(projectId, { focusEpicIds: next });
+    },
+    unpinEpic: (projectId, id) => {
+      const cur = get().byProject[projectId]?.focusEpicIds ?? readFocusSet(projectId);
+      const next = cur.filter((x) => x !== id);
+      writeFocusSet(projectId, next);
+      patch(projectId, { focusEpicIds: next });
+    },
+    clearFocusSet: (projectId) => {
+      writeFocusSet(projectId, []);
+      patch(projectId, { focusEpicIds: [] });
     },
 
     setView: (projectId, view) => {

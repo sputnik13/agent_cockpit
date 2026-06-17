@@ -1,5 +1,6 @@
 import { useState, type MouseEvent } from 'react';
 import { Badge, EmptyState, Row, cn } from '../ui';
+import { PinButton } from './PinButton';
 import {
   ancestorsOf,
   buildTree,
@@ -50,6 +51,16 @@ interface TreeViewProps {
   /** Search needle (case-insensitive). Filters tree to matching nodes with
    *  ancestor context. Empty = no filtering. */
   searchNeedle?: string;
+  /** Single-root mode (used by the side-by-side Columns view): render ONLY this
+   *  node's subtree as the sole root — no ancestor breadcrumb, no focus chrome —
+   *  with normal collapse/selection and the shared state filter. Takes precedence
+   *  over `focusId`. */
+  rootId?: string;
+  /** Epic ids currently in the Columns focus set (drives the ★/☆ pin state). */
+  pinnedEpicIds?: Set<string>;
+  /** Toggle an epic's membership in the Columns focus set. When provided, epic
+   *  rows show a pin toggle. */
+  onTogglePin?: (id: string) => void;
 }
 
 /**
@@ -62,10 +73,11 @@ interface TreeViewProps {
  * state is filtered out (done by default) is hidden along with its subtree.
  *
  * Focus mode (FA-5): when `focusId` is set, the tree prunes to that node's
- * ancestor context path plus its full subtree. The state filter is suspended
- * (all states shown for full context) and collapse is ignored so the ancestor
- * path is always visible. Double-clicking a row enters focus; double-clicking
- * the focused row exits.
+ * ancestor context path plus its subtree. The state filter is suspended (all
+ * states shown for full context). The ancestor breadcrumb is always visible
+ * (rendered as separate rows), but subtrees within the focused node remain
+ * collapsible, exactly like the normal tree. Double-clicking a row enters focus;
+ * double-clicking the focused row exits.
  */
 export function TreeView({
   graph,
@@ -76,7 +88,55 @@ export function TreeView({
   onFocus,
   onExitFocus,
   searchNeedle,
+  rootId,
+  pinnedEpicIds,
+  onTogglePin,
 }: TreeViewProps): JSX.Element {
+  const needle0 = searchNeedle?.trim().toLowerCase() ?? '';
+
+  // Single-root mode (Columns view): the epic identity lives in the column
+  // header, so render only its CHILDREN here (each as its own subtree) — never the
+  // epic row again, which would duplicate it.
+  if (rootId) {
+    const node = findTreeNode(buildTree(graph), rootId);
+    if (!node) {
+      return <EmptyState title="Epic not found" hint="It may have been closed or removed." />;
+    }
+    const kids = node.children.filter(
+      (c) =>
+        visibleStates.has(deriveState(graph, c.issue)) &&
+        (!needle0 || subtreeMatchesNeedle(c, needle0)),
+    );
+    if (kids.length === 0) {
+      return (
+        <div className="px-2 py-3 text-center text-[12px] text-dim">
+          {needle0 ? 'No matching child tasks.' : 'No child tasks.'}
+        </div>
+      );
+    }
+    return (
+      <div role="tree" aria-label="Epic subtree">
+        {kids.map((child) => (
+          <TreeRow
+            key={child.issue.id}
+            node={child}
+            depth={0}
+            graph={graph}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            visibleStates={visibleStates}
+            focusId={focusId ?? null}
+            onFocus={onFocus}
+            onExitFocus={onExitFocus}
+            searchNeedle={needle0}
+            pinnedEpicIds={pinnedEpicIds}
+            onTogglePin={onTogglePin}
+          />
+        ))}
+      </div>
+    );
+  }
+
   const focusNode = focusId ? findTreeNode(buildTree(graph), focusId) : null;
 
   // Focus mode: ancestor breadcrumb (context) + the focused subtree, filter
@@ -124,7 +184,8 @@ export function TreeView({
           focusId={focusId}
           onFocus={onFocus}
           onExitFocus={onExitFocus}
-          focusMode
+          pinnedEpicIds={pinnedEpicIds}
+          onTogglePin={onTogglePin}
         />
       </div>
     );
@@ -162,6 +223,8 @@ export function TreeView({
           onFocus={onFocus}
           onExitFocus={onExitFocus}
           searchNeedle={needle}
+          pinnedEpicIds={pinnedEpicIds}
+          onTogglePin={onTogglePin}
         />
       ))}
     </div>
@@ -178,10 +241,10 @@ interface TreeRowProps {
   focusId?: string | null;
   onFocus?: (id: string) => void;
   onExitFocus?: () => void;
-  /** Inside the focused subtree: always expanded (collapse ignored). */
-  focusMode?: boolean;
   /** Propagated needle for child subtree pruning. */
   searchNeedle?: string;
+  pinnedEpicIds?: Set<string>;
+  onTogglePin?: (id: string) => void;
 }
 
 function TreeRow({
@@ -194,12 +257,12 @@ function TreeRow({
   focusId,
   onFocus,
   onExitFocus,
-  focusMode = false,
   searchNeedle,
+  pinnedEpicIds,
+  onTogglePin,
 }: TreeRowProps): JSX.Element {
   const [collapsed, setCollapsed] = useState(false);
-  // Focus mode ignores collapse so the full ancestor path/subtree stays visible.
-  const expanded = focusMode ? true : !collapsed;
+  const expanded = !collapsed;
   const { issue } = node;
   const state = deriveState(graph, issue);
   const isFocused = issue.id === focusId;
@@ -214,7 +277,7 @@ function TreeRow({
 
   function toggle(e: MouseEvent): void {
     e.stopPropagation();
-    if (!focusMode) setCollapsed((v) => !v);
+    setCollapsed((v) => !v);
   }
 
   // Double-click toggles focus: enter on any row, exit when it is the focused row.
@@ -232,7 +295,7 @@ function TreeRow({
         className={cn(isFocused && 'ring-1 ring-inset ring-accent/60')}
         prefix={
           <span className="flex items-center" style={{ paddingLeft: `${depth * 14}px` }}>
-            {hasChildren && !focusMode ? (
+            {hasChildren ? (
               <button
                 type="button"
                 aria-label={expanded ? 'Collapse' : 'Expand'}
@@ -250,20 +313,31 @@ function TreeRow({
           </span>
         }
         suffix={
-          blockerN > 0 || childN > 0 ? (
-            <span className="flex items-center gap-1">
-              {blockerN > 0 && (
-                <Badge tone="warn" aria-label="blocked by open work">
-                  blocked by {blockerN}
-                </Badge>
-              )}
-              {childN > 0 && (
-                <Badge tone="warn" aria-label="blocked by open children">
-                  {childN} open {childN === 1 ? 'child' : 'children'}
-                </Badge>
-              )}
-            </span>
-          ) : undefined
+          (() => {
+            const showPin = issue.issueType === 'epic' && onTogglePin != null;
+            if (!showPin && blockerN === 0 && childN === 0) return undefined;
+            return (
+              <span className="flex items-center gap-1">
+                {blockerN > 0 && (
+                  <Badge tone="warn" aria-label="blocked by open work">
+                    blocked by {blockerN}
+                  </Badge>
+                )}
+                {childN > 0 && (
+                  <Badge tone="warn" aria-label="blocked by open children">
+                    {childN} open {childN === 1 ? 'child' : 'children'}
+                  </Badge>
+                )}
+                {showPin && (
+                  <PinButton
+                    pinned={pinnedEpicIds?.has(issue.id) ?? false}
+                    onToggle={() => onTogglePin(issue.id)}
+                    label={`${pinnedEpicIds?.has(issue.id) ? 'Unpin' : 'Pin'} epic ${issue.title} (columns)`}
+                  />
+                )}
+              </span>
+            );
+          })()
         }
       >
         <span className="flex min-w-0 items-baseline gap-1.5">
@@ -290,8 +364,9 @@ function TreeRow({
               focusId={focusId}
               onFocus={onFocus}
               onExitFocus={onExitFocus}
-              focusMode={focusMode}
               searchNeedle={searchNeedle}
+              pinnedEpicIds={pinnedEpicIds}
+              onTogglePin={onTogglePin}
             />
           ))}
         </div>

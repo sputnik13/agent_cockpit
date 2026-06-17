@@ -66,9 +66,18 @@ export interface IssueGroup {
   issues: BeadsIssue[];
 }
 
+/** Natural-order compare of two bead ids so numeric segments sort by value, not
+ *  lexically: `…-task.9` sorts before `…-task.10` (plain `localeCompare` puts
+ *  "10" before "9"). Beads sometimes carry a trailing `.<n>` sequence and agents
+ *  are inconsistent about zero-padding, so use Intl numeric collation. Single
+ *  source for the id tiebreak used across workgraph ordering. */
+export function compareBeadId(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { numeric: true });
+}
+
 /** Stable sibling/group order: priority ascending (0 = highest), then id (FR3). */
 export function compareIssues(a: BeadsIssue, b: BeadsIssue): number {
-  return a.priority - b.priority || a.id.localeCompare(b.id);
+  return a.priority - b.priority || compareBeadId(a.id, b.id);
 }
 
 /** Buckets issues by (derived) status group; priority ascending, then id. */
@@ -226,7 +235,7 @@ export function resolveAnchorId(
     return selectedId;
   }
   const byPriority = (a: BeadsIssue, b: BeadsIssue): number =>
-    a.priority - b.priority || a.id.localeCompare(b.id);
+    a.priority - b.priority || compareBeadId(a.id, b.id);
   const sorted = graph.issues.slice().sort(byPriority);
   const firstWith = (group: StatusGroup): BeadsIssue | undefined =>
     sorted.find((i) => statusGroup(i.status) === group);

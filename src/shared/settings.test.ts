@@ -2,8 +2,29 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_SETTINGS,
   SESSION_IDLE_TIMEOUT_MAX_MIN,
+  WORKGRAPH_COLUMNS_SOFT_CAP_MAX,
   normalizeSettings,
 } from './settings';
+
+describe('normalizeSettings — workgraphColumnsSoftCap bounds', () => {
+  it('defaults to 2 when absent', () => {
+    expect(normalizeSettings({}).workgraphColumnsSoftCap).toBe(2);
+    expect(DEFAULT_SETTINGS.workgraphColumnsSoftCap).toBe(2);
+  });
+  it('keeps a valid value and floors fractionals', () => {
+    expect(normalizeSettings({ workgraphColumnsSoftCap: 3 }).workgraphColumnsSoftCap).toBe(3);
+    expect(normalizeSettings({ workgraphColumnsSoftCap: 3.9 }).workgraphColumnsSoftCap).toBe(3);
+  });
+  it('clamps above the max and rejects < 1 / non-numbers to the default', () => {
+    expect(normalizeSettings({ workgraphColumnsSoftCap: 99 }).workgraphColumnsSoftCap).toBe(
+      WORKGRAPH_COLUMNS_SOFT_CAP_MAX,
+    );
+    expect(normalizeSettings({ workgraphColumnsSoftCap: 0 }).workgraphColumnsSoftCap).toBe(2);
+    expect(
+      normalizeSettings({ workgraphColumnsSoftCap: '3' as unknown as number }).workgraphColumnsSoftCap,
+    ).toBe(2);
+  });
+});
 
 describe('normalizeSettings — sessionIdleTimeoutMin bounds', () => {
   it('defaults to 20 when absent', () => {

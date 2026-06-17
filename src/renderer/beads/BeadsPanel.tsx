@@ -15,7 +15,10 @@ import {
 } from '../ui';
 import { GraphView } from './GraphView';
 import { TreeView } from './TreeView';
+import { ColumnsView } from './ColumnsView';
+import { PinButton } from './PinButton';
 import { useActiveBeads, useBeadsStore, type WorkgraphView } from './beadsStore';
+import { useSettingsStore } from '../settings';
 import { readFocus, writeFocus } from '@renderer/workspace/focusMemory';
 import {
   WG_STATES,
@@ -52,10 +55,13 @@ function writeFilter(projectId: string | null, states: Set<WorkgraphState>): voi
 
 /** Beads workgraph: issues grouped by status, selectable into the detail view. */
 export function BeadsPanel(): JSX.Element {
-  const { graph, loading, error, selectedId, focusId, view } = useActiveBeads();
+  const { graph, loading, error, selectedId, focusId, view, focusEpicIds } = useActiveBeads();
   const select = useBeadsStore((s) => s.select);
   const setView = useBeadsStore((s) => s.setView);
   const setFocus = useBeadsStore((s) => s.setFocus);
+  const pinEpic = useBeadsStore((s) => s.pinEpic);
+  const unpinEpic = useBeadsStore((s) => s.unpinEpic);
+  const columnsSoftCap = useSettingsStore((s) => s.settings.workgraphColumnsSoftCap);
   const activeId = useProjectsStore((s) => s.activeId);
   const disconnected = useSessionStore(isDisconnected(activeId));
 
@@ -86,6 +92,15 @@ export function BeadsPanel(): JSX.Element {
   const onExitFocus = (): void => {
     if (activeId) setFocus(activeId, null);
   };
+  const onUnpinEpic = (id: string): void => {
+    if (activeId) unpinEpic(activeId, id);
+  };
+  const onTogglePin = (id: string): void => {
+    if (!activeId) return;
+    if (focusEpicIds.includes(id)) unpinEpic(activeId, id);
+    else pinEpic(activeId, id);
+  };
+  const pinnedEpicIds = new Set(focusEpicIds);
 
   // Escape exits focus (FA-5), in tree or graph view.
   useEffect(() => {
@@ -168,6 +183,11 @@ export function BeadsPanel(): JSX.Element {
             onExitFocus,
             visibleStates,
             searchText,
+            focusEpicIds,
+            pinnedEpicIds,
+            onUnpin: onUnpinEpic,
+            onTogglePin,
+            columnsSoftCap,
           })
         )}
       </PanelBody>
@@ -186,6 +206,7 @@ function ViewToggle({
     { value: 'flat', label: 'List', aria: 'List view' },
     { value: 'tree', label: 'Tree', aria: 'Tree view' },
     { value: 'graph', label: 'Graph', aria: 'Graph view' },
+    { value: 'columns', label: 'Columns', aria: 'Columns view' },
   ];
   return (
     <div role="radiogroup" aria-label="Workgraph view" className="flex gap-0.5">
@@ -262,6 +283,11 @@ interface BodyProps {
   onExitFocus: () => void;
   visibleStates: Set<WorkgraphState>;
   searchText: string;
+  focusEpicIds: string[];
+  pinnedEpicIds: Set<string>;
+  onUnpin: (id: string) => void;
+  onTogglePin: (id: string) => void;
+  columnsSoftCap: number;
 }
 
 function renderBody({
@@ -276,6 +302,11 @@ function renderBody({
   onExitFocus,
   visibleStates,
   searchText,
+  focusEpicIds,
+  pinnedEpicIds,
+  onUnpin,
+  onTogglePin,
+  columnsSoftCap,
 }: BodyProps): JSX.Element {
   if (loading) {
     return (
@@ -304,6 +335,8 @@ function renderBody({
         onSelect={select}
         focusId={focusId}
         searchNeedle={searchText}
+        pinnedEpicIds={pinnedEpicIds}
+        onTogglePin={onTogglePin}
       />
     );
   }
@@ -319,6 +352,23 @@ function renderBody({
         onFocus={onFocus}
         onExitFocus={onExitFocus}
         searchNeedle={searchText}
+        pinnedEpicIds={pinnedEpicIds}
+        onTogglePin={onTogglePin}
+      />
+    );
+  }
+
+  if (view === 'columns') {
+    return (
+      <ColumnsView
+        graph={graph}
+        focusEpicIds={focusEpicIds}
+        selectedId={selectedId}
+        onSelect={select}
+        visibleStates={visibleStates}
+        searchNeedle={searchText}
+        onUnpin={onUnpin}
+        softCap={columnsSoftCap}
       />
     );
   }
@@ -373,7 +423,7 @@ function renderBody({
                   </Badge>
                 }
                 suffix={
-                  blockerN > 0 || childN > 0 ? (
+                  issue.issueType === 'epic' || blockerN > 0 || childN > 0 ? (
                     <span className="flex items-center gap-1">
                       {blockerN > 0 && (
                         <Badge tone="warn" aria-label="blocked by open work">
@@ -384,6 +434,13 @@ function renderBody({
                         <Badge tone="warn" aria-label="blocked by open children">
                           {childN} open {childN === 1 ? 'child' : 'children'}
                         </Badge>
+                      )}
+                      {issue.issueType === 'epic' && (
+                        <PinButton
+                          pinned={pinnedEpicIds.has(issue.id)}
+                          onToggle={() => onTogglePin(issue.id)}
+                          label={`${pinnedEpicIds.has(issue.id) ? 'Unpin' : 'Pin'} epic ${issue.title} (columns)`}
+                        />
                       )}
                     </span>
                   ) : undefined

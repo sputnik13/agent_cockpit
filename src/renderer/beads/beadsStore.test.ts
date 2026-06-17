@@ -224,6 +224,79 @@ describe('beadsStore per-project selection memory (focus)', () => {
   });
 });
 
+describe('beadsStore side-by-side focus set (columns)', () => {
+  let storage: Map<string, string>;
+  beforeEach(() => {
+    storage = new Map<string, string>();
+    (globalThis as unknown as { localStorage: unknown }).localStorage = {
+      getItem: (k: string) => (storage.has(k) ? storage.get(k)! : null),
+      setItem: (k: string, v: string) => void storage.set(k, String(v)),
+      removeItem: (k: string) => void storage.delete(k),
+      clear: () => storage.clear(),
+    };
+  });
+  afterEach(() => {
+    delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+  });
+
+  // A graph with two epics + a task, so reconcile (epic-only) is observable.
+  const GRAPH_EPICS: BeadsTaskGraph = {
+    ...GRAPH_A,
+    issues: [
+      { ...GRAPH_A.issues[0]!, id: 'e1', issueType: 'epic' },
+      { ...GRAPH_A.issues[0]!, id: 'e2', issueType: 'epic' },
+      { ...GRAPH_A.issues[0]!, id: 'a1', issueType: 'task' },
+    ],
+  };
+
+  it('pin/unpin/clear with idempotent, order-preserving set semantics', () => {
+    const s = useBeadsStore.getState();
+    s.pinEpic('project-a', 'e1');
+    s.pinEpic('project-a', 'e2');
+    s.pinEpic('project-a', 'e1'); // idempotent
+    expect(useBeadsStore.getState().byProject['project-a']!.focusEpicIds).toEqual(['e1', 'e2']);
+    s.unpinEpic('project-a', 'e1');
+    expect(useBeadsStore.getState().byProject['project-a']!.focusEpicIds).toEqual(['e2']);
+    s.clearFocusSet('project-a');
+    expect(useBeadsStore.getState().byProject['project-a']!.focusEpicIds).toEqual([]);
+  });
+
+  it('persists the set and restores it on reload, dropping missing / non-epic ids', async () => {
+    mockDetectBeads.mockResolvedValue(true);
+    mockGetTaskGraph.mockResolvedValueOnce(GRAPH_EPICS);
+    await useBeadsStore.getState().load('project-a');
+    useBeadsStore.getState().pinEpic('project-a', 'e1');
+    useBeadsStore.getState().pinEpic('project-a', 'e2');
+
+    // Reload from persistence (drop the in-memory slice first).
+    useBeadsStore.getState().evict('project-a');
+    mockGetTaskGraph.mockResolvedValueOnce(GRAPH_EPICS);
+    await useBeadsStore.getState().load('project-a');
+    expect(useBeadsStore.getState().byProject['project-a']!.focusEpicIds).toEqual(['e1', 'e2']);
+
+    // A graph where e2 is gone and (hypothetically) a1 is not an epic → only e1 kept.
+    const GRAPH_ONE_EPIC: BeadsTaskGraph = {
+      ...GRAPH_A,
+      issues: [
+        { ...GRAPH_A.issues[0]!, id: 'e1', issueType: 'epic' },
+        { ...GRAPH_A.issues[0]!, id: 'a1', issueType: 'task' },
+      ],
+    };
+    mockGetTaskGraph.mockResolvedValueOnce(GRAPH_ONE_EPIC);
+    await useBeadsStore.getState().load('project-a');
+    expect(useBeadsStore.getState().byProject['project-a']!.focusEpicIds).toEqual(['e1']);
+  });
+
+  it('persists + restores the columns view value', () => {
+    useBeadsStore.getState().setView('project-a', 'columns');
+    expect(useBeadsStore.getState().byProject['project-a']!.view).toBe('columns');
+    useBeadsStore.getState().evict('project-a');
+    // A fresh slice (emptySlice) reads the persisted view from storage.
+    useBeadsStore.getState().clearForDisconnect('project-a');
+    expect(useBeadsStore.getState().byProject['project-a']!.view).toBe('columns');
+  });
+});
+
 describe('beadsStore clearForDisconnect / evict (D3/FR4/FR7)', () => {
   it('clearForDisconnect() resets the slice but keeps the key', () => {
     useBeadsStore.setState({

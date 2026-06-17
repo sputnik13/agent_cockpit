@@ -8,6 +8,7 @@ import {
   type LaidOutNode,
 } from './graphLayout';
 import { priorityLabel, resolveAnchorId, STATE_COLOR } from './graphSelectors';
+import { PinButton } from './PinButton';
 
 const { NODE_W, NODE_H } = layoutConsts;
 /** Neighbour hops shown around the anchor; keeps the focused view readable. */
@@ -45,6 +46,11 @@ interface GraphViewProps {
   /** Search needle (case-insensitive). Matching nodes are highlighted; non-matching
    *  nodes are dimmed. Empty = no filtering. */
   searchNeedle?: string;
+  /** Epic ids in the Columns focus set (drives the ★/☆ on epic nodes). */
+  pinnedEpicIds?: Set<string>;
+  /** Toggle an epic's Columns focus-set membership. When provided, epic nodes
+   *  show a pin toggle. */
+  onTogglePin?: (id: string) => void;
 }
 
 /**
@@ -55,7 +61,15 @@ interface GraphViewProps {
  * state-coloured node cards. Read-only: clicking a node re-anchors by selecting
  * it. Pure in its props so it renders without the store.
  */
-export function GraphView({ graph, selectedId, onSelect, focusId, searchNeedle }: GraphViewProps): JSX.Element {
+export function GraphView({
+  graph,
+  selectedId,
+  onSelect,
+  focusId,
+  searchNeedle,
+  pinnedEpicIds,
+  onTogglePin,
+}: GraphViewProps): JSX.Element {
   // Focus mode (FA-5 "option B"): anchor on the focused node and expand the full
   // reachable subgraph (Infinity hops). Otherwise anchor on the selection (or a
   // sensible default) at the normal 2-hop neighbourhood.
@@ -148,6 +162,8 @@ export function GraphView({ graph, selectedId, onSelect, focusId, searchNeedle }
             active={n.id === selectedId || n.id === center}
             dimmed={needle ? !matchesNeedle(n) : false}
             onSelect={onSelect}
+            pinned={pinnedEpicIds?.has(n.id) ?? false}
+            onTogglePin={onTogglePin}
           />
         ))}
       </g>
@@ -173,37 +189,54 @@ function NodeCard({
   active,
   dimmed,
   onSelect,
+  pinned,
+  onTogglePin,
 }: {
   node: LaidOutNode;
   active: boolean;
   /** True when a search needle is active and this node does not match. */
   dimmed: boolean;
   onSelect: (id: string) => void;
+  pinned: boolean;
+  onTogglePin?: (id: string) => void;
 }): JSX.Element {
   const tone = STATE_COLOR[node.state];
   const shortId = node.id.split('-').pop() ?? node.id;
+  const showPin = node.issue.issueType === 'epic' && onTogglePin != null;
   return (
     <foreignObject x={node.x} y={node.y} width={NODE_W} height={NODE_H} opacity={dimmed ? 0.3 : 1}>
-      <button
-        type="button"
-        onClick={() => onSelect(node.id)}
-        title={`${node.id} · ${node.issue.title}`}
-        className="flex h-full w-full flex-col justify-center gap-0.5 rounded border bg-panel px-2 text-left"
-        style={{
-          borderColor: active ? 'var(--color-accent)' : 'var(--color-edge)',
-          borderLeft: `3px solid ${tone}`,
-          outline: active ? '1px solid var(--color-accent)' : undefined,
-        }}
-      >
-        <span className="flex items-center gap-1 text-[10px] text-dim">
-          <code className="rounded bg-elev px-0.5 font-mono text-[9px]" title={node.id}>
-            {shortId}
-          </code>
-          <span>·</span>
-          <span>{priorityLabel(node.issue.priority)}</span>
-        </span>
-        <span className="truncate text-[12px] text-fg">{node.issue.title}</span>
-      </button>
+      {/* relative wrapper so the pin is a SIBLING of the card button, never nested
+          inside it (nested <button> is invalid HTML). */}
+      <div className="relative h-full w-full">
+        <button
+          type="button"
+          onClick={() => onSelect(node.id)}
+          title={`${node.id} · ${node.issue.title}`}
+          className="flex h-full w-full flex-col justify-center gap-0.5 rounded border bg-panel px-2 text-left"
+          style={{
+            borderColor: active ? 'var(--color-accent)' : 'var(--color-edge)',
+            borderLeft: `3px solid ${tone}`,
+            outline: active ? '1px solid var(--color-accent)' : undefined,
+          }}
+        >
+          <span className="flex items-center gap-1 text-[10px] text-dim">
+            <code className="rounded bg-elev px-0.5 font-mono text-[9px]" title={node.id}>
+              {shortId}
+            </code>
+            <span>·</span>
+            <span>{priorityLabel(node.issue.priority)}</span>
+          </span>
+          <span className="truncate text-[12px] text-fg">{node.issue.title}</span>
+        </button>
+        {showPin && (
+          <PinButton
+            pinned={pinned}
+            onToggle={() => onTogglePin(node.id)}
+            label={`${pinned ? 'Unpin' : 'Pin'} epic ${node.issue.title} (columns)`}
+            className="absolute right-1 top-1"
+          />
+        )}
+      </div>
     </foreignObject>
   );
 }

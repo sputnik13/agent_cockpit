@@ -549,6 +549,26 @@ describe('TreeView render (T3, FR2/FR4)', () => {
     fireEvent.click(within(tree).getByRole('button', { name: 'Expand' }));
     expect(within(tree).getAllByText('child').length).toBeGreaterThan(0);
   });
+
+  it('allows collapsing subtrees inside focus mode (e009)', async () => {
+    installApi(TREE_FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    // Enter focus on the epic (double-click the row).
+    const tree = screen.getByRole('tree', { name: 'Task tree' });
+    fireEvent.doubleClick(within(tree).getAllByText('epic')[0]!);
+
+    // Focused tree must still offer a working collapse toggle (parity with the
+    // normal tree) — the old focus mode force-expanded and hid the caret.
+    const focused = screen.getByRole('tree', { name: 'Task tree (focused)' });
+    expect(within(focused).getAllByText('child').length).toBeGreaterThan(0);
+    fireEvent.click(within(focused).getByRole('button', { name: 'Collapse' }));
+    expect(within(focused).queryByText('child')).not.toBeInTheDocument();
+    fireEvent.click(within(focused).getByRole('button', { name: 'Expand' }));
+    expect(within(focused).getAllByText('child').length).toBeGreaterThan(0);
+  });
 });
 
 describe('search filter in tree view (gxfq)', () => {
@@ -718,5 +738,112 @@ describe('WorkgraphView persistence (T3, FR2)', () => {
     useBeadsStore.getState().evict(PROJECT);
     await loadSlice();
     expect(useBeadsStore.getState().byProject[PROJECT]!.view).toBe('tree');
+  });
+});
+
+describe('Columns view (side-by-side epics, qkav.4)', () => {
+  let storage: Map<string, string>;
+  beforeEach(() => {
+    storage = new Map<string, string>();
+    (globalThis as unknown as { localStorage: unknown }).localStorage = {
+      getItem: (k: string) => (storage.has(k) ? storage.get(k)! : null),
+      setItem: (k: string, v: string) => void storage.set(k, String(v)),
+      removeItem: (k: string) => void storage.delete(k),
+      clear: () => storage.clear(),
+    };
+  });
+  afterEach(() => {
+    delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+  });
+
+  const COLS = mkGraph(
+    [
+      { ...mkIssue('e1', 'ready', 1), issueType: 'epic' },
+      mkIssue('e1c', 'open', 0),
+      { ...mkIssue('e2', 'ready', 1), issueType: 'epic' },
+      mkIssue('e2c', 'open', 0),
+    ],
+    [
+      { from: 'e1c', to: 'e1', type: 'parent-child' },
+      { from: 'e2c', to: 'e2', type: 'parent-child' },
+    ],
+  );
+
+  it('shows empty state, one column per pinned epic, shared selection, and unpin', async () => {
+    installApi(COLS);
+    render(<BeadsPanel />);
+    await loadSlice();
+    fireEvent.click(screen.getByRole('radio', { name: 'Columns view' }));
+
+    // Empty focus set → prompt, not a blank panel.
+    expect(screen.getByText('No epics pinned')).toBeInTheDocument();
+
+    // Pin two epics (store action; the row/node pin affordance lands in qkav.5).
+    act(() => {
+      useBeadsStore.getState().pinEpic(PROJECT, 'e1');
+      useBeadsStore.getState().pinEpic(PROJECT, 'e2');
+    });
+
+    const cols = screen.getByRole('list', { name: 'Epic columns' });
+    expect(within(cols).getAllByRole('listitem')).toHaveLength(2);
+    // Each column renders its own epic's child subtree.
+    expect(within(cols).getAllByText('e1c').length).toBeGreaterThan(0);
+    expect(within(cols).getAllByText('e2c').length).toBeGreaterThan(0);
+
+    // Selecting a task in a column drives the one shared selection.
+    fireEvent.click(within(cols).getAllByText('e1c')[0]!);
+    expect(useBeadsStore.getState().byProject[PROJECT]!.selectedId).toBe('e1c');
+
+    // Unpin e1 via its × → one column remains.
+    fireEvent.click(within(cols).getByRole('button', { name: 'Unpin e1' }));
+    expect(
+      within(screen.getByRole('list', { name: 'Epic columns' })).getAllByRole('listitem'),
+    ).toHaveLength(1);
+  });
+});
+
+describe('Columns pin affordance + density (qkav.5)', () => {
+  let storage: Map<string, string>;
+  beforeEach(() => {
+    storage = new Map<string, string>();
+    (globalThis as unknown as { localStorage: unknown }).localStorage = {
+      getItem: (k: string) => (storage.has(k) ? storage.get(k)! : null),
+      setItem: (k: string, v: string) => void storage.set(k, String(v)),
+      removeItem: (k: string) => void storage.delete(k),
+      clear: () => storage.clear(),
+    };
+  });
+  afterEach(() => {
+    delete (globalThis as unknown as { localStorage?: unknown }).localStorage;
+  });
+
+  const epic = (id: string) => ({ ...mkIssue(id, 'ready', 1), issueType: 'epic' });
+
+  it('pins an epic from the List view via its ☆ toggle (and flips to Unpin)', async () => {
+    installApi(mkGraph([epic('e1'), mkIssue('a', 'open', 0)]));
+    render(<BeadsPanel />);
+    await loadSlice();
+    // Default List view shows the epic row with a pin toggle.
+    fireEvent.click(screen.getByRole('button', { name: 'Pin epic e1 (columns)' }));
+    expect(useBeadsStore.getState().byProject[PROJECT]!.focusEpicIds).toEqual(['e1']);
+    // The toggle now offers to unpin.
+    expect(screen.getByRole('button', { name: 'Unpin epic e1 (columns)' })).toBeInTheDocument();
+  });
+
+  it('shows a density notice when pinned columns exceed the soft cap (default 2)', async () => {
+    installApi(mkGraph([epic('e1'), epic('e2'), epic('e3')]));
+    render(<BeadsPanel />);
+    await loadSlice();
+    act(() => {
+      useBeadsStore.getState().pinEpic(PROJECT, 'e1');
+      useBeadsStore.getState().pinEpic(PROJECT, 'e2');
+      useBeadsStore.getState().pinEpic(PROJECT, 'e3');
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'Columns view' }));
+    // 3 columns > soft cap 2 → non-blocking density status; all three still shown.
+    expect(screen.getByRole('status')).toHaveTextContent('3 columns shown');
+    expect(
+      within(screen.getByRole('list', { name: 'Epic columns' })).getAllByRole('listitem'),
+    ).toHaveLength(3);
   });
 });

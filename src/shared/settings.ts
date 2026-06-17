@@ -94,6 +94,14 @@ export interface AppSettings {
    * worktree list). Updates within ~1.5 s of a `cd`. Off by default.
    */
   followTerminalCwd: boolean;
+  /**
+   * Comfortable column count for the workgraph side-by-side `Columns` view. Up to
+   * this many pinned-epic columns fill the panel; pinning beyond it is
+   * warn-and-allow (the column is still shown, with a non-blocking density
+   * signal). Raising it (e.g. to 3) suppresses the signal at the higher count.
+   * Default 2.
+   */
+  workgraphColumnsSoftCap: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -108,10 +116,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   devEnv: { mode: 'systemd-scope', memoryMaxMb: 16384 },
   byobuKeybindings: false,
   followTerminalCwd: false,
+  workgraphColumnsSoftCap: 2,
 };
 
 /** Upper sanity bound for the idle timeout (minutes) — one day. */
 export const SESSION_IDLE_TIMEOUT_MAX_MIN = 1440;
+
+/** Bounds for the workgraph columns soft cap (comfortable column count). */
+export const WORKGRAPH_COLUMNS_SOFT_CAP_MIN = 1;
+export const WORKGRAPH_COLUMNS_SOFT_CAP_MAX = 6;
 
 /** Floor for the dev-env memory cap (MB). Below this a tmux server can't run. */
 export const DEV_ENV_MEMORY_MIN_MB = 256;
@@ -201,6 +214,12 @@ export function normalizeSettings(input: unknown): AppSettings {
       ? Math.floor(rawMem)
       : DEFAULT_SETTINGS.devEnv.memoryMaxMb;
   const devEnv: DevEnvConfig = { mode: devEnvMode, memoryMaxMb };
+  // Columns soft cap: finite integer clamped to [MIN, MAX]; else default.
+  const rawCap = o.workgraphColumnsSoftCap;
+  const workgraphColumnsSoftCap =
+    typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap >= WORKGRAPH_COLUMNS_SOFT_CAP_MIN
+      ? Math.min(Math.floor(rawCap), WORKGRAPH_COLUMNS_SOFT_CAP_MAX)
+      : DEFAULT_SETTINGS.workgraphColumnsSoftCap;
   return {
     theme,
     fontFamily,
@@ -213,5 +232,6 @@ export function normalizeSettings(input: unknown): AppSettings {
     devEnv,
     byobuKeybindings,
     followTerminalCwd,
+    workgraphColumnsSoftCap,
   };
 }

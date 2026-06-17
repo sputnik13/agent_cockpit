@@ -189,6 +189,26 @@ describe('deriveState precedence (three blocked kinds)', () => {
   it('nothing pending → ready', () => {
     expect(deriveState(mkGraph([mkIssue('a', 'open')]), mkIssue('a', 'open'))).toBe('ready');
   });
+
+  it('only status open reaches ready — canonical non-ready statuses get their own state', () => {
+    expect(deriveState(mkGraph([mkIssue('d', 'deferred')]), mkIssue('d', 'deferred'))).toBe('deferred');
+    expect(deriveState(mkGraph([mkIssue('d', 'draft')]), mkIssue('d', 'draft'))).toBe('draft');
+    expect(deriveState(mkGraph([mkIssue('t', 'tombstone')]), mkIssue('t', 'tombstone'))).toBe('done');
+  });
+
+  it('deferred/draft are NOT downgraded to dep_blocked by open blockers (status wins)', () => {
+    const g = mkGraph(
+      [mkIssue('d', 'deferred'), mkIssue('dep', 'open')],
+      [{ from: 'd', to: 'dep', type: 'blocks' }],
+    );
+    expect(deriveState(g, g.issues[0]!)).toBe('deferred');
+  });
+
+  it('free-text / non-canonical status (e.g. "done", "completed", "pinned") → unknown, never ready', () => {
+    for (const s of ['done', 'completed', 'complete', 'resolved', 'pinned', 'wip']) {
+      expect(deriveState(mkGraph([mkIssue('x', s)]), mkIssue('x', s))).toBe('unknown');
+    }
+  });
 });
 
 describe('groupByState', () => {

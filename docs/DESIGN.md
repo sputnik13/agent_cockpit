@@ -515,14 +515,15 @@ The provider seam realizes the primary flows as follows:
   dependents and is excluded from changelogs) — a limbo state.
 
   **Cockpit rendering** is derived from status in the single source
-  `graphSelectors.ts` (`deriveState`/`isTerminal`/`statusGroup`): `closed`/
-  `tombstone` are terminal (hidden by default); `in_progress` and stored `blocked`
-  map to their states; `open` (unblocked) → Ready. **Known gap:** `deriveState`
-  currently maps any unrecognized status — including the valid `deferred`/`draft`
-  and any free-text value — to **Ready**, so a deferred/draft/`done`-status bead is
-  shown as actionable. Aligning the renderer to this canonical set (treat
-  `deferred`/`draft` as their own non-ready buckets; surface free-text statuses as
-  a flagged "not properly closed" state rather than Ready) is the consistency fix.
+  `graphSelectors.ts` (`deriveState`), aligned to this set: `closed`/`tombstone` →
+  `done` (terminal, hidden by default); stored `blocked` → red; `deferred` →
+  `Deferred`; `draft` → `Draft`; `in_progress` → its state; **only `status ===
+  'open'`** reaches `Ready` (and only when unblocked — else `dep_blocked`/
+  `child_blocked`); everything else — `pinned` and any free-text value (e.g. an
+  agent's `done`/`completed`) → **`unknown` ("Other status", warn tone)**: never
+  Ready, and not hidden as terminal, so the bad status is visible and gets fixed
+  rather than silently treated as done (it still blocks dependents in `br`). All
+  states except `done` are visible by default in the workgraph filter.
 - **Sessions.** `SessionsDialog` is a management modal (opened from a Sessions
   button in the Terminal panel header, mirroring Manage Projects — not a dock
   panel) that lists `tmux` sessions on the cockpit socket via `sessions:list` and

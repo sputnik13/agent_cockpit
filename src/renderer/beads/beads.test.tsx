@@ -54,7 +54,8 @@ const FIXTURE: BeadsTaskGraph = {
       id: 'bd-1',
       title: 'Ready issue',
       body: 'A ready task body.',
-      status: 'ready',
+      // 'open' is the real br status that renders as Ready (ready is derived, not stored).
+      status: 'open',
       priority: 1,
       issueType: 'task',
       labels: ['frontend'],
@@ -476,7 +477,7 @@ describe('buildTree (T3, FR2/FR3/FR5)', () => {
 
   it('orders roots by derived state (in_progress/ready above informational dep_blocked)', () => {
     const g = mkGraph(
-      [mkIssue('blk', 'open', 0), mkIssue('rdy', 'ready', 0), mkIssue('src', 'in_progress', 0)],
+      [mkIssue('blk', 'open', 0), mkIssue('rdy', 'open', 0), mkIssue('src', 'in_progress', 0)],
       // blk depends on src (from=blk, to=src) → open src blocks blk (dep_blocked).
       [{ from: 'blk', to: 'src', type: 'blocks' }],
     );

@@ -276,6 +276,9 @@ export const WG_STATES = [
   'ready',
   'dep_blocked',
   'child_blocked',
+  'draft',
+  'deferred',
+  'unknown',
   'done',
 ] as const;
 export type WorkgraphState = (typeof WG_STATES)[number];
@@ -286,6 +289,9 @@ export const WG_STATE_LABEL: Record<WorkgraphState, string> = {
   ready: 'Ready',
   dep_blocked: 'Blocked by deps',
   child_blocked: 'Blocked by children',
+  draft: 'Draft',
+  deferred: 'Deferred',
+  unknown: 'Other status',
   done: 'Done',
 };
 
@@ -298,6 +304,9 @@ export const STATE_TONE: Record<WorkgraphState, WgTone> = {
   ready: 'accent', // blue
   dep_blocked: 'warn', // yellow
   child_blocked: 'warn', // yellow
+  draft: 'neutral', // muted — captured, not ready to start
+  deferred: 'neutral', // muted — snoozed until a date
+  unknown: 'warn', // yellow — non-canonical/free-text status, needs attention
   done: 'neutral', // muted
 };
 
@@ -308,6 +317,9 @@ export const STATE_COLOR: Record<WorkgraphState, string> = {
   ready: 'var(--color-accent)',
   dep_blocked: 'var(--color-warn)',
   child_blocked: 'var(--color-warn)',
+  draft: 'var(--color-dim)',
+  deferred: 'var(--color-dim)',
+  unknown: 'var(--color-warn)',
   done: 'var(--color-dim)',
 };
 
@@ -350,18 +362,29 @@ export function hasOpenChildren(graph: BeadsTaskGraph, issue: BeadsIssue): boole
 }
 
 /**
- * The single source mapping `(status, edges)` to one render state. Precedence
- * (top wins): `done > blocked(flag) > in_progress > dep_blocked > child_blocked
- * > ready`. Only the deliberate `status === 'blocked'` flag is red; the two
- * derived reasons are yellow/informational. Pure — unit-tested without a store.
+ * The single source mapping `(status, edges)` to one render state, aligned to
+ * `br`'s canonical status set (see docs/DESIGN.md "Bead lifecycle states"). Only
+ * `status === 'open'` (and unblocked) is ever `ready`; `br ready` is likewise
+ * `open AND unblocked AND not-deferred`. Precedence (top wins):
+ *   `done`(closed/tombstone) > `blocked`(flag) > `deferred` > `draft` >
+ *   `in_progress` > [open: `dep_blocked` > `child_blocked` > `ready`] > `unknown`.
+ * `unknown` catches `pinned` and any free-text status (e.g. an agent setting
+ * `done`/`completed` instead of `br close`): it is NEVER `ready` (so it isn't
+ * shown as actionable) and NOT hidden as terminal (so the bad status is visible
+ * and gets fixed — a free-text status still blocks dependents in `br`). Pure.
  */
 export function deriveState(graph: BeadsTaskGraph, issue: BeadsIssue): WorkgraphState {
   if (isTerminal(issue.status)) return 'done';
   if (issue.status === 'blocked') return 'blocked';
+  if (issue.status === 'deferred') return 'deferred';
+  if (issue.status === 'draft') return 'draft';
   if (issue.status === 'in_progress') return 'in_progress';
-  if (hasOpenBlockers(graph, issue)) return 'dep_blocked';
-  if (hasOpenChildren(graph, issue)) return 'child_blocked';
-  return 'ready';
+  if (issue.status === 'open') {
+    if (hasOpenBlockers(graph, issue)) return 'dep_blocked';
+    if (hasOpenChildren(graph, issue)) return 'child_blocked';
+    return 'ready';
+  }
+  return 'unknown'; // pinned + any non-canonical/free-text status — visible, not ready
 }
 
 /** Stable order key for the six-state model: state order, then priority asc,

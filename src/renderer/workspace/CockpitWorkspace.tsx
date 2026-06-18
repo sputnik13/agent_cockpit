@@ -2,19 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DockviewApi, DockviewReadyEvent } from './Workspace';
 import { Workspace } from './Workspace';
 import { dockviewComponents } from './panels';
-import {
-  applyPreset,
-  COLUMN_RATIOS,
-  PRESET_LABELS,
-  ratioLabel,
-  type PresetName,
-} from './presets';
+import { applyPreset, type ColumnRatio, type PresetName } from './presets';
 import { activeViewKey, layoutKey } from './layoutKeys';
 import { readFocus, writeFocus } from './focusMemory';
 import { PANEL_TITLES, PanelIds, type PanelId } from './panelIds';
-import { Button, DropdownMenu, Toolbar, ToolbarSpacer, type MenuItemDef } from '../ui';
 import { useProjectsStore } from '../providerClient';
 import { focusPanel, focusPanelForce, setFocusSuppressed } from './panelFocus';
+import { useWorkspaceControlsStore } from './workspaceControlsStore';
 
 /** Last view used for a project (defaults to edit). */
 function readView(projectId: string): PresetName {
@@ -191,10 +185,12 @@ export function CockpitWorkspace(): JSX.Element {
   }, []);
 
   /** Reset the current view's layout to a proportional `left:center:right` default. */
-  const resetTo = (ratio: (typeof COLUMN_RATIOS)[number]): void => {
+  const resetTo = (ratio: ColumnRatio): void => {
     if (activeId) localStorage.removeItem(layoutKey(activeId, viewRef.current));
     if (apiRef.current) applyPreset(apiRef.current, viewRef.current, ratio);
   };
+  const resetToRef = useRef(resetTo);
+  resetToRef.current = resetTo;
 
   /** Reopen a panel that was closed (or focus it if already open). */
   const openPanel = (id: PanelId): void => {
@@ -207,50 +203,29 @@ export function CockpitWorkspace(): JSX.Element {
     }
     api.addPanel({ id, component: 'panel-host', params: { panelId: id }, title: PANEL_TITLES[id] });
   };
+  const openPanelRef = useRef(openPanel);
+  openPanelRef.current = openPanel;
 
-  const panelMenuItems: MenuItemDef[] = (Object.values(PanelIds) as PanelId[]).map((id) => ({
-    label: PANEL_TITLES[id],
-    onSelect: () => openPanel(id),
-  }));
+  // Publish the workbench controls to the shell top bar (ProjectTabs renders
+  // them). Handlers are wrapped over refs so they stay stable for the store
+  // while always calling the latest closures; `available` gates the controls
+  // when no workbench is mounted.
+  useEffect(() => {
+    useWorkspaceControlsStore.setState({
+      available: true,
+      choosePreset: (next) => choosePresetRef.current(next),
+      openPanel: (id) => openPanelRef.current(id),
+      resetTo: (ratio) => resetToRef.current(ratio),
+    });
+    return () => useWorkspaceControlsStore.setState({ available: false });
+  }, []);
+  useEffect(() => {
+    useWorkspaceControlsStore.setState({ view });
+  }, [view]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <Toolbar>
-        <span className="text-xs text-dim">View</span>
-        {(Object.keys(PRESET_LABELS) as PresetName[]).map((name) => (
-          <Button
-            key={name}
-            size="sm"
-            variant={view === name ? 'primary' : 'default'}
-            onClick={() => view !== name && choosePreset(name)}
-          >
-            {PRESET_LABELS[name]}
-          </Button>
-        ))}
-        <ToolbarSpacer />
-        <DropdownMenu
-          trigger={
-            <Button size="sm" title="Reopen a closed panel">
-              Panels ▾
-            </Button>
-          }
-          items={panelMenuItems}
-        />
-        <DropdownMenu
-          trigger={
-            <Button size="sm" title="Reset layout to a column ratio">
-              Reset ▾
-            </Button>
-          }
-          items={COLUMN_RATIOS.map((ratio) => ({
-            label: `Columns ${ratioLabel(ratio)}`,
-            onSelect: () => resetTo(ratio),
-          }))}
-        />
-      </Toolbar>
-      <div className="min-h-0 flex-1">
-        <Workspace components={dockviewComponents} onReady={onReady} />
-      </div>
+    <div className="h-full min-h-0">
+      <Workspace components={dockviewComponents} onReady={onReady} />
     </div>
   );
 }

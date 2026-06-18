@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { NoteRecord } from '@shared/ipc/channels';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -16,6 +17,8 @@ import type { Root, RootContent, Code } from 'mdast';
 import { MermaidFrame } from './mermaid';
 import { GraphvizFrame } from './graphviz';
 import { openLinkTarget, type LinkContext } from '../links/openLinkTarget';
+import { useProjectsStore } from '../providerClient';
+import { LineNoteThread, lineNotesByLine, useNotesStore } from '../notes';
 
 export interface RenderedBlock {
   id: string;
@@ -35,6 +38,10 @@ interface RenderMarkdownProps {
   /** When set, local-path links are routed through the shared link router
    *  (Explorer/content panel) instead of being inert. */
   linkContext?: LinkContext;
+  /** Repo-relative path of the rendered file. When provided, blocks become note
+   *  anchors (add via a hover affordance; existing line notes render inline).
+   *  Omitted for non-file uses (e.g. TaskDetail), which keep no notes UI. */
+  filePath?: string;
 }
 
 const sanitize = (html: string): string =>
@@ -72,8 +79,37 @@ interface PreparedDoc {
 // remark-rehype), then stringify + sanitize the full document once. Reference
 // definitions, footnote definitions, and reference images resolve because the
 // pass sees the whole document; per-block re-parsing would break them.
+/** Block-level mdast node types that should carry a source-line anchor so the
+ *  rendered view can attach a note to a SPECIFIC line (e.g. one list item or
+ *  table row), not just the enclosing top-level block. */
+const ANCHOR_NODE_TYPES = new Set([
+  'paragraph',
+  'heading',
+  'listItem',
+  'tableRow',
+  'blockquote',
+  'code',
+  'thematicBreak',
+]);
+
 async function renderDoc(source: string): Promise<PreparedDoc> {
   const tree = unified().use(remarkParse).use(remarkGfm).parse(source) as Root;
+
+  // Annotate every block-level node (including nested list items / table rows)
+  // with its source line range via hProperties, so the rendered DOM exposes
+  // `data-start-line` on sub-block elements for line-precise note anchoring.
+  visit(tree, (node) => {
+    if (!ANCHOR_NODE_TYPES.has(node.type)) return;
+    const sl = node.position?.start.line;
+    const el = node.position?.end.line;
+    if (!sl || !el) return;
+    const withData = node as { data?: { hProperties?: Record<string, unknown> } };
+    const data = (withData.data ??= {});
+    const hProps = (data.hProperties ??= {});
+    hProps['data-start-line'] = sl;
+    hProps['data-end-line'] = el;
+  });
+
   const mermaidById = new Map<string, MermaidEntry>();
   let mid = 0;
   const graphvizById = new Map<string, MermaidEntry>();
@@ -217,6 +253,25 @@ function kindFromTag(tag: string): RenderedBlock['kind'] {
 export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
   const [doc, setDoc] = useState<PreparedDoc | null>(null);
 
+  // Line notes (only when a filePath is supplied — i.e. the Content panel, not
+  // TaskDetail/compact uses). A note anchors to a block's source start line;
+  // existing notes whose line falls within a block render inline beneath it.
+  const notesEnabled = props.filePath != null;
+  const allNotes = useNotesStore((s) => s.notes);
+  const loadNotes = useNotesStore((s) => s.load);
+  const addLineNote = useNotesStore((s) => s.addLineNote);
+  const removeNote = useNotesStore((s) => s.remove);
+  const activeId = useProjectsStore((s) => s.activeId);
+  const [composing, setComposing] = useState<number | null>(null);
+  useEffect(() => {
+    if (notesEnabled) void loadNotes();
+  }, [notesEnabled, activeId, loadNotes]);
+  const sourceLines = useMemo(() => props.source.split('\n'), [props.source]);
+  const notesByLine = useMemo(
+    () => lineNotesByLine(props.filePath ? allNotes : [], props.filePath ?? ''),
+    [allNotes, props.filePath],
+  );
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -301,12 +356,12 @@ export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
               ? { source: graphvizEntry.source, language: 'graphviz' }
               : {}),
         };
-        const changed =
+        const changed = Boolean(
           props.changedLineSet &&
-          startLine > 0 &&
-          rangeOverlaps(props.changedLineSet, startLine, endLine);
+            startLine > 0 &&
+            rangeOverlaps(props.changedLineSet, startLine, endLine),
+        );
         const hasClickHandler = Boolean(props.onBlockClick);
-        const onClick = () => props.onBlockClick?.(block);
         const wrapStyle: React.CSSProperties = {
           margin: compact ? '4px 0' : '8px 0',
           padding: changed ? 8 : 0,
@@ -315,29 +370,152 @@ export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
           cursor: changed && hasClickHandler ? 'pointer' : 'default',
           position: 'relative',
         };
-        if (mermaidEntry) {
-          return (
-            <div key={id} style={wrapStyle} onClick={onClick}>
-              {changed && <ChangedTag />}
-              <MermaidFrame source={mermaidEntry.source} />
-            </div>
-          );
-        }
-        if (graphvizEntry) {
-          return (
-            <div key={id} style={wrapStyle} onClick={onClick}>
-              {changed && <ChangedTag />}
-              <GraphvizFrame source={graphvizEntry.source} />
-            </div>
-          );
-        }
+
+        const content = mermaidEntry ? (
+          <MermaidFrame source={mermaidEntry.source} />
+        ) : graphvizEntry ? (
+          <GraphvizFrame source={graphvizEntry.source} />
+        ) : (
+          <div dangerouslySetInnerHTML={{ __html: el.outerHTML }} />
+        );
+
         return (
-          <div key={id} style={wrapStyle} onClick={onClick}>
-            {changed ? <ChangedTag /> : null}
-            <div dangerouslySetInnerHTML={{ __html: el.outerHTML }} />
-          </div>
+          <BlockView
+            key={id}
+            startLine={startLine}
+            endLine={endLine}
+            changed={changed}
+            wrapStyle={wrapStyle}
+            onBlockClick={() => props.onBlockClick?.(block)}
+            content={content}
+            notesEnabled={notesEnabled}
+            filePath={props.filePath}
+            notesByLine={notesByLine}
+            sourceLines={sourceLines}
+            composing={composing}
+            setComposing={setComposing}
+            onAdd={(line, anchorText, body) => {
+              if (props.filePath) void addLineNote(props.filePath, line, anchorText, body);
+            }}
+            onDelete={(noteId) => void removeNote(noteId)}
+          />
         );
       })}
+    </div>
+  );
+}
+
+interface BlockViewProps {
+  startLine: number;
+  endLine: number;
+  changed: boolean;
+  wrapStyle: React.CSSProperties;
+  onBlockClick: () => void;
+  content: JSX.Element;
+  notesEnabled: boolean;
+  filePath?: string;
+  notesByLine: Map<number, NoteRecord[]>;
+  sourceLines: string[];
+  composing: number | null;
+  setComposing: (line: number | null) => void;
+  onAdd: (line: number, anchorText: string, body: string) => void;
+  onDelete: (noteId: number) => void;
+}
+
+/**
+ * A single rendered top-level block. When notes are enabled it tracks the
+ * hovered line-bearing descendant (`data-start-line`, set on sub-block nodes by
+ * renderDoc) and shows a "+" aligned to it, so a note can be anchored to a
+ * SPECIFIC source line — e.g. one list item — not just the block start. Existing
+ * notes whose line falls within the block render as inline threads at the block
+ * end, each labeled with its line + source snippet so the association is clear.
+ */
+function BlockView({
+  startLine,
+  endLine,
+  changed,
+  wrapStyle,
+  onBlockClick,
+  content,
+  notesEnabled,
+  notesByLine,
+  sourceLines,
+  composing,
+  setComposing,
+  onAdd,
+  onDelete,
+}: BlockViewProps): JSX.Element {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [hover, setHover] = useState<{ line: number; top: number } | null>(null);
+
+  const canAnchor = notesEnabled && startLine > 0;
+  const threadLines = canAnchor
+    ? Array.from(
+        new Set([
+          ...[...notesByLine.keys()].filter((l) => l >= startLine && l <= endLine),
+          ...(composing != null && composing >= startLine && composing <= endLine
+            ? [composing]
+            : []),
+        ]),
+      ).sort((a, b) => a - b)
+    : [];
+
+  const onMove = (e: React.MouseEvent<HTMLDivElement>): void => {
+    if (!canAnchor) return;
+    const el = (e.target as HTMLElement).closest('[data-start-line]') as HTMLElement | null;
+    if (!el || !wrapRef.current?.contains(el)) return;
+    const line = Number(el.getAttribute('data-start-line'));
+    if (!line) return;
+    const top = el.offsetTop;
+    setHover((h) => (h && h.line === line && h.top === top ? h : { line, top }));
+  };
+
+  return (
+    <div
+      ref={wrapRef}
+      style={wrapStyle}
+      onClick={onBlockClick}
+      onMouseMove={canAnchor ? onMove : undefined}
+      onMouseLeave={() => hover && setHover(null)}
+    >
+      {canAnchor && hover && (
+        <button
+          type="button"
+          title={`Add a note on line ${hover.line}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setComposing(hover.line);
+          }}
+          className="absolute z-10 flex h-5 w-5 items-center justify-center rounded border border-edge bg-panel text-accent"
+          style={{ left: 0, top: hover.top, transform: 'translateX(-115%)' }}
+        >
+          +
+        </button>
+      )}
+      {changed ? <ChangedTag /> : null}
+      {content}
+      {threadLines.length > 0 && (
+        <div onClick={(e) => e.stopPropagation()}>
+          {threadLines.map((line) => (
+            <div key={line}>
+              <div className="px-3 pt-1 font-mono text-[10px] text-dim">
+                {`L${line}: ${(sourceLines[line - 1] ?? '').trim().slice(0, 80)}`}
+              </div>
+              <LineNoteThread
+                notes={notesByLine.get(line) ?? []}
+                liveText={sourceLines[line - 1] ?? null}
+                composing={composing === line}
+                onSubmit={(body) => {
+                  onAdd(line, sourceLines[line - 1] ?? '', body);
+                  setComposing(null);
+                }}
+                onCancel={() => setComposing(null)}
+                onDelete={onDelete}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

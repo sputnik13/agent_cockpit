@@ -1,2 +1,5 @@
 export { NotesPanel } from './NotesPanel';
-export { useNotesStore } from './notesStore';
+export { useNotesStore, lineNotesByLine } from './notesStore';
+export { LineNoteThread } from './LineNoteThread';
+export { LineNoteGutter } from './LineNoteGutter';
+export { isOutdated } from './anchor';

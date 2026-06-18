@@ -2,8 +2,20 @@ import { useEffect, useState } from 'react';
 import { useProjectsStore, useSessionStore, selectStatus } from '../providerClient';
 import type { ProjectInfo } from '@shared/ipc/channels';
 import type { ConnectionSpec, ConnectionState } from '@shared/providers/types';
-import { Badge, Button, Dialog, DropdownMenu, IconButton, StatusDot, Tooltip } from '../ui';
+import {
+  Badge,
+  Button,
+  Dialog,
+  DropdownMenu,
+  IconButton,
+  StatusDot,
+  Tooltip,
+  type MenuItemDef,
+} from '../ui';
 import { useSettingsStore } from '../settings';
+import { useWorkspaceControlsStore } from '../workspace/workspaceControlsStore';
+import { PANEL_TITLES, PanelIds, type PanelId } from '../workspace/panelIds';
+import { COLUMN_RATIOS, PRESET_LABELS, ratioLabel, type PresetName } from '../workspace/presets';
 
 // Maps each connection state to a semantic color tone using the theme CSS-var
 // tokens defined in styles.css (--color-added/removed/warn, redefined per theme).
@@ -25,6 +37,7 @@ function basename(p: string): string {
   const parts = p.replace(/\/+$/, '').split('/');
   return parts[parts.length - 1] || p;
 }
+
 
 /**
  * Compute a unique label for a remote project given the desired base name and
@@ -60,6 +73,13 @@ export function ProjectTabs(): JSX.Element {
   const remove = useProjectsStore((s) => s.remove);
   const update = useProjectsStore((s) => s.update);
   const reorder = useProjectsStore((s) => s.reorder);
+  // Workbench controls published by CockpitWorkspace (View/Panels/Reset) — they
+  // live here in the single top row but operate on the Dockview workbench.
+  const view = useWorkspaceControlsStore((s) => s.view);
+  const wsAvailable = useWorkspaceControlsStore((s) => s.available);
+  const choosePreset = useWorkspaceControlsStore((s) => s.choosePreset);
+  const openPanel = useWorkspaceControlsStore((s) => s.openPanel);
+  const resetTo = useWorkspaceControlsStore((s) => s.resetTo);
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
   /** The remote project currently being edited (null = no edit open). */
@@ -104,6 +124,22 @@ export function ProjectTabs(): JSX.Element {
     { label: 'Remote (SSH)…', onSelect: () => setRemoteOpen(true) },
   ];
 
+  // Workbench control menus. Enabled only when a workbench is mounted for an
+  // active project; otherwise the triggers render disabled.
+  const wsEnabled = wsAvailable && activeId != null;
+  const presetItems: MenuItemDef[] = (Object.keys(PRESET_LABELS) as PresetName[]).map((name) => ({
+    label: PRESET_LABELS[name],
+    onSelect: () => choosePreset(name),
+  }));
+  const panelItems: MenuItemDef[] = (Object.values(PanelIds) as PanelId[]).map((id) => ({
+    label: PANEL_TITLES[id],
+    onSelect: () => openPanel(id),
+  }));
+  const resetItems: MenuItemDef[] = COLUMN_RATIOS.map((ratio) => ({
+    label: `Columns ${ratioLabel(ratio)}`,
+    onSelect: () => resetTo(ratio),
+  }));
+
   return (
     <div className="flex h-9 shrink-0 items-center gap-1 border-b border-edge bg-panel px-2">
       <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
@@ -129,43 +165,73 @@ export function ProjectTabs(): JSX.Element {
           ))
         )}
       </div>
-      <span className="mx-1 h-5 w-px shrink-0 bg-edge" />
-      <DropdownMenu
-        trigger={
-          <Button size="sm" title="Add a project">
-            Add project ▾
-          </Button>
-        }
-        items={addMenuItems}
-      />
-      <Tooltip content="Manage projects">
-        <IconButton
-          label="Manage projects"
-          size="sm"
-          disabled={projects.length === 0}
-          onClick={() => setManageOpen(true)}
-        >
-          ⋯
-        </IconButton>
-      </Tooltip>
-      <Tooltip content="Diagnostics (⌘⇧L)">
-        <IconButton
-          label="Diagnostics"
-          size="sm"
-          onClick={() => void window.api.openDiagnostics()}
-        >
-          ⬡
-        </IconButton>
-      </Tooltip>
-      <Tooltip content="Preferences (⌘,)">
-        <IconButton
-          label="Preferences"
-          size="sm"
-          onClick={() => useSettingsStore.getState().setOpen(true)}
-        >
-          ⚙
-        </IconButton>
-      </Tooltip>
+      {/* Workbench controls (operate on the Dockview workspace). */}
+      <div className="flex items-center gap-1">
+        <DropdownMenu
+          trigger={
+            <Button size="sm" disabled={!wsEnabled} title="Switch view layout (⌘E / ⌘R)">
+              {`View: ${PRESET_LABELS[view]} ▾`}
+            </Button>
+          }
+          items={presetItems}
+        />
+        <DropdownMenu
+          trigger={
+            <Button size="sm" disabled={!wsEnabled} title="Reopen a closed panel">
+              Panels ▾
+            </Button>
+          }
+          items={panelItems}
+        />
+        <DropdownMenu
+          trigger={
+            <Button size="sm" disabled={!wsEnabled} title="Reset layout to a column ratio">
+              Reset ▾
+            </Button>
+          }
+          items={resetItems}
+        />
+      </div>
+      {/* Project + app controls. */}
+      <div className="flex items-center gap-1">
+        <span className="mx-1 h-5 w-px shrink-0 bg-edge" />
+        <DropdownMenu
+          trigger={
+            <Button size="sm" title="Add a project">
+              Add project ▾
+            </Button>
+          }
+          items={addMenuItems}
+        />
+        <Tooltip content="Manage projects">
+          <IconButton
+            label="Manage projects"
+            size="sm"
+            disabled={projects.length === 0}
+            onClick={() => setManageOpen(true)}
+          >
+            🗂
+          </IconButton>
+        </Tooltip>
+        <Tooltip content="Diagnostics / logs (⌘⇧L)">
+          <IconButton
+            label="Diagnostics / logs"
+            size="sm"
+            onClick={() => void window.api.openDiagnostics()}
+          >
+            📋
+          </IconButton>
+        </Tooltip>
+        <Tooltip content="Preferences (⌘,)">
+          <IconButton
+            label="Preferences"
+            size="sm"
+            onClick={() => useSettingsStore.getState().setOpen(true)}
+          >
+            ⚙
+          </IconButton>
+        </Tooltip>
+      </div>
       <RemoteAddDialog
         open={remoteOpen}
         onOpenChange={(o) => {
@@ -193,12 +259,15 @@ export function ProjectTabs(): JSX.Element {
           setEditProject(null);
         }}
       />
+      {/* Keep Manage open behind the edit dialog (onEdit only sets editProject)
+          so saving/cancelling the edit returns to the Manage list instead of
+          dismissing everything. */}
       <ManageProjectsDialog
         open={manageOpen}
         onOpenChange={setManageOpen}
         projects={projects}
         onClose={(id) => remove(id)}
-        onEdit={(p) => { setEditProject(p); setManageOpen(false); }}
+        onEdit={(p) => setEditProject(p)}
       />
     </div>
   );

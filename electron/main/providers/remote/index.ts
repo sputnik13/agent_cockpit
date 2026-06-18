@@ -327,7 +327,16 @@ export class RemoteProvider implements WorkspaceProvider {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const phase = (err as { phase?: string }).phase ?? 'connect';
-      logger.error(`SSH connect failed at phase=${phase}: ${msg}`, ctx);
+      // A synchronous connect throw (e.g. an unparseable identity key) is wrapped
+      // with a generic message; append the underlying cause so the failure is
+      // diagnosable from the log alone.
+      const cause = (err as { cause?: unknown }).cause;
+      const causeMsg =
+        cause instanceof Error ? cause.message : cause != null ? String(cause) : '';
+      logger.error(
+        `SSH connect failed at phase=${phase}: ${msg}${causeMsg ? ` (cause: ${causeMsg})` : ''}`,
+        ctx,
+      );
       // The transport already triggered machine.toFailed() via onStateChange;
       // update the detail on the failure so the renderer shows the error.
       this.machine.toFailed(phase !== 'connect' ? `[${phase}] ${msg}` : msg);

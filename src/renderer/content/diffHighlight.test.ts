@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pickTokenLine } from './DiffView';
+import { pickTokenLine } from './diffTokens';
 import type { TokenLine } from './highlight/highlighter';
 
 const LINE_A: TokenLine = [{ content: 'const a = 1;', color: '#268bd2' }];

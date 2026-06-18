@@ -432,9 +432,12 @@ export class Ssh2Transport implements RemoteTransport {
       hostVerifier: this.buildHostVerifier(host, port, opts?.hostKeyPolicy),
     };
 
+    const agentSock = process.env.SSH_AUTH_SOCK;
+
     if (identityPath) {
+      let keyBuf: Buffer;
       try {
-        config.privateKey = await readFile(identityPath);
+        keyBuf = await readFile(identityPath);
       } catch (err) {
         throw new RemoteTransportError(
           `Failed to read SSH identity file "${basename(identityPath)}"`,
@@ -443,8 +446,42 @@ export class Ssh2Transport implements RemoteTransport {
           err,
         );
       }
+
+      // ssh2 parses `privateKey` SYNCHRONOUSLY inside conn.connect() and THROWS
+      // when it can't parse the key — overwhelmingly because the key is
+      // passphrase-protected and no passphrase is supplied (we have no UI to
+      // collect one). parseKey() reports that as a returned Error (it does not
+      // throw), so we gate on it here: a usable key is passed as privateKey; an
+      // unusable one falls back to the SSH agent (where a decrypted copy of the
+      // key typically lives — which is why native `ssh` works), exactly as the
+      // agent-only branch below. Only when no agent is available do we fail, with
+      // an actionable message instead of an opaque synchronous connect throw.
+      const parsed = ssh2Utils.parseKey(keyBuf);
+      if (parsed instanceof Error) {
+        if (agentSock) {
+          config.agent = agentSock;
+          logger.warn(
+            `SSH identity "${basename(identityPath)}" is not usable directly ` +
+              `(${parsed.message}); falling back to the SSH agent`,
+            'remote-connect',
+          );
+        } else {
+          throw new RemoteTransportError(
+            `SSH identity "${basename(identityPath)}" is passphrase-protected or ` +
+              `unparseable, and no SSH agent is available (SSH_AUTH_SOCK is unset). ` +
+              `Load the key with \`ssh-add\` and retry.`,
+            spec.host,
+            'identity',
+            parsed,
+          );
+        }
+      } else {
+        config.privateKey = keyBuf;
+        // Offer the agent as an additional auth method when present, matching
+        // native ssh (which also tries agent keys). Harmless when the key works.
+        if (agentSock) config.agent = agentSock;
+      }
     } else {
-      const agentSock = process.env.SSH_AUTH_SOCK;
       if (!agentSock) {
         throw new RemoteTransportError(
           'No SSH identity provided and SSH_AUTH_SOCK is not set (no agent available)',

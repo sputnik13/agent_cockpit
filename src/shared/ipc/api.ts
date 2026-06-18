@@ -123,6 +123,8 @@ export interface RendererApi {
       targetKind: ReviewTargetKind;
       targetId: string;
       body: string;
+      line?: number | null;
+      anchorText?: string | null;
     }): Promise<NoteRecord>;
     update(id: number, body: string): Promise<NoteRecord | null>;
     remove(id: number): Promise<void>;

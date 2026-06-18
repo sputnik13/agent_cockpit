@@ -16,9 +16,23 @@ const { getFileDiff, readFile } = vi.hoisted(() => ({
 // components (RawFile/ImageCompare) talk to `window.api` directly, so set that
 // too for their reads.
 vi.mock('../providerClient', () => ({
-  agentCockpit: { provider: { getFileDiff, readFile } },
-  // ContentViewer reads the active project id to build the markdown link context.
-  useProjectsStore: (sel: (s: { activeId: string | null }) => unknown) => sel({ activeId: 'p1' }),
+  agentCockpit: {
+    provider: { getFileDiff, readFile },
+    // RawFile/notes load through the notes store; stub an empty list.
+    notes: {
+      list: vi.fn().mockResolvedValue([]),
+      create: vi.fn(),
+      update: vi.fn(),
+      remove: vi.fn(),
+      exportMarkdown: vi.fn().mockResolvedValue(''),
+    },
+  },
+  // ContentViewer reads the active project id (selector form); the notes store
+  // reads it imperatively via getState().
+  useProjectsStore: Object.assign(
+    (sel: (s: { activeId: string | null }) => unknown) => sel({ activeId: 'p1' }),
+    { getState: () => ({ activeId: 'p1' }) },
+  ),
 }));
 
 (globalThis as unknown as { window: Window }).window ??= globalThis as unknown as Window;
@@ -130,12 +144,9 @@ describe('ContentViewer', () => {
     await waitFor(() =>
       expect(readFile).toHaveBeenCalledWith('src/file.ts', { ref: 'HEAD' }),
     );
-    // The file renders via RawFile which may split content into token spans when
-    // Shiki highlighting is active. Match the concatenated text in any container.
-    await waitFor(() => {
-      const pre = document.querySelector('pre');
-      expect(pre?.textContent).toBe('raw text body');
-    });
+    // RawFile renders per-line rows (line-number gutter + code) and may split the
+    // line into token spans; assert the concatenated line text is present.
+    await waitFor(() => expect(document.body.textContent).toContain('raw text body'));
     expect(screen.getByRole('tab', { name: 'Raw' })).toHaveAttribute('aria-selected', 'true');
   });
 

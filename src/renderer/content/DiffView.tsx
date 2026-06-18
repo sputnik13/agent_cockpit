@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
+import { useProjectsStore } from '../providerClient';
 import { parsePatch } from './parsePatch';
 import { resolveLanguage } from './highlight/languages';
 import { tokenizeLines, type TokenLine, type TokenizeResult } from './highlight/highlighter';
 import { CodeLineTokens } from './highlight/CodeTokens';
+import { LineNoteThread, lineNotesByLine, useNotesStore } from '../notes';
+import { pickTokenLine } from './diffTokens';
 import type { ThemeId } from '@shared/settings';
 
 interface DiffViewProps {
@@ -53,20 +56,6 @@ async function tokenizeBothSides(
   };
 }
 
-/**
- * Map a 1-based source line number to the correct TokenLine entry.
- * Line numbers from parsePatch are 1-based; token arrays are 0-based.
- */
-export function pickTokenLine(
-  lineNumber: number | null,
-  tokenLines: TokenLine[] | null,
-): TokenLine | null {
-  if (lineNumber === null || tokenLines === null) return null;
-  const idx = lineNumber - 1;
-  if (idx < 0 || idx >= tokenLines.length) return null;
-  return tokenLines[idx];
-}
-
 export function DiffView({
   patch,
   emptyHint,
@@ -76,6 +65,22 @@ export function DiffView({
 }: DiffViewProps): JSX.Element {
   const parsed = useMemo(() => parsePatch(patch), [patch]);
   const theme = useSettingsStore((s) => s.settings.theme);
+
+  // Line notes are anchored to the NEW-file line number. Commentable rows are
+  // those with a newLine (added/context); deleted lines have none.
+  const notes = useNotesStore((s) => s.notes);
+  const loadNotes = useNotesStore((s) => s.load);
+  const addLineNote = useNotesStore((s) => s.addLineNote);
+  const removeNote = useNotesStore((s) => s.remove);
+  const activeId = useProjectsStore((s) => s.activeId);
+  const [composing, setComposing] = useState<number | null>(null);
+  useEffect(() => {
+    void loadNotes();
+  }, [activeId, loadNotes]);
+  const notesByLine = useMemo(
+    () => (filePath ? lineNotesByLine(notes, filePath) : new Map<number, typeof notes>()),
+    [notes, filePath],
+  );
 
   const [tokenSides, setTokenSides] = useState<{
     old: TokenLine[] | null;
@@ -152,37 +157,84 @@ export function DiffView({
                       : pickTokenLine(ln.newLine, tokenSides.new)
                   : null;
 
+              const newLine = ln.newLine;
+              const commentable = filePath != null && newLine != null;
+              const lineNotes = newLine != null ? (notesByLine.get(newLine) ?? []) : [];
+              const open = newLine != null && composing === newLine;
+
               return (
-                <div key={j} style={{ display: 'flex', background: color, whiteSpace: 'pre' }}>
-                  <span
-                    style={{
-                      width: 50,
-                      textAlign: 'right',
-                      paddingRight: 8,
-                      color: 'var(--fg-dim)',
-                      borderRight: '1px solid var(--border)',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {ln.oldLine ?? ''}
-                  </span>
-                  <span
-                    style={{
-                      width: 50,
-                      textAlign: 'right',
-                      paddingRight: 8,
-                      color: 'var(--fg-dim)',
-                      borderRight: '1px solid var(--border)',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {ln.newLine ?? ''}
-                  </span>
-                  <span style={{ paddingLeft: 8 }}>
-                    {prefix}
-                    {tokenLine ? <CodeLineTokens line={tokenLine} /> : ln.text}
-                  </span>
-                </div>
+                <Fragment key={j}>
+                  <div style={{ display: 'flex', background: color, whiteSpace: 'pre' }}>
+                    <span
+                      style={{
+                        width: 50,
+                        textAlign: 'right',
+                        paddingRight: 8,
+                        color: 'var(--fg-dim)',
+                        borderRight: '1px solid var(--border)',
+                        userSelect: 'none',
+                      }}
+                    >
+                      {ln.oldLine ?? ''}
+                    </span>
+                    <span
+                      className={commentable ? 'group/ng relative cursor-pointer' : 'relative'}
+                      onClick={commentable ? () => setComposing(newLine) : undefined}
+                      title={commentable ? `Add a note on line ${newLine}` : undefined}
+                      style={{
+                        width: 50,
+                        textAlign: 'right',
+                        paddingRight: 8,
+                        color: 'var(--fg-dim)',
+                        borderRight: '1px solid var(--border)',
+                        userSelect: 'none',
+                      }}
+                    >
+                      {lineNotes.length > 0 && (
+                        <span
+                          style={{
+                            position: 'absolute',
+                            left: 2,
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            width: 6,
+                            height: 6,
+                            borderRadius: 9999,
+                            background: 'var(--accent)',
+                          }}
+                        />
+                      )}
+                      <span className={commentable ? 'group-hover/ng:opacity-0' : undefined}>
+                        {newLine ?? ''}
+                      </span>
+                      {commentable && (
+                        <span
+                          className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/ng:opacity-100"
+                          style={{ color: 'var(--accent)' }}
+                        >
+                          +
+                        </span>
+                      )}
+                    </span>
+                    <span style={{ paddingLeft: 8 }}>
+                      {prefix}
+                      {tokenLine ? <CodeLineTokens line={tokenLine} /> : ln.text}
+                    </span>
+                  </div>
+                  {newLine != null && (lineNotes.length > 0 || open) && (
+                    <LineNoteThread
+                      notes={lineNotes}
+                      liveText={ln.text}
+                      composing={open}
+                      onSubmit={(body) => {
+                        if (filePath) void addLineNote(filePath, newLine, ln.text, body);
+                        setComposing(null);
+                      }}
+                      onCancel={() => setComposing(null)}
+                      onDelete={(id) => void removeNote(id)}
+                    />
+                  )}
+                </Fragment>
               );
             })}
           </div>

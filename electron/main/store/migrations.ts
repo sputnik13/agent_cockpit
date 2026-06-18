@@ -185,4 +185,15 @@ export const migrations: Migration[] = [
       ALTER TABLE agent_cockpit_projects ADD COLUMN run_command TEXT;
     `,
   },
+  {
+    version: '0012_agent_cockpit_note_anchor',
+    sql: `
+      -- Line-anchored notes (code-review-style comments). Both nullable: a NULL
+      -- line keeps a project/file-level note as before; line + anchor_text make
+      -- the note point at a specific 1-based file line, with a snapshot of that
+      -- line's text so the UI can flag the note as outdated when the line drifts.
+      ALTER TABLE agent_cockpit_notes ADD COLUMN line INTEGER;
+      ALTER TABLE agent_cockpit_notes ADD COLUMN anchor_text TEXT;
+    `,
+  },
 ];

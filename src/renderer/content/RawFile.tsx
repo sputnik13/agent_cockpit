@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
+import { useProjectsStore } from '../providerClient';
 import { resolveLanguage } from './highlight/languages';
 import { useHighlightedTokens } from './highlight/useHighlightedTokens';
-import { CodeTokens } from './highlight/CodeTokens';
+import { CodeLineTokens } from './highlight/CodeTokens';
+import { LineNoteGutter, LineNoteThread, lineNotesByLine, useNotesStore } from '../notes';
 
 interface RawFileProps {
   worktreePath: string;
@@ -59,37 +61,77 @@ export function RawFile({ worktreePath, filePath, gitRef }: RawFileProps): JSX.E
   }
 }
 
-/** Renders the text case with progressive Shiki highlighting when the file
- *  extension maps to a supported language. Falls back to a plain <pre> for
- *  unknown extensions. */
+/** Renders the text case as per-line rows (line-number gutter + code) with
+ *  progressive Shiki highlighting when the file extension maps to a supported
+ *  language, falling back to plain text per line otherwise. Each line is a note
+ *  anchor: the gutter adds a note, and existing notes render inline beneath the
+ *  line as a {@link LineNoteThread}. */
 function RawText({ content, filePath }: { content: string; filePath: string }): JSX.Element {
   const theme = useSettingsStore((s) => s.settings.theme);
   const lang = resolveLanguage(filePath);
   const hl = useHighlightedTokens(content, lang, theme);
 
-  const preStyle = {
+  const notes = useNotesStore((s) => s.notes);
+  const load = useNotesStore((s) => s.load);
+  const addLineNote = useNotesStore((s) => s.addLineNote);
+  const removeNote = useNotesStore((s) => s.remove);
+  const activeId = useProjectsStore((s) => s.activeId);
+  const [composing, setComposing] = useState<number | null>(null);
+
+  // Load the active project's notes so this file's anchors render even when the
+  // Notes panel is closed (idempotent; the store holds one slice per project).
+  useEffect(() => {
+    void load();
+  }, [activeId, load]);
+
+  const textLines = useMemo(() => content.split('\n'), [content]);
+  const notesByLine = useMemo(() => lineNotesByLine(notes, filePath), [notes, filePath]);
+  const tokenLines = lang !== null && hl.state === 'ready' ? hl.lines : null;
+
+  const containerStyle = {
     margin: 0,
-    padding: 16,
+    paddingTop: 8,
+    paddingBottom: 8,
     fontFamily: 'var(--font-mono)',
     fontSize: 'var(--mono-size)',
-    whiteSpace: 'pre' as const,
-    background: 'var(--bg)',
-    color: 'var(--fg)',
+    background: (tokenLines && hl.state === 'ready' && hl.bg) || 'var(--bg)',
+    color: (tokenLines && hl.state === 'ready' && hl.fg) || 'var(--fg)',
     overflow: 'auto',
     height: '100%',
   };
 
-  if (lang !== null && hl.state === 'ready') {
-    return (
-      <CodeTokens
-        lines={hl.lines}
-        style={{ ...preStyle, background: hl.bg || preStyle.background, color: hl.fg || preStyle.color }}
-      />
-    );
-  }
-
-  // Plain fallback: unknown language, or tokens not yet ready (progressive first paint).
-  return <pre style={preStyle}>{content}</pre>;
+  return (
+    <div style={containerStyle}>
+      {textLines.map((text, i) => {
+        const lineNo = i + 1;
+        const lineNotes = notesByLine.get(lineNo) ?? [];
+        const open = composing === lineNo;
+        return (
+          <div key={i}>
+            <div style={{ display: 'flex', whiteSpace: 'pre' }}>
+              <LineNoteGutter line={lineNo} hasNotes={lineNotes.length > 0} onAdd={setComposing} />
+              <span style={{ flex: '1 1 auto', paddingLeft: 8 }}>
+                {tokenLines?.[i] ? <CodeLineTokens line={tokenLines[i]} /> : text}
+              </span>
+            </div>
+            {(lineNotes.length > 0 || open) && (
+              <LineNoteThread
+                notes={lineNotes}
+                liveText={text}
+                composing={open}
+                onSubmit={(body) => {
+                  void addLineNote(filePath, lineNo, text, body);
+                  setComposing(null);
+                }}
+                onCancel={() => setComposing(null)}
+                onDelete={(id) => void removeNote(id)}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function fmtSize(n: number): string {

@@ -15,6 +15,10 @@ interface NoteRow {
   body: string;
   created_at: string;
   updated_at: string;
+  /** 1-based anchored line (null for project/file-level notes). */
+  line: number | null;
+  /** Snapshot of the anchored line's text at capture (null otherwise). */
+  anchor_text: string | null;
 }
 
 function toRecord(r: NoteRow): NoteRecord {
@@ -26,6 +30,8 @@ function toRecord(r: NoteRow): NoteRecord {
     body: r.body,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    line: r.line,
+    anchorText: r.anchor_text,
   };
 }
 
@@ -34,16 +40,30 @@ export interface CreateNoteInput {
   targetKind: ReviewTargetKind;
   targetId: string;
   body: string;
+  /** 1-based anchored line for a line note; omit for project/file-level notes. */
+  line?: number | null;
+  /** Snapshot of the anchored line's text for outdated detection. */
+  anchorText?: string | null;
 }
 
 export function createNoteOn(db: Database.Database, input: CreateNoteInput): NoteRecord {
   const now = new Date().toISOString();
   const info = db
     .prepare(
-      `INSERT INTO agent_cockpit_notes (project_id, target_kind, target_id, body, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO agent_cockpit_notes
+         (project_id, target_kind, target_id, body, created_at, updated_at, line, anchor_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(input.projectId, input.targetKind, input.targetId, input.body, now, now);
+    .run(
+      input.projectId,
+      input.targetKind,
+      input.targetId,
+      input.body,
+      now,
+      now,
+      input.line ?? null,
+      input.anchorText ?? null,
+    );
   return getNoteOn(db, Number(info.lastInsertRowid))!;
 }
 
@@ -90,7 +110,10 @@ export function exportNotesMarkdown(notes: NoteRecord[]): string {
   if (notes.length === 0) return '# Review notes\n\n_(none)_\n';
   const lines = ['# Review notes', ''];
   for (const n of notes) {
-    lines.push(`## ${n.targetKind}: ${n.targetId}`, '', n.body, '', `_— ${n.updatedAt}_`, '');
+    // Line notes get a `path:line` heading so the handoff Markdown points at the
+    // exact spot; project/file-level notes (no line) keep the bare target.
+    const target = n.line != null ? `${n.targetId}:${n.line}` : n.targetId;
+    lines.push(`## ${n.targetKind}: ${target}`, '', n.body, '', `_— ${n.updatedAt}_`, '');
   }
   return lines.join('\n');
 }

@@ -59,6 +59,13 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
   return (
     <TooltipProvider>
       <div className="flex h-full w-full flex-col bg-bg text-fg">
+        {/* Empty themed title strip housing the OS window controls (macOS traffic
+            lights / Windows caption overlay). It is the window drag region; on
+            Linux (default frame) it is omitted. Height matches TITLE_BAR_HEIGHT
+            in electron/main/window.ts. */}
+        {SHOW_TITLE_STRIP && (
+          <div className="app-drag h-8 shrink-0 bg-panel" aria-hidden="true" />
+        )}
         <ProjectTabs />
         <div className="min-h-0 min-w-0 flex-1">{children}</div>
         <StatusRegion />
@@ -67,3 +74,8 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
     </TooltipProvider>
   );
 }
+
+// The OS overlays its window controls onto our content only with a hidden/inset
+// title bar (macOS + Windows); Linux keeps a native frame, so no strip is needed.
+const SHOW_TITLE_STRIP =
+  typeof navigator !== 'undefined' && /Mac|Windows/i.test(navigator.userAgent);

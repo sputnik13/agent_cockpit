@@ -52,8 +52,10 @@ function applyEdit(api: DockviewApi, ratio: ColumnRatio): void {
 
 /**
  * Review view — for reading the change. Three columns:
- *   [ Workgraph / Task / Run ] [ Content ] [ Changes · Explorer · Notes ]
- * Content takes the center; the right column tabs the review surfaces.
+ *   [ Workgraph / Task / Run ] [ Content ] [ Changes·Explorer·Notes / Terminal ]
+ * This is the mirror of Edit: Terminal and Content swap places. Content takes
+ * the center; the right column tabs the review surfaces with the Terminal below
+ * them — exactly where Content sits (below Changes) in Edit.
  */
 function applyReview(api: DockviewApi, ratio: ColumnRatio): void {
   api.clear();
@@ -64,13 +66,18 @@ function applyReview(api: DockviewApi, ratio: ColumnRatio): void {
   addPanel(api, PanelIds.changes, { referencePanel: PanelIds.content, direction: 'right' });
   addPanel(api, PanelIds.explorer, { referencePanel: PanelIds.changes, direction: 'within' });
   addPanel(api, PanelIds.notes, { referencePanel: PanelIds.changes, direction: 'within' });
+  // Terminal sits below the right-column review group — the slot Content occupies
+  // in Edit (the Terminal/Content swap).
+  addPanel(api, PanelIds.terminal, { referencePanel: PanelIds.changes, direction: 'below' });
   addPanel(api, PanelIds.taskDetail, { referencePanel: PanelIds.beads, direction: 'below' });
   // Run is optional (default off); it stays reopenable from the Panels menu.
   if (useSettingsStore.getState().settings.showRunPanel) {
     addPanel(api, PanelIds.run, { referencePanel: PanelIds.taskDetail, direction: 'below' });
   }
-  // Changes (not Notes/Explorer) is the default tab of the right column.
+  // Changes (not Notes/Explorer) is the default tab of the right column; Content
+  // is the focused center surface for reading.
   api.getPanel(PanelIds.changes)?.api.setActive();
+  api.getPanel(PanelIds.content)?.api.setActive();
   sizeColumns(api, ratio);
 }
 

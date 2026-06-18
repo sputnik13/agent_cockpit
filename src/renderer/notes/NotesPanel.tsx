@@ -75,18 +75,33 @@ export function NotesPanel(): JSX.Element {
         {notes.length === 0 ? (
           <EmptyState title="No notes yet" hint="Capture findings to hand back to the agent." />
         ) : (
-          notes.map((n) => (
-            <div key={n.id} className="border-b border-edge px-2 py-1.5">
-              <div className="flex items-center gap-2">
-                <Badge tone="accent">{n.targetKind}</Badge>
-                <span className="flex-1 text-[10px] text-dim">{n.updatedAt}</span>
-                <IconButton label="Delete note" size="sm" onClick={() => void remove(n.id)}>
-                  ×
-                </IconButton>
+          notes.map((n) => {
+            // Line notes carry a file path (targetId) and 1-based line; surface
+            // that as `path:line` so the panel mirrors the inline anchors.
+            const fileLabel =
+              n.targetKind === 'file'
+                ? `${n.targetId}${n.line != null ? `:${n.line}` : ''}`
+                : null;
+            return (
+              <div key={n.id} className="border-b border-edge px-2 py-1.5">
+                <div className="flex items-center gap-2">
+                  <Badge tone="accent">{n.targetKind}</Badge>
+                  {fileLabel ? (
+                    <span className="flex-1 truncate font-mono text-[11px] text-fg" title={fileLabel}>
+                      {fileLabel}
+                    </span>
+                  ) : (
+                    <span className="flex-1" />
+                  )}
+                  <span className="shrink-0 text-[10px] text-dim">{n.updatedAt}</span>
+                  <IconButton label="Delete note" size="sm" onClick={() => void remove(n.id)}>
+                    ×
+                  </IconButton>
+                </div>
+                <div className="mt-1 whitespace-pre-wrap text-[13px] text-fg">{n.body}</div>
               </div>
-              <div className="mt-1 whitespace-pre-wrap text-[13px] text-fg">{n.body}</div>
-            </div>
-          ))
+            );
+          })
         )}
       </PanelBody>
     </Panel>

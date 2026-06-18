@@ -161,6 +161,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                   source={source.text}
                   changedLineSet={changedLineSet}
                   linkContext={{ projectId: activeId, base: linkBase }}
+                  filePath={path}
                 />
               ))}
 

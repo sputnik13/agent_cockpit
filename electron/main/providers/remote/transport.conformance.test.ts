@@ -143,6 +143,20 @@ function makeKey(): { wire: Buffer; sshLine: string } {
   return { wire, sshLine };
 }
 
+/**
+ * A real, unencrypted private key in PKCS#1 PEM form (`BEGIN RSA PRIVATE KEY`),
+ * which ssh2's `parseKey` accepts. The transport now gates `privateKey` on
+ * `parseKey` succeeding (so a passphrase-protected key falls back to the agent),
+ * so identity-file fixtures must contain a genuinely parseable key. Generated
+ * with node:crypto to honor the single-`ssh2`-import invariant. Generated once —
+ * RSA keygen is the slow part.
+ */
+const USABLE_KEY_PEM: string = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+}).privateKey;
+
 let tmp: string;
 let prevAuthSock: string | undefined;
 let prevHome: string | undefined;
@@ -181,14 +195,47 @@ function tofuPolicy() {
 
 describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
   it('connect builds config with privateKey when identityPath is set (FR7)', async () => {
+    delete process.env.SSH_AUTH_SOCK; // assert the pure-privateKey path (no co-fallback)
     const keyPath = join(tmp, 'id');
-    writeFileSync(keyPath, 'KEY-MATERIAL');
+    writeFileSync(keyPath, USABLE_KEY_PEM);
     const t = new TestTransport();
     await t.connect({ ...SPEC, identityPath: keyPath }, { hostKeyPolicy: tofuPolicy() });
     expect(t.fake.connectConfig?.['username']).toBe('deploy');
     expect(t.fake.connectConfig?.['port']).toBe(2222);
     expect(Buffer.isBuffer(t.fake.connectConfig?.['privateKey'])).toBe(true);
     expect(t.fake.connectConfig?.['agent']).toBeUndefined();
+  });
+
+  it('connect offers the agent alongside a usable identity key when both exist (FR7)', async () => {
+    process.env.SSH_AUTH_SOCK = '/tmp/agent.sock';
+    const keyPath = join(tmp, 'id_both');
+    writeFileSync(keyPath, USABLE_KEY_PEM);
+    const t = new TestTransport();
+    await t.connect({ ...SPEC, identityPath: keyPath }, { hostKeyPolicy: tofuPolicy() });
+    expect(Buffer.isBuffer(t.fake.connectConfig?.['privateKey'])).toBe(true);
+    expect(t.fake.connectConfig?.['agent']).toBe('/tmp/agent.sock');
+  });
+
+  it('connect falls back to the agent when the identity key is unparseable (passphrase-protected)', async () => {
+    process.env.SSH_AUTH_SOCK = '/tmp/agent.sock';
+    const keyPath = join(tmp, 'id_encrypted');
+    // Not a parseable key (stands in for an encrypted key with no passphrase).
+    writeFileSync(keyPath, 'KEY-MATERIAL');
+    const t = new TestTransport();
+    await t.connect({ ...SPEC, identityPath: keyPath }, { hostKeyPolicy: tofuPolicy() });
+    expect(t.fake.connectConfig?.['privateKey']).toBeUndefined();
+    expect(t.fake.connectConfig?.['agent']).toBe('/tmp/agent.sock');
+  });
+
+  it('connect errors phase "identity" when the key is unparseable and no agent is available', async () => {
+    delete process.env.SSH_AUTH_SOCK;
+    const keyPath = join(tmp, 'id_encrypted_noagent');
+    writeFileSync(keyPath, 'KEY-MATERIAL');
+    const t = new TestTransport();
+    await expect(
+      t.connect({ ...SPEC, identityPath: keyPath }, { hostKeyPolicy: tofuPolicy() }),
+    ).rejects.toMatchObject({ phase: 'identity' });
+    expect(t.state()).toBe('failed');
   });
 
   it('connect falls back to the agent when no identity is set (FR7)', async () => {
@@ -360,7 +407,7 @@ describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
           '\n',
         ),
       );
-      writeFileSync(join(tmp, 'id_prod'), 'KEY-MATERIAL');
+      writeFileSync(join(tmp, 'id_prod'), USABLE_KEY_PEM);
       const khPath = join(home, '.ssh', 'known_hosts');
       writeFileSync(khPath, '');
       const t = new TestTransport();
@@ -391,7 +438,7 @@ describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
         ['Host host.invalid', '  HostName 10.0.0.9', '  Port 2200', '  User configuser'].join('\n'),
       );
       const keyPath = join(tmp, 'spec_id');
-      writeFileSync(keyPath, 'SPEC-KEY');
+      writeFileSync(keyPath, USABLE_KEY_PEM);
       const khPath = join(tmp, 'kh');
       writeFileSync(khPath, '');
       const t = new TestTransport();

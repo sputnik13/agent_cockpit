@@ -30,6 +30,7 @@ describeDb('cockpit notes store', () => {
   beforeEach(() => {
     db = new Database(':memory:');
     db.exec(migration('0009_agent_cockpit_notes'));
+    db.exec(migration('0012_agent_cockpit_note_anchor'));
   });
   afterEach(() => db.close());
 
@@ -59,5 +60,31 @@ describeDb('cockpit notes store', () => {
     expect(md).toMatch(/# Review notes/);
     expect(md).toMatch(/bead: bd-1/);
     expect(md).toMatch(/check this/);
+  });
+
+  it('round-trips a line-anchored note and exports path:line', () => {
+    const n = createNoteOn(db, {
+      projectId: 'p',
+      targetKind: 'file',
+      targetId: 'src/notes.ts',
+      body: 'off-by-one here',
+      line: 42,
+      anchorText: '  for (let i = 0; i <= n; i++) {',
+    });
+    expect(n.line).toBe(42);
+    expect(n.anchorText).toBe('  for (let i = 0; i <= n; i++) {');
+
+    const listed = listNotesOn(db, 'p', { targetKind: 'file', targetId: 'src/notes.ts' });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.line).toBe(42);
+
+    const md = exportNotesMarkdown(listed);
+    expect(md).toMatch(/file: src\/notes\.ts:42/);
+  });
+
+  it('keeps null line/anchor for non-line notes', () => {
+    const n = createNoteOn(db, { projectId: 'p', targetKind: 'project', targetId: 'p', body: 'x' });
+    expect(n.line ?? null).toBeNull();
+    expect(n.anchorText ?? null).toBeNull();
   });
 });

@@ -58,6 +58,39 @@ export function createDiagnosticsWindow(): BrowserWindow {
 }
 
 export function createMainWindow(): BrowserWindow {
+  // Theme the window chrome so the dark UI extends to the frame instead of
+  // sitting under a system-grey title bar:
+  // - macOS: `hiddenInset` hides the title bar and insets the traffic lights
+  //   over the (themed) project-tab strip, which becomes the drag region.
+  // - Windows: `hidden` + a themed `titleBarOverlay` keeps native caption
+  //   controls but paints them to match the theme.
+  // - Linux: keep the default frame — frameless there drops window controls
+  //   across desktop environments, which is worse than a plain frame.
+  // TITLE_BAR_HEIGHT must match the empty title strip rendered by the renderer
+  // (src/renderer/shell/AppShell.tsx) so the OS window controls vertically center
+  // within it.
+  const TITLE_BAR_HEIGHT = 32;
+  const chrome: Pick<
+    Electron.BrowserWindowConstructorOptions,
+    'titleBarStyle' | 'titleBarOverlay' | 'trafficLightPosition'
+  > =
+    process.platform === 'darwin'
+      ? {
+          titleBarStyle: 'hiddenInset',
+          // Center the traffic lights within the 32px title strip.
+          trafficLightPosition: { x: 19, y: 9 },
+        }
+      : process.platform === 'win32'
+        ? {
+            titleBarStyle: 'hidden',
+            titleBarOverlay: {
+              color: '#11141a',
+              symbolColor: '#e6e6e6',
+              height: TITLE_BAR_HEIGHT,
+            },
+          }
+        : {};
+
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -66,6 +99,7 @@ export function createMainWindow(): BrowserWindow {
     show: false,
     title: 'Agent Cockpit',
     backgroundColor: '#0e0f12',
+    ...chrome,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

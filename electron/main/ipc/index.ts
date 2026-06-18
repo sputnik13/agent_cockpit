@@ -564,12 +564,24 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   // ---- Notes (app-local, by project) ----
   ipcMain.handle(
     Channels.notesCreate,
-    (_e, req: { projectId: string; targetKind: ReviewTargetKind; targetId: string; body: string }) => ({
+    (
+      _e,
+      req: {
+        projectId: string;
+        targetKind: ReviewTargetKind;
+        targetId: string;
+        body: string;
+        line?: number | null;
+        anchorText?: string | null;
+      },
+    ) => ({
       note: createNote({
         projectId: requireString(req?.projectId, 'projectId'),
         targetKind: req.targetKind,
         targetId: req.targetId,
         body: req.body ?? '',
+        line: req.line ?? null,
+        anchorText: req.anchorText ?? null,
       }),
     }),
   );

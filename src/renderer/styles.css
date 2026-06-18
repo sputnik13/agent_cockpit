@@ -357,3 +357,14 @@ body,
   background-color: var(--color-accent);
   color: var(--color-bg);
 }
+
+/* Window-chrome drag regions. With a hidden/inset native title bar (see
+   electron/main/window.ts), the app must declare its own draggable area. The
+   empty themed title strip (AppShell) is the drag handle; any interactive child
+   placed inside a drag region must opt out with `app-no-drag` to receive clicks. */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}

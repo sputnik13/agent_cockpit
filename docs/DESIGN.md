@@ -236,8 +236,14 @@ tracked in `migrations(version)`):
 - `agent_cockpit_active_project(singleton, id)` — single-row pointer (CHECK
   `singleton = 0`) to the active project id.
 - `agent_cockpit_notes(id, project_id, target_kind, target_id, body, created_at,
-  updated_at)` — local review notes; `target_kind` is one of
-  `project|worktree|file|hunk|block|bead`.
+  updated_at, line, anchor_text)` — local review notes; `target_kind` is one of
+  `project|worktree|file|hunk|block|bead`. `line` (nullable, 1-based) and
+  `anchor_text` (nullable, migration `0012`) make a note a **line-anchored
+  comment**: `target_kind='file'`, `target_id=<repo-relative path>`, `line=<file
+  line>`, and `anchor_text` is a snapshot of that line's text. The Content panel
+  renders these inline (see "Content panel line notes") and flags a note as
+  *outdated* when the live line text drifts from the snapshot. A NULL `line`
+  keeps the prior project/file-level note. Markdown export emits `path:line`.
 
 The earlier v1 tables (`projects`, `review_state`, `notes`, `review_passes`,
 `since_seen`) remain in the migration history but the cockpit reads/writes the
@@ -696,7 +702,9 @@ Dockview presets ship two arrangements built by
 [src/renderer/workspace/presets.ts](../src/renderer/workspace/presets.ts):
 **Edit** (`[ Workgraph / Task / Run ] [ Terminal ] [ Changes·Explorer / Content ]`,
 the default for driving the agent) and **Review**
-(`[ Workgraph / Task / Run ] [ Content ] [ Changes · Explorer · Notes ]`). In
+(`[ Workgraph / Task / Run ] [ Content ] [ Changes·Explorer·Notes / Terminal ]`).
+Review is the mirror of Edit — Terminal and Content swap places: Content takes
+the center and the Terminal sits below the right-column review group. In
 both, the left column is a three-way vertical split — Workgraph (beads) over
 Task (taskDetail) over Run — built by stacking each `below` the previous. The
 default 3-column widths are proportional to the live workspace width at a
@@ -709,7 +717,31 @@ via `layoutKey(projectId, view)`, with the last active view persisted per projec
 than reapplying the preset, and the key carries a `LAYOUT_VERSION` (currently
 `8`) so a format/structure change invalidates stale saved layouts. A **Reset**
 dropdown clears the current view's saved layout and reapplies the proportional
-default at a chosen column ratio (`1:3:1`, `1:2:1`, or `1:1:1`).
+default at a chosen column ratio (`1:3:1`, `1:2:1`, `1:1:1`, or `2:3:1`). The
+View switcher, Panels (reopen), and Reset controls live in the shell top bar
+(`ProjectTabs`), bridged from the workbench via `workspaceControlsStore`.
+
+### Content panel line notes
+
+The Content panel's **Raw**, **Diff**, and **Rendered** (markdown) views support
+code-review-style line-anchored notes. In Raw/Diff each code line carries a
+gutter affordance ([LineNoteGutter](../src/renderer/notes/LineNoteGutter.tsx));
+in Rendered, `renderDoc` annotates every block-level node (paragraph, heading,
+**listItem**, **tableRow**, blockquote, code) with `data-start-line`, and each
+top-level block (`BlockView`) shows a hover "+" aligned to the specific
+line-bearing descendant under the pointer — so a note targets an exact source
+line (one list item, one table row), not just the block. Clicking it opens an
+inline composer, and existing notes for the file render beneath their line/block
+as a [LineNoteThread](../src/renderer/notes/LineNoteThread.tsx) (body, timestamp,
+delete, and an *outdated* badge); in Rendered each thread is labeled
+`L<line>: <source snippet>` so its anchor is explicit. A note is anchored to the
+file's **current line number** — the new-file line in Diff (deleted lines are not
+commentable), the file line in Raw, the hovered sub-block's source line in
+Rendered — so a note added in one view appears in the others. Persistence is the `agent_cockpit_notes` `line`/`anchor_text` columns
+(above); `anchor.isOutdated` compares the stored snapshot to the live line
+(whitespace-trimmed) to flag drift. Both views read the active project's notes
+from `notesStore` (one source) and write via `addLineNote`; the project Notes
+panel surfaces the same notes with a `path:line` label and Markdown export.
 
 ### Terminal & Workgraph Feature Batch
 

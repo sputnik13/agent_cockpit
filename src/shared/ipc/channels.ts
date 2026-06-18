@@ -228,6 +228,10 @@ export interface NoteRecord {
   body: string;
   createdAt: string;
   updatedAt: string;
+  /** 1-based anchored line for a line note; null/absent for project/file notes. */
+  line?: number | null;
+  /** Snapshot of the anchored line's text at capture, for outdated detection. */
+  anchorText?: string | null;
 }
 
 export interface TmuxSessionInfo {
@@ -403,7 +407,14 @@ export interface IpcContract {
   [Channels.evtProjectsChanged]: { request: void; response: { at: string } };
 
   [Channels.notesCreate]: {
-    request: { projectId: string; targetKind: ReviewTargetKind; targetId: string; body: string };
+    request: {
+      projectId: string;
+      targetKind: ReviewTargetKind;
+      targetId: string;
+      body: string;
+      line?: number | null;
+      anchorText?: string | null;
+    };
     response: { note: NoteRecord };
   };
   [Channels.notesUpdate]: { request: { id: number; body: string }; response: { note: NoteRecord | null } };

@@ -35,8 +35,14 @@ func main() {
 		return
 	}
 
+	// Fix the helper process PATH (login-shell import + static fallback dirs)
+	// before any tool is spawned, so bare-name execs (br, git) resolve even
+	// though the ssh exec PATH omits ~/.local/bin / Homebrew. Mirrors the local
+	// bootstrapPath() in electron/main/pathBootstrap.ts.
+	bootstrapPath()
+
 	logger := log.New(os.Stderr, "remote-helper: ", log.LstdFlags|log.Lmsgprefix)
-	logger.Printf("starting version=%s protocol=%d source=%s pid=%d", Version, ProtocolVersion, SourceHash, os.Getpid())
+	logger.Printf("starting version=%s protocol=%d source=%s pid=%d path=%s", Version, ProtocolVersion, SourceHash, os.Getpid(), os.Getenv("PATH"))
 
 	s := &server{
 		in:  bufio.NewReader(os.Stdin),

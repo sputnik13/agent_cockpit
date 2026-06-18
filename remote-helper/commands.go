@@ -19,6 +19,10 @@ import (
 const maxReadFileBytes = 2 << 20
 
 // execTimeout bounds any shelled-out command.
+//
+// Tools are spawned by bare name (br, git); the helper's process PATH is fixed
+// once at startup by bootstrapPath() (see pathboot.go) so these resolve even
+// though the ssh exec PATH omits ~/.local/bin / Homebrew.
 const execTimeout = 30 * time.Second
 
 // runGit executes git in dir with the given args and returns stdout. On a

@@ -448,3 +448,4 @@ func TestGitBranchPointUpstream(t *testing.T) {
 		t.Fatalf("expected non-empty mergeBase")
 	}
 }
+

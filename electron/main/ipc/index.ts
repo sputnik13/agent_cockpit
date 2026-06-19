@@ -30,6 +30,7 @@ import { loadSettings, saveSettings } from '../config';
 import { listSystemFonts } from '../fonts';
 import { killCockpitSession, killDetachedCockpitSessions, listCockpitSessions } from '../sessions';
 import { LocalTmuxControlManager } from '../providers/local/tmuxControl';
+import { sessionNameToken } from '../providers/sessionKey';
 import { RemoteProvider } from '../providers/remote';
 import { toWireNotification } from '@shared/tmux';
 import { logger, getBuffer, subscribe } from '../logger';
@@ -464,7 +465,8 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
         const project = getProject(pid);
         const rootPath =
           project && project.connection.kind === 'local' ? project.connection.rootPath : process.cwd();
-        mgr = new LocalTmuxControlManager(pid, rootPath);
+        const token = sessionNameToken(loadSettings().deterministicSessionNames, pid, rootPath);
+        mgr = new LocalTmuxControlManager(token, rootPath);
         // Background %output counts as session activity (idle aging-out).
         mgr.onOutputActivity = () => sessionManager.touch(pid);
         tmuxControl.set(pid, mgr);

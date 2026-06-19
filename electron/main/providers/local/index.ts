@@ -47,6 +47,8 @@ import {
 } from './reads';
 import { LocalWatchManager } from './watch';
 import { LocalTerminalManager } from './terminal';
+import { sessionNameToken } from '../sessionKey';
+import { loadSettings } from '../../config';
 import { createConnectionMachine, type ConnectionMachine } from '../connectionMachine';
 import { resolveBranchPoint as gitResolveBranchPoint } from '../../git/branchPoint';
 import type { BranchPoint } from '@shared/ipc/channels';
@@ -68,7 +70,8 @@ export class LocalProvider implements WorkspaceProvider {
     this.rootPath = rootPath;
     this.machine = createConnectionMachine(projectId, 'connected');
     this.watch = new LocalWatchManager(rootPath);
-    this.terminals = new LocalTerminalManager(rootPath, projectId);
+    const token = sessionNameToken(loadSettings().deterministicSessionNames, projectId, rootPath);
+    this.terminals = new LocalTerminalManager(rootPath, token);
   }
 
   private resolve(path: string): string {

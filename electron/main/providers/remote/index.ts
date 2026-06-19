@@ -51,6 +51,7 @@ import { beadsArgs, beadsErrorMessage, parseComments, parseCreatedId } from '../
 import { RemoteTerminalManager } from './tmux';
 import { RemoteTmuxControlManager, type ControlChannel } from './tmuxControl';
 import { createEnvLauncher, DEV_ENV_SCOPE_UNIT, type EnvLauncher } from './envLauncher';
+import { sessionNameToken } from '../sessionKey';
 import { loadSettings } from '../../config';
 import { logger } from '../../logger';
 import { createConnectionMachine, type ConnectionMachine } from '../connectionMachine';
@@ -180,6 +181,11 @@ export class RemoteProvider implements WorkspaceProvider {
   private readonly transport: RemoteTransport;
   private readonly terminals: RemoteTerminalManager;
   private readonly machine: ConnectionMachine;
+  /** Token embedded in this project's tmux session names — the project id
+   *  (default) or a sha of the remote repo path when deterministic session
+   *  names are enabled. Resolved once at construction so two clients opening the
+   *  same remote repo (deterministic mode) share the session. */
+  private readonly nameToken: string;
   private helper: LaunchedHelper | null = null;
   private controlMgr: RemoteTmuxControlManager | null = null;
   /** Dev-environment launcher (resolved at connect from the global devEnv
@@ -190,9 +196,14 @@ export class RemoteProvider implements WorkspaceProvider {
   constructor(projectId: string, spec: RemoteConnectionSpec) {
     this.projectId = projectId;
     this.spec = spec;
+    this.nameToken = sessionNameToken(
+      loadSettings().deterministicSessionNames,
+      projectId,
+      spec.remotePath,
+    );
     this.machine = createConnectionMachine(projectId);
     this.transport = createRemoteTransport();
-    this.terminals = new RemoteTerminalManager(this.transport, projectId);
+    this.terminals = new RemoteTerminalManager(this.transport, this.nameToken);
     // Keep provider status in sync with transport state transitions.
     // The transport emits raw ConnectionState values; the machine validates and
     // guards transitions so illegal transport events are silently ignored.
@@ -229,7 +240,7 @@ export class RemoteProvider implements WorkspaceProvider {
    */
   tmuxControl(): RemoteTmuxControlManager {
     if (!this.controlMgr) {
-      const sessionName = controlSessionName(this.projectId);
+      const sessionName = controlSessionName(this.nameToken);
       const cwd = this.spec.remotePath;
       const transport = this.transport;
       const opener = async (): Promise<ControlChannel> => {
@@ -301,7 +312,7 @@ export class RemoteProvider implements WorkspaceProvider {
 
   /** The control-mode session name for use in IPC responses. */
   tmuxControlSessionName(): string {
-    return controlSessionName(this.projectId);
+    return controlSessionName(this.nameToken);
   }
 
   /**
@@ -311,7 +322,7 @@ export class RemoteProvider implements WorkspaceProvider {
    * socket. Best-effort — failures (already gone, transport down) are swallowed.
    */
   async killControlSession(): Promise<void> {
-    const cmd = `tmux -L ${CONTROL_SOCKET} kill-session -t ${shellQuote(controlSessionName(this.projectId))}`;
+    const cmd = `tmux -L ${CONTROL_SOCKET} kill-session -t ${shellQuote(controlSessionName(this.nameToken))}`;
     // Best-effort: a one-shot exec on the control socket. `exec` rejects when not
     // connected and is lenient on non-zero exit; swallow both (already gone /
     // transport down) as before.

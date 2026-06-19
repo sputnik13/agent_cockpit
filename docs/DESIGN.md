@@ -343,7 +343,13 @@ The provider seam realizes the primary flows as follows:
     Uint8Array` but the data path must feed it raw bytes — see the raw-byte
     invariant in [docs/ARCHITECTURE.md](ARCHITECTURE.md#terminal-lifecycle-decoupling-invariant).
   - **Host control-session manager** owns one `tmux -L agent-cockpit -CC
-    new-session -A -s agent-cockpit-<projectId>` connection per project.
+    new-session -A -s agent-cockpit-<token>` connection per project. `<token>`
+    is the per-machine project id by default, or — when the optional
+    `deterministicSessionNames` setting is on — a sha of the project root
+    (`sessionKey(root)`, [sessionKey.ts](../electron/main/providers/sessionKey.ts)),
+    so the same project opened from different client machines shares one session.
+    The token is resolved at session-open time, so toggling never renames a live
+    session.
     Local ([electron/main/providers/local/tmuxControl.ts](../electron/main/providers/local/tmuxControl.ts))
     spawns it via `node-pty` with `encoding: null`; remote
     ([electron/main/providers/remote/tmuxControl.ts](../electron/main/providers/remote/tmuxControl.ts))

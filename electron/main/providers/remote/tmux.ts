@@ -73,24 +73,26 @@ export class RemoteTerminalManager {
 
   /**
    * @param transport the remote transport; `openShell`/`exec` throw if not connected.
-   * @param projectId scopes the tmux session name so terminals re-attach the
-   *   same persistent session per project.
+   * @param sessionToken scopes the tmux session name so terminals re-attach the
+   *   same persistent session per project. The project id (default) or a sha of
+   *   the project root when deterministic session names are enabled — resolved
+   *   by the caller.
    */
   constructor(
     private readonly transport: RemoteTransport,
-    private readonly projectId: string,
+    private readonly sessionToken: string,
   ) {}
 
   /** Prefix for the `terminal` namespace (used to list/restore terminal tabs). */
   private terminalPrefix(): string {
-    return `agent-cockpit-terminal-${sanitize(this.projectId)}-`;
+    return `agent-cockpit-terminal-${sanitize(this.sessionToken)}-`;
   }
   /**
    * tmux session name for a given kind/key. `run` is a single per-project
    * session (key not part of the name); `terminal` is one session per key.
    */
   private sessionName(kind: TerminalKind, key: string): string {
-    if (kind === 'run') return `agent-cockpit-run-${sanitize(this.projectId)}`;
+    if (kind === 'run') return `agent-cockpit-run-${sanitize(this.sessionToken)}`;
     return `${this.terminalPrefix()}${sanitize(key)}`;
   }
 

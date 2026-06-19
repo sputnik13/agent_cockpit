@@ -114,6 +114,17 @@ export function SettingsDialog(): JSX.Element {
           />
         </Field>
         <Field
+          label="Deterministic session names (share across machines)"
+          help="Name tmux sessions from a hash of the project root instead of a per-machine id, so opening the same project (especially a remote one) from different client machines attaches to the SAME session. Off by default. Takes effect on the next connect; existing per-machine sessions are left orphaned."
+        >
+          <input
+            type="checkbox"
+            aria-label="Deterministic session names"
+            checked={settings.deterministicSessionNames ?? false}
+            onChange={(e) => void set({ deterministicSessionNames: e.target.checked })}
+          />
+        </Field>
+        <Field
           label="Workgraph side-by-side columns"
           help="Comfortable number of epic columns in the workgraph Columns view. Up to this many pinned-epic columns fill the panel; pinning more is still allowed but shows a density hint. Raise it (e.g. to 3) if you routinely compare more epics. Default 2."
         >

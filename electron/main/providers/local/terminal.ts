@@ -58,12 +58,14 @@ export class LocalTerminalManager {
 
   constructor(
     private readonly rootPath: string,
-    private readonly projectId: string,
+    private readonly sessionToken: string,
   ) {}
 
-  /** Prefix for the `terminal` namespace (used to list/restore terminal tabs). */
+  /** Prefix for the `terminal` namespace (used to list/restore terminal tabs).
+   *  `sessionToken` is the project id (default) or a sha of the project root
+   *  when deterministic session names are enabled — resolved by the caller. */
   private terminalPrefix(): string {
-    return `agent-cockpit-terminal-${sanitize(this.projectId)}-`;
+    return `agent-cockpit-terminal-${sanitize(this.sessionToken)}-`;
   }
   /**
    * tmux session name for a given kind/key. `run` is a single per-project
@@ -71,7 +73,7 @@ export class LocalTerminalManager {
    * key. The two namespaces never collide.
    */
   private sessionName(kind: TerminalKind, key: string): string {
-    if (kind === 'run') return `agent-cockpit-run-${sanitize(this.projectId)}`;
+    if (kind === 'run') return `agent-cockpit-run-${sanitize(this.sessionToken)}`;
     return `${this.terminalPrefix()}${sanitize(key)}`;
   }
 

@@ -95,6 +95,16 @@ export interface AppSettings {
    */
   followTerminalCwd: boolean;
   /**
+   * Derive tmux session names from a hash of the project ROOT (local rootPath /
+   * remote repo path) instead of the per-machine random project id. When on,
+   * opening the same project from different client machines maps to the SAME
+   * tmux session, so they share it (attach to the same panes). Off by default —
+   * turning it on changes session names, leaving any existing per-machine
+   * sessions orphaned (one-time). Resolved at session-open time, so toggling
+   * never renames a live session. Mainly useful for remote projects.
+   */
+  deterministicSessionNames: boolean;
+  /**
    * Comfortable column count for the workgraph side-by-side `Columns` view. Up to
    * this many pinned-epic columns fill the panel; pinning beyond it is
    * warn-and-allow (the column is still shown, with a non-blocking density
@@ -116,6 +126,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   devEnv: { mode: 'systemd-scope', memoryMaxMb: 16384 },
   byobuKeybindings: false,
   followTerminalCwd: false,
+  deterministicSessionNames: false,
   workgraphColumnsSoftCap: 2,
 };
 
@@ -196,6 +207,7 @@ export function normalizeSettings(input: unknown): AppSettings {
   const showRunPanel = o.showRunPanel === true;
   const byobuKeybindings = o.byobuKeybindings === true;
   const followTerminalCwd = o.followTerminalCwd === true;
+  const deterministicSessionNames = o.deterministicSessionNames === true;
   // Idle timeout: 0 = disabled; reject negatives/non-numbers -> default; clamp
   // to an upper sanity bound. Mirrors the fontSize precedent (validate then
   // fall back to the default on invalid input).
@@ -232,6 +244,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     devEnv,
     byobuKeybindings,
     followTerminalCwd,
+    deterministicSessionNames,
     workgraphColumnsSoftCap,
   };
 }

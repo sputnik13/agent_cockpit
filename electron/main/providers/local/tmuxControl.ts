@@ -98,13 +98,15 @@ export class LocalTmuxControlManager {
   onOutputActivity?: () => void;
 
   constructor(
-    private readonly projectId: string,
+    private readonly sessionToken: string,
     private readonly rootPath: string,
   ) {}
 
-  /** Control-session name for this project (distinct from per-key sessions). */
+  /** Control-session name for this project (distinct from per-key sessions).
+   *  `sessionToken` is the project id (default) or a sha of the project root
+   *  when deterministic session names are enabled — resolved by the caller. */
   sessionName(): string {
-    return `agent-cockpit-${sanitize(this.projectId)}`;
+    return `agent-cockpit-${sanitize(this.sessionToken)}`;
   }
 
   /** Whether the control pty is live. */

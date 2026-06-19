@@ -28,12 +28,30 @@ const MIN_SCALE = 0.25;
 const MAX_SCALE = 8;
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n));
 
+// Diagram viewport height is user-resizable and persisted (applies to every
+// diagram and across sessions), since some graphs need more vertical room.
+const DIAGRAM_HEIGHT_KEY = 'ac:diagramHeight';
+const MIN_HEIGHT = 160;
+const MAX_HEIGHT = 2000;
+const DEFAULT_HEIGHT = 360;
+
+function readDiagramHeight(): number {
+  try {
+    const n = Number(localStorage.getItem(DIAGRAM_HEIGHT_KEY));
+    return Number.isFinite(n) && n >= MIN_HEIGHT && n <= MAX_HEIGHT ? n : DEFAULT_HEIGHT;
+  } catch {
+    return DEFAULT_HEIGHT;
+  }
+}
+
 export function DiagramFrame({ label, source, render, renderKey }: DiagramFrameProps): JSX.Element {
   const [state, setState] = useState<RenderState>({ kind: 'loading' });
   const [showSource, setShowSource] = useState(false);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  const [height, setHeight] = useState<number>(() => readDiagramHeight());
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ sx: number; sy: number; x: number; y: number } | null>(null);
+  const resizeRef = useRef<{ sy: number; h: number } | null>(null);
   // Hold the latest render closure in a ref so the effect depends only on
   // `renderKey` (not the closure identity, which changes every render).
   const renderRef = useRef(render);
@@ -84,6 +102,29 @@ export function DiagramFrame({ label, source, render, renderKey }: DiagramFrameP
       const k = next / v.scale;
       return { scale: next, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
     });
+
+  // Persist the user's chosen viewport height so it applies to every diagram.
+  useEffect(() => {
+    try {
+      localStorage.setItem(DIAGRAM_HEIGHT_KEY, String(height));
+    } catch {
+      /* no localStorage in this environment */
+    }
+  }, [height]);
+
+  const onResizeDown = (e: React.PointerEvent): void => {
+    e.preventDefault();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    resizeRef.current = { sy: e.clientY, h: height };
+  };
+  const onResizeMove = (e: React.PointerEvent): void => {
+    const r = resizeRef.current;
+    if (!r) return;
+    setHeight(Math.round(clamp(r.h + (e.clientY - r.sy), MIN_HEIGHT, MAX_HEIGHT)));
+  };
+  const endResize = (): void => {
+    resizeRef.current = null;
+  };
 
   const onPointerDown = (e: React.PointerEvent): void => {
     (e.target as Element).setPointerCapture?.(e.pointerId);
@@ -137,21 +178,35 @@ export function DiagramFrame({ label, source, render, renderKey }: DiagramFrameP
         </div>
       )}
       {state.kind === 'ok' && (
-        <div
-          ref={viewportRef}
-          className="relative h-[360px] cursor-grab overflow-hidden active:cursor-grabbing"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={endDrag}
-          onPointerLeave={endDrag}
-        >
+        <>
           <div
-            className="absolute left-0 top-0 origin-top-left p-2 [&_svg]:max-w-none"
-            style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
-            // SVG is renderer-generated and DOMPurify-sanitized by the caller's `render`.
-            dangerouslySetInnerHTML={{ __html: state.svg }}
-          />
-        </div>
+            ref={viewportRef}
+            className="relative cursor-grab overflow-hidden active:cursor-grabbing"
+            style={{ height: `${height}px` }}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={endDrag}
+            onPointerLeave={endDrag}
+          >
+            <div
+              className="absolute left-0 top-0 origin-top-left p-2 [&_svg]:max-w-none"
+              style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
+              // SVG is renderer-generated and DOMPurify-sanitized by the caller's `render`.
+              dangerouslySetInnerHTML={{ __html: state.svg }}
+            />
+          </div>
+          {/* Drag to resize the viewport height (persisted across diagrams). */}
+          <div
+            className="flex h-2 cursor-row-resize items-center justify-center border-t border-edge bg-bg hover:bg-panel-2"
+            title="Drag to resize"
+            onPointerDown={onResizeDown}
+            onPointerMove={onResizeMove}
+            onPointerUp={endResize}
+            onPointerLeave={endResize}
+          >
+            <span className="h-0.5 w-8 rounded bg-dim" />
+          </div>
+        </>
       )}
     </div>
   );

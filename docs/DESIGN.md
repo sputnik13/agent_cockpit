@@ -620,9 +620,13 @@ The provider seam realizes the primary flows as follows:
   sentinel `<div data-mermaid-id="…">` / `<div data-graphviz-id="…">`
   placeholders, then substituted with `MermaidFrame` / `GraphvizFrame` React
   components at render time. Both render to SVG (mermaid in `securityLevel:
-  'strict'`; graphviz via the bundled, inlined `@hpcc-js/wasm-graphviz`), which
-  is DOMPurify-sanitized before insertion and shown in a shared zoom/pan/source
-  `DiagramFrame`; no CDN or network is used (the inlined WASM loads same-origin
+  'strict'`, using the **ELK** layout engine by default — `@mermaid-js/layout-elk`,
+  dynamically imported with mermaid — for cleaner, crossing-minimized routing on
+  flowcharts/state diagrams, overridable per-diagram via frontmatter
+  `config.layout`; graphviz via the bundled, inlined `@hpcc-js/wasm-graphviz`),
+  which is DOMPurify-sanitized before insertion and shown in a shared
+  zoom/pan/source `DiagramFrame` whose viewport height is user-resizable (drag
+  handle, persisted); no CDN or network is used (the inlined WASM loads same-origin
   under the strict `script-src 'self' 'wasm-unsafe-eval'` CSP). External anchors get `target="_blank"` +
   `rel="noopener noreferrer"` and a delegated click handler routes them
   through `window.open` (Electron's `setWindowOpenHandler` funnels that to

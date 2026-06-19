@@ -12,7 +12,20 @@ interface MermaidFrameProps {
 // bundled copy is same-origin and works offline.
 let mermaidPromise: Promise<typeof import('mermaid').default> | null = null;
 function loadMermaid(): Promise<typeof import('mermaid').default> {
-  if (!mermaidPromise) mermaidPromise = import('mermaid').then((m) => m.default);
+  if (!mermaidPromise)
+    mermaidPromise = import('mermaid').then(async (m) => {
+      const mermaid = m.default;
+      // Register the ELK layout engine and use it by default: it produces
+      // markedly cleaner routing with fewer edge crossings than the built-in
+      // dagre layout for flowcharts and state diagrams (the diagram types where
+      // layout matters). Dynamically imported alongside mermaid, so it adds no
+      // eager bundle cost. Non-graph diagram types (sequence/gantt/pie) ignore
+      // the layout setting; a diagram can override per-file via frontmatter
+      // (`config: { layout: dagre }`).
+      const elk = (await import('@mermaid-js/layout-elk')).default;
+      mermaid.registerLayoutLoaders(elk);
+      return mermaid;
+    });
   return mermaidPromise;
 }
 
@@ -31,6 +44,7 @@ export function MermaidFrame({ source }: MermaidFrameProps): JSX.Element {
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: 'strict',
+      layout: 'elk',
       theme: theme === 'solarized-light' ? 'default' : 'dark',
       // Native SVG <text> labels (not HTML <foreignObject>), which the
       // DOMPurify SVG profile preserves — otherwise shapes have no text.

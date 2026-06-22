@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { decodeOutput, toHex } from './codec';
+import { chunkBytesForSendKeys, decodeOutput, fromHex, MAX_SEND_KEYS_CHUNK_BYTES, toHex } from './codec';
 
 const bytes = (...b: number[]): Uint8Array => Uint8Array.from(b);
+
+const concat = (chunks: Uint8Array[]): Uint8Array => {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+};
 
 describe('decodeOutput (tmux %output octal decode)', () => {
   it('passes plain ASCII through unchanged', () => {
@@ -70,5 +81,72 @@ describe('toHex (send-keys -H encoder, space-separated pairs)', () => {
   it('encodes a control sequence as spaced pairs', () => {
     const input = bytes(27, 0x5b, 0x41); // ESC [ A (cursor up)
     expect(toHex(input)).toBe('1b 5b 41');
+  });
+});
+
+describe('fromHex (inverse of toHex)', () => {
+  it('decodes space-separated hex pairs to bytes', () => {
+    expect(fromHex('65 63 68 6f')).toEqual(bytes(0x65, 0x63, 0x68, 0x6f));
+    expect(fromHex('00 ff 10')).toEqual(bytes(0, 255, 16));
+  });
+
+  it('returns empty for empty/whitespace input', () => {
+    expect(fromHex('')).toEqual(bytes());
+    expect(fromHex('   ')).toEqual(bytes());
+  });
+
+  it('round-trips with toHex', () => {
+    const b = bytes(27, 0x5b, 0x41, 0xc3, 0xa9, 0x0d);
+    expect(fromHex(toHex(b))).toEqual(b);
+  });
+});
+
+describe('chunkBytesForSendKeys (send-keys -H paste chunking)', () => {
+  it('returns [] for empty input', () => {
+    expect(chunkBytesForSendKeys('')).toEqual([]);
+    expect(chunkBytesForSendKeys(bytes())).toEqual([]);
+  });
+
+  it('returns a single chunk for input at or under the max', () => {
+    expect(chunkBytesForSendKeys('echo')).toEqual([bytes(0x65, 0x63, 0x68, 0x6f)]);
+    const exact = new Uint8Array(MAX_SEND_KEYS_CHUNK_BYTES).fill(0x61);
+    const chunks = chunkBytesForSendKeys(exact);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]!.length).toBe(MAX_SEND_KEYS_CHUNK_BYTES);
+  });
+
+  it('keystroke-sized input stays a single chunk (no behavior change)', () => {
+    expect(chunkBytesForSendKeys('\r')).toEqual([bytes(0x0d)]);
+  });
+
+  it('splits long ASCII into <= max chunks that reconcatenate to the input', () => {
+    const n = MAX_SEND_KEYS_CHUNK_BYTES * 2 + 37;
+    const input = new Uint8Array(n).map((_, i) => 0x41 + (i % 26));
+    const chunks = chunkBytesForSendKeys(input);
+    expect(chunks.length).toBe(Math.ceil(n / MAX_SEND_KEYS_CHUNK_BYTES));
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_SEND_KEYS_CHUNK_BYTES);
+    expect(concat(chunks)).toEqual(input);
+  });
+
+  it('never splits a multi-byte UTF-8 codepoint across a chunk boundary', () => {
+    // 200 × ' é ' (each é = 2 bytes c3 a9) → 600 bytes, boundaries land mid-pair
+    // at max=256 unless we back off; assert each chunk decodes standalone.
+    const s = 'é'.repeat(300);
+    const input = new TextEncoder().encode(s);
+    expect(input.length).toBe(600);
+    const chunks = chunkBytesForSendKeys(input);
+    expect(chunks.length).toBeGreaterThan(1);
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    for (const c of chunks) {
+      expect(c.length).toBeLessThanOrEqual(MAX_SEND_KEYS_CHUNK_BYTES);
+      expect(() => decoder.decode(c)).not.toThrow();
+    }
+    expect(concat(chunks)).toEqual(input);
+    expect(new TextDecoder().decode(concat(chunks))).toBe(s);
+  });
+
+  it('accepts a custom max and respects it', () => {
+    const chunks = chunkBytesForSendKeys('abcdefg', 3);
+    expect(chunks.map((c) => toHex(c))).toEqual(['61 62 63', '64 65 66', '67']);
   });
 });

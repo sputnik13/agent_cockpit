@@ -13,7 +13,14 @@
  * sink, and disposal is explicit (pane/window close) or via the idle reaper.
  */
 import { type AppSettings } from '@shared/settings';
-import { TERMINAL_SCROLLBACK, listPanesAltScreen, type LayoutNode } from '@shared/tmux';
+import {
+  TERMINAL_SCROLLBACK,
+  listPanesAltScreen,
+  mouseSubscribeCmd,
+  mouseUnsubscribeCmd,
+  titleSubscribeCmd,
+  type LayoutNode,
+} from '@shared/tmux';
 import { agentCockpit } from '../providerClient';
 import { useSettingsStore } from '../settings';
 import { createPaneRenderer, type PaneRenderer } from './paneRenderer';
@@ -124,8 +131,13 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
   // while the lazy query round-trips.
   refreshMouseFlag();
   const onWheel = (e: WheelEvent): void => {
-    refreshMouseFlag();
-    if (!paneHasMouse) return; // let the renderer scroll its own buffer
+    // Prefer pushed mouse flags from a format subscription (gated; see
+    // tmuxFormatSubscriptions). Until a subscription value arrives — or when
+    // subscriptions are off / tmux < 3.2 — fall back to the per-gesture poll.
+    const subPane = useTmuxStore.getState().byProject[projectId]?.panes[paneId];
+    const hasMouse = subPane?.mouseAny ?? (refreshMouseFlag(), paneHasMouse);
+    const sgr = subPane?.mouseSgr ?? paneSgr;
+    if (!hasMouse) return; // let the renderer scroll its own buffer
     e.preventDefault();
     e.stopPropagation();
     const m = renderer.cellMetrics();
@@ -142,7 +154,7 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
     // Encode in the protocol the app negotiated (SGR vs X10) — emitting the
     // wrong one is silently dropped. X10 produces raw high bytes, so this MUST
     // travel as a Uint8Array (the string path would UTF-8-mangle it).
-    const seq = encodeWheel({ sgr: paneSgr, up: e.deltaY < 0, col, row }, ticks);
+    const seq = encodeWheel({ sgr, up: e.deltaY < 0, col, row }, ticks);
     void useTmuxStore.getState().sendInput(projectId, paneId, seq);
   };
   container.addEventListener('wheel', onWheel, { capture: true, passive: false });
@@ -175,6 +187,22 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
       /* sink is already bound; nothing to do */
     });
 
+  // Format subscriptions (gated; see tmuxFormatSubscriptions): once the session
+  // is ready, push-subscribe this pane's mouse flags and its window's title so
+  // tmux emits %subscription-changed on change — replacing the per-gesture mouse
+  // poll. The commands are tolerant: harmless on tmux < 3.2 (no push arrives, so
+  // onWheel keeps polling and the title-scrape keeps setting displayName).
+  if (s.tmuxFormatSubscriptions) {
+    void whenReady(projectId)
+      .then(() => {
+        if (disposed) return;
+        void useTmuxStore.getState().command(mouseSubscribeCmd(paneId)).catch(() => {});
+        const winId = useTmuxStore.getState().byProject[projectId]?.panes[paneId]?.windowId;
+        if (winId) void useTmuxStore.getState().command(titleSubscribeCmd(winId)).catch(() => {});
+      })
+      .catch(() => {});
+  }
+
   const entry: PaneEntry = {
     renderer,
     container,
@@ -186,6 +214,11 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
       unbind();
       inputSub.dispose();
       container.removeEventListener('wheel', onWheel, true);
+      // Drop this pane's mouse subscription (title sub is per-window; left for
+      // window-close to reap — a stale sub for a gone pane just stops pushing).
+      if (s.tmuxFormatSubscriptions) {
+        void useTmuxStore.getState().command(mouseUnsubscribeCmd(paneId)).catch(() => {});
+      }
       // The renderer disposes its terminal (incl. any GPU renderer) and removes
       // its container.
       renderer.dispose();

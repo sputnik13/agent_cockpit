@@ -32,7 +32,12 @@ import { killCockpitSession, killDetachedCockpitSessions, listCockpitSessions } 
 import { LocalTmuxControlManager } from '../providers/local/tmuxControl';
 import { sessionNameToken } from '../providers/sessionKey';
 import { RemoteProvider } from '../providers/remote';
-import { toWireNotification } from '@shared/tmux';
+import {
+  refreshClientPauseAfter,
+  tmuxAtLeast,
+  tmuxVersionQuery,
+  toWireNotification,
+} from '@shared/tmux';
 import { logger, getBuffer, subscribe } from '../logger';
 
 type WinGetter = () => BrowserWindow | null;
@@ -77,6 +82,38 @@ function providerFor(projectId?: string): WorkspaceProvider {
 function requireString(v: unknown, name: string): string {
   if (typeof v !== 'string' || v.length === 0) throw new Error(`invalid ${name}`);
   return v;
+}
+
+/**
+ * Opt-in tmux flow control: query the server version and, on tmux >= 3.2, enable
+ * pause-mode (`refresh-client -fpause-after`). Works on both transports via the
+ * control stream. Best-effort and version-gated so it is a safe no-op on older
+ * tmux and never blocks/breaks open(). Gated by the `tmuxPauseMode` setting at
+ * the call site. NOTE: the resume-on-focus + re-seed loop for a paused pane is
+ * not yet wired in the renderer — enabling this is experimental until verified.
+ */
+async function maybeEnablePauseMode(
+  mgr: { command(args: string): Promise<{ error: boolean; lines: string[] }> },
+  projectId: string,
+): Promise<void> {
+  try {
+    const reply = await mgr.command(tmuxVersionQuery());
+    const version = reply.lines[0]?.trim() ?? null;
+    if (!tmuxAtLeast(version, '3.2')) {
+      logger.info(
+        `tmux pause-mode skipped for ${projectId}: version ${version ?? 'unknown'} < 3.2`,
+        'tmux-control',
+      );
+      return;
+    }
+    await mgr.command(refreshClientPauseAfter());
+    logger.info(`tmux pause-mode enabled for ${projectId} (tmux ${version})`, 'tmux-control');
+  } catch (e) {
+    logger.error(
+      `tmux pause-mode enable failed for ${projectId}: ${e instanceof Error ? e.message : String(e)}`,
+      'tmux-control',
+    );
+  }
 }
 
 export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnostics): void {
@@ -469,6 +506,13 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
         mgr = new LocalTmuxControlManager(token, rootPath);
         // Background %output counts as session activity (idle aging-out).
         mgr.onOutputActivity = () => sessionManager.touch(pid);
+        // Surface a wedged control link to diagnostics (the FAIL threshold drops
+        // the transport on its own — see the watchdog in the manager).
+        mgr.onUnresponsive = (info) =>
+          logger.error(
+            `tmux control unresponsive for ${pid}: oldest command ${Math.round(info.oldestAgeMs)}ms, ${info.pendingCount} pending`,
+            'tmux-control',
+          );
         tmuxControl.set(pid, mgr);
         const off = mgr.onNotification((notification) =>
           send(Channels.evtTmux, { projectId: pid, notification: toWireNotification(notification) }),
@@ -490,6 +534,11 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       if (priorOff) priorOff();
       // Background %output counts as session activity (idle aging-out).
       remoteCtrl.onOutputActivity = () => sessionManager.touch(pid);
+      remoteCtrl.onUnresponsive = (info) =>
+        logger.error(
+          `tmux control unresponsive for ${pid}: oldest command ${Math.round(info.oldestAgeMs)}ms, ${info.pendingCount} pending`,
+          'tmux-control',
+        );
       const off = remoteCtrl.onNotification((notification) =>
         send(Channels.evtTmux, { projectId: pid, notification: toWireNotification(notification) }),
       );
@@ -510,7 +559,9 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       // RemoteTmuxControlManager.open() is async.
       await (mgr as import('../providers/remote/tmuxControl').RemoteTmuxControlManager).open();
     }
-    void pid; // acknowledge pid used indirectly via activeControl
+    // Opt-in tmux flow control (pause-mode). Off by default; version-gated to
+    // tmux >= 3.2. Best-effort and non-blocking — failure never breaks open.
+    if (loadSettings().tmuxPauseMode) void maybeEnablePauseMode(mgr, pid);
     return { sessionName };
   });
   ipcMain.handle(Channels.tmuxControlClose, async (_e, req: { kill?: boolean }) => {

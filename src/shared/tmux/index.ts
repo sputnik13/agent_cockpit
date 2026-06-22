@@ -11,3 +11,6 @@ export * from './parser';
 export * from './commands';
 export * from './scrollback';
 export * from './terminalConfig';
+export * from './version';
+export * from './responsiveness';
+export * from './subscriptions';

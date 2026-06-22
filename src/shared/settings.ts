@@ -105,6 +105,22 @@ export interface AppSettings {
    */
   deterministicSessionNames: boolean;
   /**
+   * Enable tmux server-side flow control (pause-mode) for control-mode terminals
+   * on tmux >= 3.2. When on, the client sets `refresh-client -fpause-after=N` so
+   * tmux pauses a pane's output (and the client resumes + re-seeds it on focus)
+   * if the client falls behind — bounding memory for a flooding pane. Off by
+   * default: it switches `%output` to `%extended-output` server-side and needs
+   * live verification per host, so it is opt-in. No effect on tmux < 3.2.
+   */
+  tmuxPauseMode: boolean;
+  /**
+   * Use tmux format subscriptions (`refresh-client -B`) for control-mode pane
+   * titles and mouse flags on tmux >= 3.2, instead of screen-scraping titles and
+   * polling `display-message` for mouse mode. tmux pushes `%subscription-changed`
+   * when a subscribed format changes. Off by default: experimental and host-
+   * dependent. On tmux < 3.2 (or when off) the scrape/poll path is used. */
+  tmuxFormatSubscriptions: boolean;
+  /**
    * Comfortable column count for the workgraph side-by-side `Columns` view. Up to
    * this many pinned-epic columns fill the panel; pinning beyond it is
    * warn-and-allow (the column is still shown, with a non-blocking density
@@ -127,6 +143,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   byobuKeybindings: false,
   followTerminalCwd: false,
   deterministicSessionNames: false,
+  tmuxPauseMode: false,
+  tmuxFormatSubscriptions: false,
   workgraphColumnsSoftCap: 2,
 };
 
@@ -208,6 +226,8 @@ export function normalizeSettings(input: unknown): AppSettings {
   const byobuKeybindings = o.byobuKeybindings === true;
   const followTerminalCwd = o.followTerminalCwd === true;
   const deterministicSessionNames = o.deterministicSessionNames === true;
+  const tmuxPauseMode = o.tmuxPauseMode === true;
+  const tmuxFormatSubscriptions = o.tmuxFormatSubscriptions === true;
   // Idle timeout: 0 = disabled; reject negatives/non-numbers -> default; clamp
   // to an upper sanity bound. Mirrors the fontSize precedent (validate then
   // fall back to the default on invalid input).
@@ -245,6 +265,8 @@ export function normalizeSettings(input: unknown): AppSettings {
     byobuKeybindings,
     followTerminalCwd,
     deterministicSessionNames,
+    tmuxPauseMode,
+    tmuxFormatSubscriptions,
     workgraphColumnsSoftCap,
   };
 }

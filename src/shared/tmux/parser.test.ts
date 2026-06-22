@@ -79,6 +79,24 @@ describe('TmuxControlParser reply correlation', () => {
     expect((out[0] as ReplyNotification).num).toBe(1);
     expect((out[2] as ReplyNotification).num).toBe(2);
   });
+
+  it('force-closes an open reply (as error) when %exit arrives with no %end', () => {
+    // tmux 1.8 unlink-window bug / abrupt teardown: a command that destroys the
+    // current session yields %exit with no %end — the open block must not strand.
+    const p = new TmuxControlParser();
+    const out = feedLines(p, ['%begin 1 7 1', 'partial body', '%exit server exited']);
+    expect(out.map((n) => n.type)).toEqual(['reply', 'exit']);
+    expect(out[0]).toMatchObject({ type: 'reply', num: 7, error: true, lines: ['partial body'] });
+    expect(out[1]).toEqual({ type: 'exit', reason: 'server exited' });
+  });
+
+  it('force-closes an open reply on a bare %exit too', () => {
+    const p = new TmuxControlParser();
+    const out = feedLines(p, ['%begin 1 4 1', '%exit']);
+    expect(out.map((n) => n.type)).toEqual(['reply', 'exit']);
+    expect(out[0]).toMatchObject({ type: 'reply', num: 4, error: true });
+    expect(out[1]).toEqual({ type: 'exit', reason: null });
+  });
 });
 
 describe('TmuxControlParser %output decode', () => {
@@ -103,6 +121,38 @@ describe('TmuxControlParser %output decode', () => {
     const p = new TmuxControlParser();
     const out = feedLines(p, ['%output %0 ']);
     expect(Array.from((out[0] as OutputNotification).bytes)).toEqual([]);
+  });
+
+  it('decodes %extended-output (pause-mode) as a normal output notification', () => {
+    const p = new TmuxControlParser();
+    // %extended-output %<pane> <age> : <data> — age block before the ` : ` delimiter.
+    const out = feedLines(p, ['%extended-output %2 0 : \\033[0m$ ']);
+    const n = out[0] as OutputNotification;
+    expect(n.type).toBe('output');
+    expect(n.paneId).toBe('%2');
+    expect(Array.from(n.bytes)).toEqual([27, 0x5b, 0x30, 0x6d, 0x24, 0x20]);
+  });
+
+  it('keeps a " : " that occurs inside %extended-output data (first delimiter wins)', () => {
+    const p = new TmuxControlParser();
+    const out = feedLines(p, ['%extended-output %2 0 : a : b']);
+    const n = out[0] as OutputNotification;
+    // payload is "a : b" → bytes for 'a',' ',':',' ','b'
+    expect(Array.from(n.bytes)).toEqual([0x61, 0x20, 0x3a, 0x20, 0x62]);
+  });
+});
+
+describe('TmuxControlParser %subscription-changed', () => {
+  it('parses name + value (value after the first " : ")', () => {
+    const p = new TmuxControlParser();
+    const out = feedLines(p, ['%subscription-changed title $0 @1 0 %3 : my pane title']);
+    expect(out[0]).toEqual({ type: 'subscription-changed', name: 'title', value: 'my pane title' });
+  });
+
+  it('yields an empty value when there is no " : " delimiter', () => {
+    const p = new TmuxControlParser();
+    const out = feedLines(p, ['%subscription-changed mouseflags $0 @1 0 %3']);
+    expect(out[0]).toEqual({ type: 'subscription-changed', name: 'mouseflags', value: '' });
   });
 });
 

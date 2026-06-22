@@ -10,7 +10,12 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { RemoteTmuxControlManager, type ControlChannel } from './tmuxControl';
-import type { TmuxNotification } from '@shared/tmux';
+import type { TmuxNotification, UnresponsiveInfo } from '@shared/tmux';
+import {
+  RESPONSIVENESS_POLL_MS,
+  UNRESPONSIVE_FAIL_MS,
+  UNRESPONSIVE_WARN_MS,
+} from '@shared/tmux';
 
 /**
  * A fake duplex control channel. Each line written that does not start with a
@@ -31,9 +36,12 @@ class FakeChannel implements ControlChannel {
   private seq = 0;
   replyLines: string[] = [];
   replyError = false;
+  /** When true, swallow commands (no reply) to simulate a wedged link. */
+  noReply = false;
 
   write(data: string): void {
     this.written.push(data);
+    if (this.noReply) return;
     // Emit a correlated reply block for the command, mimicking tmux.
     this.seq += 1;
     const num = this.seq;
@@ -109,12 +117,12 @@ describe('RemoteTmuxControlManager (fake channel, no live SSH)', () => {
     expect(ch.written.at(-1)).toContain("list-windows");
   });
 
-  it('surfaces a tmux %error reply as error=true', async () => {
+  it('surfaces a tmux %error reply as error=true (generic command(), tolerant)', async () => {
     const ch = new FakeChannel();
     ch.replyError = true;
     const mgr = new RemoteTmuxControlManager(async () => ch);
     await mgr.open();
-    const reply = await mgr.killPane('%99');
+    const reply = await mgr.command('kill-pane -t %99');
     expect(reply.error).toBe(true);
   });
 
@@ -154,13 +162,57 @@ describe('RemoteTmuxControlManager (fake channel, no live SSH)', () => {
     expect(activity).toBe(2);
   });
 
-  it('encodes pane input as space-separated hex over the channel', async () => {
+  it('sends printable input as a literal send-keys -l over the channel', async () => {
     const ch = new FakeChannel();
     const mgr = new RemoteTmuxControlManager(async () => ch);
     await mgr.open();
     await mgr.input('%2', 'hi');
-    // 'hi' -> 68 69
-    expect(ch.written.at(-1)).toContain('send-keys -t %2 -H 68 69');
+    expect(ch.written.at(-1)).toContain("send-keys -t %2 -l 'hi'");
+  });
+
+  it('sends control bytes as hex send-keys -H over the channel', async () => {
+    const ch = new FakeChannel();
+    const mgr = new RemoteTmuxControlManager(async () => ch);
+    await mgr.open();
+    await mgr.input('%2', '\r'); // CR -> 0d, non-printable -> hex path
+    expect(ch.written.at(-1)).toContain('send-keys -t %2 -H 0d');
+  });
+
+  it('structural mutation wrappers reject on a %error reply (non-tolerant)', async () => {
+    const ch = new FakeChannel();
+    ch.replyError = true;
+    const mgr = new RemoteTmuxControlManager(async () => ch);
+    await mgr.open();
+    await expect(mgr.killWindow('@9')).rejects.toThrow(/tmux command error/);
+  });
+
+  it('watchdog warns then fails (rejecting pending + dropping channel) on a wedged link', async () => {
+    vi.useFakeTimers();
+    try {
+      const ch = new FakeChannel();
+      ch.noReply = true; // simulate tmux/SSH wedged: command never gets a reply
+      const mgr = new RemoteTmuxControlManager(async () => ch);
+      await mgr.open();
+      const warns: UnresponsiveInfo[] = [];
+      mgr.onUnresponsive = (i) => warns.push(i);
+      const pending = mgr.command('list-windows');
+      pending.catch(() => {}); // avoid an unhandled rejection before we assert
+
+      // Cross the WARN threshold → one onUnresponsive signal, command still pending.
+      await vi.advanceTimersByTimeAsync(UNRESPONSIVE_WARN_MS + RESPONSIVENESS_POLL_MS);
+      expect(warns).toHaveLength(1);
+      expect(warns[0]!.pendingCount).toBe(1);
+
+      // Cross the FAIL threshold → pending rejected and the channel dropped.
+      await vi.advanceTimersByTimeAsync(
+        UNRESPONSIVE_FAIL_MS - UNRESPONSIVE_WARN_MS - RESPONSIVENESS_POLL_MS,
+      );
+      await expect(pending).rejects.toThrow('tmux control unresponsive');
+      expect(ch.closed).toBe(true);
+      mgr.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reattaches on an unexpected drop and resyncs from replayed notifications', async () => {

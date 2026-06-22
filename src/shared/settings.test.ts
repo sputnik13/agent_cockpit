@@ -26,6 +26,32 @@ describe('normalizeSettings — workgraphColumnsSoftCap bounds', () => {
   });
 });
 
+describe('normalizeSettings — tmuxPauseMode', () => {
+  it('defaults to false (opt-in)', () => {
+    expect(normalizeSettings({}).tmuxPauseMode).toBe(false);
+    expect(DEFAULT_SETTINGS.tmuxPauseMode).toBe(false);
+  });
+  it('is true only for an exact boolean true', () => {
+    expect(normalizeSettings({ tmuxPauseMode: true }).tmuxPauseMode).toBe(true);
+    expect(normalizeSettings({ tmuxPauseMode: 'yes' as unknown as boolean }).tmuxPauseMode).toBe(
+      false,
+    );
+  });
+});
+
+describe('normalizeSettings — tmuxFormatSubscriptions', () => {
+  it('defaults to false (opt-in)', () => {
+    expect(normalizeSettings({}).tmuxFormatSubscriptions).toBe(false);
+    expect(DEFAULT_SETTINGS.tmuxFormatSubscriptions).toBe(false);
+  });
+  it('is true only for an exact boolean true', () => {
+    expect(normalizeSettings({ tmuxFormatSubscriptions: true }).tmuxFormatSubscriptions).toBe(true);
+    expect(
+      normalizeSettings({ tmuxFormatSubscriptions: 1 as unknown as boolean }).tmuxFormatSubscriptions,
+    ).toBe(false);
+  });
+});
+
 describe('normalizeSettings — sessionIdleTimeoutMin bounds', () => {
   it('defaults to 20 when absent', () => {
     expect(normalizeSettings({}).sessionIdleTimeoutMin).toBe(20);

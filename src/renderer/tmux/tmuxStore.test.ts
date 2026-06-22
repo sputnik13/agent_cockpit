@@ -162,6 +162,40 @@ describe('tmuxStore reducer (pure)', () => {
     expect(v.windowOrder).toEqual([]);
     expect(Object.keys(v.windows)).toEqual([]);
   });
+
+  it('tracks per-pane paused flag on pause/continue', () => {
+    let v = fold(emptyView(), [singleLayout('@1', '%1')]);
+    v = reduce(v, { type: 'pause', paneId: '%1' });
+    expect(v.panes['%1']?.paused).toBe(true);
+    v = reduce(v, { type: 'continue', paneId: '%1' });
+    expect(v.panes['%1']?.paused).toBe(false);
+  });
+
+  it('preserves the paused flag across a layout-change re-index', () => {
+    let v = fold(emptyView(), [singleLayout('@1', '%1')]);
+    v = reduce(v, { type: 'pause', paneId: '%1' });
+    v = reduce(v, singleLayout('@1', '%1')); // re-index same pane
+    expect(v.panes['%1']?.paused).toBe(true);
+  });
+
+  it('routes a title subscription to the window displayName', () => {
+    let v = fold(emptyView(), [singleLayout('@1', '%1')]);
+    v = reduce(v, { type: 'subscription-changed', name: 'cockpit-title-@1', value: 'vim README' });
+    expect(v.windows['@1']?.displayName).toBe('vim README');
+  });
+
+  it('routes a mouse subscription to the pane mouse flags', () => {
+    let v = fold(emptyView(), [singleLayout('@1', '%1')]);
+    v = reduce(v, { type: 'subscription-changed', name: 'cockpit-mouse-%1', value: '1 0' });
+    expect(v.panes['%1']?.mouseAny).toBe(true);
+    expect(v.panes['%1']?.mouseSgr).toBe(false);
+  });
+
+  it('ignores an unrelated subscription name', () => {
+    const v0 = fold(emptyView(), [singleLayout('@1', '%1')]);
+    const v1 = reduce(v0, { type: 'subscription-changed', name: 'other', value: 'x' });
+    expect(v1).toBe(v0);
+  });
 });
 
 describe('tmuxStore output routing + input (per-project)', () => {
@@ -243,6 +277,18 @@ describe('tmuxStore output routing + input (per-project)', () => {
   it('sendInput encodes control bytes (Enter = 0d)', async () => {
     await useTmuxStore.getState().sendInput(P, '%3', '\r');
     expect(api.tmuxControl.input).toHaveBeenCalledWith('%3', '0d');
+  });
+
+  it('sendInput hands the full input to the manager in one call (main does the chunking)', async () => {
+    // The renderer no longer chunks — the main-process input() classifies and
+    // splits into multiple send-keys. The renderer makes a single IPC call with
+    // the complete hex payload regardless of size.
+    const paste = 'x'.repeat(700);
+    await useTmuxStore.getState().sendInput(P, '%3', paste);
+    expect(api.tmuxControl.input).toHaveBeenCalledTimes(1);
+    const [pane, hex] = api.tmuxControl.input.mock.calls[0]!;
+    expect(pane).toBe('%3');
+    expect(hex).toBe(Array.from(paste, () => '78').join(' ')); // 'x' = 0x78
   });
 
   it('open records the session name and open flag on the project slice', async () => {

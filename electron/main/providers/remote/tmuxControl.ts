@@ -15,19 +15,21 @@
  */
 import {
   TmuxControlParser,
+  buildSendKeysCommands,
   capturePane as capturePaneCmd,
+  classifyResponsiveness,
   killPane as killPaneCmd,
   killWindow as killWindowCmd,
   newWindow as newWindowCmd,
   refreshClientSize,
   renameWindow as renameWindowCmd,
+  RESPONSIVENESS_POLL_MS,
   resizePane as resizePaneCmd,
   selectPane as selectPaneCmd,
   selectWindow as selectWindowCmd,
-  sendKeysHex,
   splitWindow as splitWindowCmd,
 } from '@shared/tmux';
-import type { TmuxNotification } from '@shared/tmux';
+import type { TmuxNotification, UnresponsiveInfo } from '@shared/tmux';
 import { logger } from '../../logger';
 
 /** Backoff schedule (ms) for re-attaching after a control-channel drop. */
@@ -74,6 +76,27 @@ type NotificationHandler = (n: TmuxNotification) => void;
 interface PendingCommand {
   resolve: (reply: CommandReply) => void;
   reject: (err: Error) => void;
+  /** When false, a tmux `%error` reply rejects instead of resolving. */
+  tolerateErrors: boolean;
+  /** Epoch ms the command was written, for the unresponsiveness watchdog. */
+  enqueuedAt: number;
+}
+
+/** Options for {@link RemoteTmuxControlManager.command}. */
+export interface CommandOptions {
+  /** Resolve (rather than reject) even when tmux returns `%error`. Default true
+   *  to preserve the resolve-with-error contract; structural mutation wrappers
+   *  pass false to surface failures instead of swallowing them. */
+  tolerateErrors?: boolean;
+}
+
+/** Resolve or reject a pending command from its reply, honoring its tolerance. */
+function settleCommand(cmd: PendingCommand, reply: CommandReply): void {
+  if (reply.error && !cmd.tolerateErrors) {
+    cmd.reject(new Error(`tmux command error: ${reply.lines.join('; ') || 'tmux returned %error'}`));
+  } else {
+    cmd.resolve(reply);
+  }
 }
 
 export class RemoteTmuxControlManager {
@@ -109,6 +132,19 @@ export class RemoteTmuxControlManager {
    * output as "use". Structural/reply notifications never call this.
    */
   onOutputActivity?: () => void;
+  /**
+   * Optional hook fired once per episode when the oldest in-flight command
+   * crosses the unresponsive WARN threshold (the link is wedged but not yet
+   * failed). Wire to the ConnectionMachine to surface a degraded/reconnecting
+   * state instead of an indefinite spinner. On the FAIL threshold the manager
+   * rejects all pending commands and drops the channel to reattach (no hook —
+   * the dropped channel already drives the connection state).
+   */
+  onUnresponsive?: (info: UnresponsiveInfo) => void;
+  /** Polls the oldest-pending age; runs while a channel is open. */
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  /** True once the current stall episode has fired onUnresponsive (warn-once). */
+  private unresponsiveWarned = false;
 
   constructor(private readonly openChannel: ControlChannelOpener) {}
 
@@ -182,6 +218,7 @@ export class RemoteTmuxControlManager {
     }, STABILITY_RESET_MS);
     this.stableTimer.unref?.();
     logger.info('tmux control-mode channel open ok', 'remote-tmux-control');
+    this.startWatchdog();
     channel.onData((chunk) => {
       try {
         // Diagnostic-only: keep a short latin1 preview of the first bytes so an
@@ -274,10 +311,72 @@ export class RemoteTmuxControlManager {
     }
   }
 
+  /** Start the unresponsiveness watchdog (idempotent; runs while open). */
+  private startWatchdog(): void {
+    if (this.watchdogTimer != null) return;
+    this.watchdogTimer = setInterval(() => this.checkResponsiveness(), RESPONSIVENESS_POLL_MS);
+    this.watchdogTimer.unref?.();
+  }
+
+  private clearWatchdog(): void {
+    if (this.watchdogTimer != null) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+    this.unresponsiveWarned = false;
+  }
+
+  /**
+   * Poll the oldest in-flight command's age. `warn` surfaces onUnresponsive once
+   * per episode; `fail` rejects ALL pending and drops the channel so promises do
+   * not hang forever and the FIFO can't desync from a late reply (the drop also
+   * schedules a reattach via the existing onClose path).
+   */
+  private checkResponsiveness(): void {
+    const oldest = this.pending[0];
+    const age = oldest ? Date.now() - oldest.enqueuedAt : null;
+    const action = classifyResponsiveness(age);
+    if (action === 'none') {
+      this.unresponsiveWarned = false;
+      return;
+    }
+    if (action === 'warn') {
+      if (!this.unresponsiveWarned) {
+        this.unresponsiveWarned = true;
+        logger.error(
+          `tmux control unresponsive: oldest command ${Math.round(age!)}ms with no reply (${this.pending.length} pending)`,
+          'remote-tmux-control',
+        );
+        try {
+          this.onUnresponsive?.({ pendingCount: this.pending.length, oldestAgeMs: age! });
+        } catch (e) {
+          console.error('[remote-tmux-control] onUnresponsive hook threw', e);
+        }
+      }
+      return;
+    }
+    // action === 'fail'
+    logger.error(
+      `tmux control unresponsive ${Math.round(age!)}ms — failing ${this.pending.length} pending and dropping channel to reattach`,
+      'remote-tmux-control',
+    );
+    this.unresponsiveWarned = false;
+    const drained = this.pending.splice(0);
+    for (const p of drained) p.reject(new Error('tmux control unresponsive'));
+    const ch = this.channel;
+    this.channel = null;
+    try {
+      ch?.close(); // fires onClose (closed=false) → scheduleReattach; pending already drained.
+    } catch {
+      /* already closed */
+    }
+  }
+
   private ingest(chunk: Uint8Array): void {
     for (const n of this.parser.feed(chunk)) {
       if (n.type === 'reply') {
-        this.pending.shift()?.resolve({ num: n.num, error: n.error, lines: n.lines });
+        const cmd = this.pending.shift();
+        if (cmd) settleCommand(cmd, { num: n.num, error: n.error, lines: n.lines });
         continue;
       }
       // tmux sends `%exit [reason]` just before detaching the control client;
@@ -311,44 +410,53 @@ export class RemoteTmuxControlManager {
     return () => this.handlers.delete(handler);
   }
 
-  command(args: string): Promise<CommandReply> {
+  command(args: string, opts?: CommandOptions): Promise<CommandReply> {
     const channel = this.channel;
     if (!channel) return Promise.reject(new Error('tmux control channel is not open'));
+    const tolerateErrors = opts?.tolerateErrors ?? true;
     return new Promise<CommandReply>((resolve, reject) => {
-      this.pending.push({ resolve, reject });
+      this.pending.push({ resolve, reject, tolerateErrors, enqueuedAt: Date.now() });
       channel.write(`${args}\n`);
     });
   }
 
+  // Structure mutations reject on a tmux `%error` (tolerateErrors:false) so a
+  // failure surfaces rather than resolving with an empty/garbage reply.
   newWindow(opts?: { name?: string; cwd?: string }): Promise<CommandReply> {
-    return this.command(newWindowCmd(opts));
+    return this.command(newWindowCmd(opts), { tolerateErrors: false });
   }
   splitWindow(paneId: string, dir: 'lr' | 'tb', opts?: { cwd?: string }): Promise<CommandReply> {
-    return this.command(splitWindowCmd(paneId, dir, opts));
+    return this.command(splitWindowCmd(paneId, dir, opts), { tolerateErrors: false });
   }
   killPane(paneId: string): Promise<CommandReply> {
-    return this.command(killPaneCmd(paneId));
+    return this.command(killPaneCmd(paneId), { tolerateErrors: false });
   }
   killWindow(windowId: string): Promise<CommandReply> {
-    return this.command(killWindowCmd(windowId));
+    return this.command(killWindowCmd(windowId), { tolerateErrors: false });
   }
   selectWindow(windowId: string): Promise<CommandReply> {
-    return this.command(selectWindowCmd(windowId));
+    return this.command(selectWindowCmd(windowId), { tolerateErrors: false });
   }
   selectPane(paneId: string): Promise<CommandReply> {
-    return this.command(selectPaneCmd(paneId));
+    return this.command(selectPaneCmd(paneId), { tolerateErrors: false });
   }
   renameWindow(windowId: string, name: string): Promise<CommandReply> {
-    return this.command(renameWindowCmd(windowId, name));
+    return this.command(renameWindowCmd(windowId, name), { tolerateErrors: false });
   }
   resizePane(paneId: string, size: { x?: number; y?: number }): Promise<CommandReply> {
-    return this.command(resizePaneCmd(paneId, size));
+    return this.command(resizePaneCmd(paneId, size), { tolerateErrors: false });
   }
   resizeClient(cols: number, rows: number): Promise<CommandReply> {
     return this.command(refreshClientSize(cols, rows));
   }
-  input(paneId: string, hexOrInput: string | Uint8Array): Promise<CommandReply> {
-    return this.command(sendKeysHex(paneId, hexOrInput));
+  /** Send input to a pane, encoding-classified and chunked into ordered
+   *  `send-keys` commands (see {@link buildSendKeysCommands}) so a large paste
+   *  can't exceed tmux's control-command line limit. Resolves with the last
+   *  reply (no-op reply for empty input). */
+  async input(paneId: string, hexOrInput: string | Uint8Array): Promise<CommandReply> {
+    let last: CommandReply = { num: -1, error: false, lines: [] };
+    for (const cmd of buildSendKeysCommands(paneId, hexOrInput)) last = await this.command(cmd);
+    return last;
   }
   async capturePane(paneId: string, opts?: { startLine?: number }): Promise<string[]> {
     return (await this.command(capturePaneCmd(paneId, opts))).lines;
@@ -359,6 +467,7 @@ export class RemoteTmuxControlManager {
     this.closed = true;
     this.clearReattachTimer();
     this.clearStableTimer();
+    this.clearWatchdog();
     const channel = this.channel;
     this.channel = null;
     try {

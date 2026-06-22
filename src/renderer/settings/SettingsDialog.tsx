@@ -125,6 +125,28 @@ export function SettingsDialog(): JSX.Element {
           />
         </Field>
         <Field
+          label="tmux flow control (pause-mode, experimental)"
+          help="On tmux >= 3.2, let the server pause a pane's output if the client falls behind (refresh-client -fpause-after), bounding memory for a flooding pane; the client resumes and re-seeds the pane on focus. Off by default — it changes the server output path and should be verified per host. No effect on tmux < 3.2. Takes effect on the next connect."
+        >
+          <input
+            type="checkbox"
+            aria-label="tmux flow control (pause-mode)"
+            checked={settings.tmuxPauseMode ?? false}
+            onChange={(e) => void set({ tmuxPauseMode: e.target.checked })}
+          />
+        </Field>
+        <Field
+          label="tmux format subscriptions (titles/mouse, experimental)"
+          help="On tmux >= 3.2, use refresh-client -B subscriptions so tmux pushes pane title and mouse-mode changes, instead of scraping titles and polling for mouse mode. Off by default — experimental and host-dependent. On tmux < 3.2 (or off) the scrape/poll path is used. Takes effect on the next connect."
+        >
+          <input
+            type="checkbox"
+            aria-label="tmux format subscriptions"
+            checked={settings.tmuxFormatSubscriptions ?? false}
+            onChange={(e) => void set({ tmuxFormatSubscriptions: e.target.checked })}
+          />
+        </Field>
+        <Field
           label="Workgraph side-by-side columns"
           help="Comfortable number of epic columns in the workgraph Columns view. Up to this many pinned-epic columns fill the panel; pinning more is still allowed but shows a density hint. Raise it (e.g. to 3) if you routinely compare more epics. Default 2."
         >

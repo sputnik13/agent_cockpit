@@ -59,8 +59,17 @@ export class TmuxControlParser {
         this.closeReply(line, out);
         return;
       }
-      this.openReply.lines.push(line);
-      return;
+      // `%exit` can arrive with NO `%end` for the in-flight command (tmux 1.8's
+      // unlink-window bug, and any abrupt server teardown that destroys the
+      // current session mid-command). Leaving the block open would strand the
+      // pending entry and desync the FIFO for every later command, so force-close
+      // it as an error, then fall through to handle the `%exit` normally below.
+      if (line === '%exit' || line.startsWith('%exit ')) {
+        this.forceCloseReply(out);
+      } else {
+        this.openReply.lines.push(line);
+        return;
+      }
     }
 
     if (!line.startsWith('%')) {
@@ -79,6 +88,13 @@ export class TmuxControlParser {
         return;
       case '%output':
         out.push(this.parseOutput(rest));
+        return;
+      case '%extended-output':
+        // Emitted instead of %output when the client enabled pause-mode
+        // (`refresh-client -fpause-after`). Same pane output, with a leading
+        // age/flags block before ` : <data>`. We surface it as a normal output
+        // notification (the latency block is for buffer-monitor UIs we don't run).
+        out.push(this.parseExtendedOutput(rest));
         return;
       case '%window-add':
         out.push({ type: 'window-add', windowId: firstToken(rest) });
@@ -149,6 +165,16 @@ export class TmuxControlParser {
       case '%pause':
         out.push({ type: 'pause', paneId: firstToken(rest) });
         return;
+      case '%subscription-changed': {
+        // %subscription-changed <name> <session> <window> <window-index> <pane>
+        //   [...] : <value> — name is the first token; value follows the first
+        // ` : ` (the context fields between never contain ` : `).
+        const name = firstToken(rest);
+        const delim = rest.indexOf(' : ');
+        const value = delim === -1 ? '' : rest.slice(delim + 3);
+        out.push({ type: 'subscription-changed', name, value });
+        return;
+      }
       default:
         out.push({ type: 'unknown', line });
         return;
@@ -171,11 +197,37 @@ export class TmuxControlParser {
     out.push(reply);
   }
 
+  /**
+   * Force-close an open reply that was interrupted (no `%end`/`%error`) — emitted
+   * as an error reply so the manager's pending FIFO advances instead of stalling.
+   */
+  private forceCloseReply(out: TmuxNotification[]): void {
+    const open = this.openReply!;
+    this.openReply = null;
+    out.push({ type: 'reply', num: open.num, error: true, lines: open.lines });
+  }
+
   /** Parse `%output %<pane> <octal-escaped-bytes>`. */
   private parseOutput(rest: string): TmuxNotification {
     const sp = rest.indexOf(' ');
     const paneId = sp === -1 ? rest : rest.slice(0, sp);
     const payload = sp === -1 ? '' : rest.slice(sp + 1);
+    return { type: 'output', paneId, bytes: decodeOutput(payload) };
+  }
+
+  /**
+   * Parse `%extended-output %<pane> <age>[ <flags>] : <octal-escaped-bytes>`.
+   * The metadata (age/flags) never contains ` : `, so the FIRST ` : ` is the
+   * metadata→data delimiter; any ` : ` afterward is part of the (unescaped)
+   * data. Returns the same shape as {@link parseOutput} so downstream sinks need
+   * no change.
+   */
+  private parseExtendedOutput(rest: string): TmuxNotification {
+    const sp = rest.indexOf(' ');
+    const paneId = sp === -1 ? rest : rest.slice(0, sp);
+    const afterPane = sp === -1 ? '' : rest.slice(sp + 1);
+    const delim = afterPane.indexOf(' : ');
+    const payload = delim === -1 ? '' : afterPane.slice(delim + 3);
     return { type: 'output', paneId, bytes: decodeOutput(payload) };
   }
 

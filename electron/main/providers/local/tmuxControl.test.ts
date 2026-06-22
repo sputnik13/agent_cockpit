@@ -141,7 +141,7 @@ describe('LocalTmuxControlManager (real tmux -CC)', () => {
     expect(after.layout.root.type).toBe('split');
   });
 
-  it('round-trips input via send-keys -H and seeds scrollback', async () => {
+  it('round-trips input via send-keys (literal + hex) and seeds scrollback', async () => {
     active = spawnManager();
     if (!active) return;
     await waitFor(active.mgr, (n) => n.type === 'window-add');
@@ -170,12 +170,19 @@ describe('LocalTmuxControlManager (real tmux -CC)', () => {
     expect(reply.lines[0]?.trim()).toBe(String(TERMINAL_SCROLLBACK));
   });
 
-  it('reports a tmux error reply for an invalid target', async () => {
+  it('generic command() resolves with the error flag for an invalid target (tolerant)', async () => {
     active = spawnManager();
     if (!active) return;
     await waitFor(active.mgr, (n) => n.type === 'window-add');
-    const reply = await active.mgr.killPane('%99999');
+    const reply = await active.mgr.command('kill-pane -t %99999');
     expect(reply.error).toBe(true);
+  });
+
+  it('structural mutation wrappers reject on a tmux %error (non-tolerant)', async () => {
+    active = spawnManager();
+    if (!active) return;
+    await waitFor(active.mgr, (n) => n.type === 'window-add');
+    await expect(active.mgr.killPane('%99999')).rejects.toThrow(/tmux command error/);
   });
 
   it('accepts resizeClient without error', async () => {

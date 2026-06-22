@@ -15,7 +15,13 @@
  * do not corrupt it.
  */
 import { create } from 'zustand';
-import { fromWireNotification, toHex } from '@shared/tmux';
+import {
+  fromWireNotification,
+  parseMouseFlagsValue,
+  parseSubscriptionName,
+  refreshClientContinue,
+  toHex,
+} from '@shared/tmux';
 import type { LayoutNode, TmuxNotification, TmuxWireNotification } from '@shared/tmux';
 import { agentCockpit } from '../providerClient';
 
@@ -23,6 +29,14 @@ import { agentCockpit } from '../providerClient';
 export interface PaneState {
   paneId: string;
   windowId: string | null;
+  /** Paused by tmux pause-mode flow control (gated; see `tmuxPauseMode`). The
+   *  renderer resumes + re-seeds a paused pane when it becomes active/visible. */
+  paused?: boolean;
+  /** Mouse-tracking flags from a format subscription (gated; see
+   *  `tmuxFormatSubscriptions`). Absent ⇒ no subscription value yet, fall back to
+   *  the per-gesture `display-message` poll. */
+  mouseAny?: boolean;
+  mouseSgr?: boolean;
 }
 
 /** A window (UI tab) and its current pane-layout tree. `name` is the
@@ -157,7 +171,9 @@ export function reduce(state: TmuxViewState, n: TmuxNotification): TmuxViewState
       const visibleLayout = n.visibleLayout?.root ?? null;
       const panes = { ...state.panes };
       for (const pid of collectPaneIds(root)) {
-        panes[pid] = { paneId: pid, windowId: n.windowId };
+        // Preserve per-pane subscription/pause flags across re-index (a
+        // layout-change must not wipe paused/mouse state).
+        panes[pid] = { ...state.panes[pid], paneId: pid, windowId: n.windowId };
       }
       return {
         ...state,
@@ -191,6 +207,44 @@ export function reduce(state: TmuxViewState, n: TmuxNotification): TmuxViewState
     }
     case 'exit': {
       return { ...emptyView() };
+    }
+    case 'pause':
+    case 'continue': {
+      // tmux pause-mode flow control (gated). Track the per-pane paused flag so
+      // the renderer can resume + re-seed the pane when it becomes visible.
+      const paused = n.type === 'pause';
+      const p = state.panes[n.paneId];
+      if (!p) {
+        return {
+          ...state,
+          panes: { ...state.panes, [n.paneId]: { paneId: n.paneId, windowId: null, paused } },
+        };
+      }
+      if ((p.paused ?? false) === paused) return state;
+      return { ...state, panes: { ...state.panes, [n.paneId]: { ...p, paused } } };
+    }
+    case 'subscription-changed': {
+      // Format subscriptions (gated). Route the pushed value to the window title
+      // (displayName) or the pane mouse flags by the subscription name.
+      const parsed = parseSubscriptionName(n.name);
+      if (!parsed) return state;
+      if (parsed.kind === 'title') {
+        const w = state.windows[parsed.windowId];
+        const displayName = n.value.trim();
+        if (!w || !displayName || w.displayName === displayName) return state;
+        return {
+          ...state,
+          windows: { ...state.windows, [parsed.windowId]: { ...w, displayName } },
+        };
+      }
+      const { any, sgr } = parseMouseFlagsValue(n.value);
+      const p = state.panes[parsed.paneId];
+      if (p && p.mouseAny === any && p.mouseSgr === sgr) return state;
+      const base = p ?? { paneId: parsed.paneId, windowId: null };
+      return {
+        ...state,
+        panes: { ...state.panes, [parsed.paneId]: { ...base, mouseAny: any, mouseSgr: sgr } },
+      };
     }
     default:
       return state;
@@ -237,6 +291,10 @@ export interface TmuxStore {
   command: (args: string) => Promise<{ num: number; error: boolean; lines: string[] }>;
   /** Send literal input bytes to a pane (encoded to hex pairs). */
   sendInput: (projectId: string, paneId: string, data: string | Uint8Array) => Promise<void>;
+  /** Resume a pause-mode-paused pane: send `refresh-client -A %p:continue` and
+   *  optimistically clear the paused flag (tmux also emits `%continue`). No-op if
+   *  the pane is not paused. Gated feature; only fires when pause-mode is on. */
+  resumePane: (projectId: string, paneId: string) => void;
   resize: (cols: number, rows: number) => Promise<void>;
   /** Drop a single project's slice + its sinks. */
   resetProject: (projectId: string) => void;
@@ -249,7 +307,7 @@ export function selectActiveView(s: TmuxStore): TmuxViewState {
   return (s.activeProjectId != null && s.byProject[s.activeProjectId]) || EMPTY_VIEW;
 }
 
-export const useTmuxStore = create<TmuxStore>((set) => {
+export const useTmuxStore = create<TmuxStore>((set, get) => {
   // Pane sinks live in closure state, not in the reduced view, so the reducer
   // remains pure and serializable.
   const sinks = new Map<string, Set<(bytes: Uint8Array) => void>>();
@@ -357,7 +415,27 @@ export const useTmuxStore = create<TmuxStore>((set) => {
     },
     command: (args) => agentCockpit.tmuxControl.command(args),
     sendInput: async (_projectId, paneId, data) => {
+      // The main-process manager `input()` does the encoding-aware chunking
+      // (printable ASCII via send-keys -l, the rest via -H; split so a large
+      // paste can't exceed tmux's control-command line limit). The renderer just
+      // hands over the raw bytes as hex.
       await agentCockpit.tmuxControl.input(paneId, toHex(data));
+    },
+    resumePane: (projectId, paneId) => {
+      const view = get().byProject[projectId];
+      if (!view?.panes[paneId]?.paused) return;
+      void agentCockpit.tmuxControl.command(refreshClientContinue(paneId)).catch(() => {});
+      set((st) => {
+        const slice = st.byProject[projectId];
+        const p = slice?.panes[paneId];
+        if (!slice || !p?.paused) return st;
+        return {
+          byProject: {
+            ...st.byProject,
+            [projectId]: { ...slice, panes: { ...slice.panes, [paneId]: { ...p, paused: false } } },
+          },
+        };
+      });
     },
     resize: async (cols, rows) => {
       await agentCockpit.tmuxControl.resize(cols, rows);

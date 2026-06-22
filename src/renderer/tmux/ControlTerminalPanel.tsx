@@ -43,6 +43,12 @@ export function ControlTerminalPanel(): JSX.Element {
   const panes = useTmuxStore((s) => selectActiveView(s).panes);
   const storeActivePaneId = useTmuxStore((s) => selectActiveView(s).activePaneId);
   const storeActiveWindowId = useTmuxStore((s) => selectActiveView(s).activeWindowId);
+  // Pause-mode (gated): whether the active pane is currently paused by tmux flow
+  // control. Drives the resume effect below. Always false unless pause-mode is on.
+  const activePanePaused = useTmuxStore((s) => {
+    const v = selectActiveView(s);
+    return v.activePaneId ? (v.panes[v.activePaneId]?.paused ?? false) : false;
+  });
   const [selectedWindow, setSelectedWindow] = useState<string | null>(null);
   const [activePaneId, setActivePaneId] = useState<string | null>(null);
   const [bridgeMissing, setBridgeMissing] = useState(false);
@@ -97,6 +103,16 @@ export function ControlTerminalPanel(): JSX.Element {
     acquireControlSession(activeId);
     return () => releaseControlSession();
   }, [activeId, providerConnected, providerDisconnected]);
+
+  // Pause-mode (gated): when tmux flow control pauses the active/visible pane,
+  // resume it so the foreground pane never stays stalled; background panes stay
+  // paused (the intended memory bound) until activated, which re-runs this. No-op
+  // unless pause-mode is enabled — panes only ever carry `paused` then.
+  useEffect(() => {
+    if (!activeId || !activePanePaused) return;
+    const pid = useTmuxStore.getState().byProject[activeId]?.activePaneId;
+    if (pid) useTmuxStore.getState().resumePane(activeId, pid);
+  }, [activeId, storeActivePaneId, activePanePaused]);
 
   // Ctrl+` (handled in CockpitWorkspace) asks us to focus the active pane.
   useEffect(() => {

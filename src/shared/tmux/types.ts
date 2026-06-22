@@ -134,6 +134,19 @@ export interface PauseNotification {
 }
 
 /**
+ * A `%subscription-changed` push: tmux re-evaluated a format the client
+ * subscribed to via `refresh-client -B` (tmux >= 3.2). `name` is the
+ * client-chosen subscription name (which may encode its target, e.g. a pane);
+ * `value` is the evaluated format (after the ` : ` delimiter). The intermediate
+ * session/window/pane context fields are not modeled (consumers key off `name`).
+ */
+export interface SubscriptionChangedNotification {
+  type: 'subscription-changed';
+  name: string;
+  value: string;
+}
+
+/**
  * A completed command reply: the lines emitted between `%begin <ts> <num>` and
  * the matching `%end`/`%error <ts> <num>`. `num` correlates to the command the
  * host issued. `error` is true when the block closed with `%error`.
@@ -171,6 +184,7 @@ export type TmuxNotification =
   | ExitNotification
   | ContinueNotification
   | PauseNotification
+  | SubscriptionChangedNotification
   | ReplyNotification
   | UnknownNotification;
 

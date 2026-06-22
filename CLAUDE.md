@@ -1,0 +1,623 @@
+# agent_cockpit — Critical Learnings
+
+Repo-specific lessons agents must apply without rediscovering. Keep entries
+short, actionable, and rooted in concrete code paths. Add an entry only when a
+non-obvious bug class was found that future changes could re-introduce.
+
+## GUI launches need an explicit PATH bootstrap (tmux/br by bare name)
+
+**Invariant:** The main process spawns local tools by **bare name** — `tmux`
+(`providers/local/terminal.ts`, `tmuxControl.ts`, `sessions.ts`) and `br`
+(`beads/runner.ts::runBr`) — so it depends on `process.env.PATH` containing
+their install dirs. A macOS Dock/Finder/Spotlight launch inherits **launchd's
+minimal PATH** (`/usr/bin:/bin:/usr/sbin:/sbin`), which omits Homebrew
+(`/opt/homebrew/bin`, `/usr/local/bin`) and user-local (`~/.local/bin`). Without
+a fix, the terminal (tmux) and task-detail pane (br) fail ENOENT even though the
+tools are installed; a **terminal launch works** because the shell's PATH already
+has those dirs — which is why the failure looks intermittent / "but it's
+installed". `git` survives via `/usr/bin/git`.
+
+**Required:** `electron/main/index.ts` calls `bootstrapPath()`
+(`electron/main/pathBootstrap.ts`) as the **first** step in `app.whenReady`,
+**before any spawn**. It imports the user's real login-shell PATH
+(`$SHELL -ilc`, marker-delimited so banner noise is ignored), unions in a static
+fallback set (`staticPathDirs()`), and dedupes order-preserving (login-shell
+PATH wins, then fallbacks, then prior PATH). No-op on win32. `runBr` ENOENT
+errors append the effective PATH via `resolveBin('br')` so a genuinely-missing
+tool reads as setup, not a bug. Home-grown (no runtime dep) to stay inside the
+existing spawn seams.
+
+**Regression check:** launch the packaged app from the Dock (NOT a terminal) on a
+host where tmux/br live only in Homebrew/`~/.local/bin`: a terminal must open and
+the task-detail pane must load comments without "not found". Do not move
+`bootstrapPath()` after IPC/session wiring, and do not start spawning tools from
+module top-level before `whenReady` (the bootstrap runs in `whenReady`).
+
+## Dev-environment memory cap (systemd-scope) two-knob invariant
+
+**Invariant:** The remote dev-env `systemd-scope` cap (`SystemdScopeLauncher` /
+`systemdScopeWrap` in `electron/main/providers/remote/envLauncher.ts`) starts the
+shared cockpit tmux server inside `systemd-run --user --scope … -p MemoryMax=NM`
+with BOTH of these, or the cap silently fails to do its job:
+
+- **`env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR`** on the tmux server. A
+  systemd-built tmux (e.g. 3.6a on Arch) moves every new pane into its OWN scope
+  `tmux-spawn-<uuid>.scope`, which is a sibling of the cap and **uncapped** — so the
+  cap ends up holding only the idle server (`Tasks: 1`) and the actual dev work
+  escapes. Denying the SERVER the systemd user bus disables that pane-scope spawning,
+  so panes inherit the server's cgroup (the cap). The `-CC new-session` opener client
+  may keep its bus — only the server gates scope creation. (`-L` sockets live in
+  `/tmp/tmux-<uid>`, not `XDG_RUNTIME_DIR`, so unsetting it doesn't move the socket.)
+- **`-p OOMPolicy=continue`**. Default scope OOMPolicy makes systemd mark the scope
+  `failed` on a cgroup OOM and tear down the WHOLE server (every session/pane on the
+  host dies). `continue` lets the kernel OOM-kill only the offending process(es)
+  (`MemoryOOMGroup` defaults to no → per-process) and keeps the server + other panes
+  alive.
+
+**Granularity:** the cap is **per-host** (the `-L agent-cockpit` socket is one server
+per host, one session per project), so 16 GB is a shared ceiling across all projects
+on the host, not per-project. True per-project caps need a per-project socket (deferred).
+
+**Regression check:** on a lingering-enabled Linux host, after a fresh connect,
+`cat /proc/<pane_pid>/cgroup` for a control-mode pane MUST contain
+`cockpit-devenv.scope` (not `tmux-spawn-*`); a memory bomb in a pane must OOM-kill only
+that process (`memory.events` `oom_kill>0`, `oom_group_kill=0`) with the scope staying
+`active` and other panes alive. The cap only binds a FRESHLY-created server —
+`tmux -L agent-cockpit kill-server` to re-cap a running one.
+
+## beads_rust status model (ready vs not-ready; close, never free-text)
+
+**Invariant:** `br ready` (what agents pick up) is **`open` AND unblocked AND
+not-deferred** — *only* `open` is ever ready. `br`'s `Status` is the eight-value
+enum `open | in_progress | blocked | deferred | draft | closed | tombstone |
+pinned` `anyOf`'d with a bare string, so **any free-text status validates**
+(`br update --status done` succeeds). `--status` refuses only `closed`/`tombstone`.
+
+**Rules:** claim with `br update --claim` (→ `in_progress`); **finish ONLY with
+`br close`** (→ `closed`) — the one state that is both never-ready and truly
+terminal, and the only one that unblocks dependents and feeds `br changelog`;
+snooze with `br defer`/`undefer`; leave `blocked` to dependency edges (it is
+derived). **NEVER** `br update --status <free-text>` (`done`/`completed`/…): the
+bead is then neither `open` (never shows ready — looks abandoned) nor `closed` (so
+it keeps blocking dependents and is dropped from changelogs) — a limbo state.
+
+**Cockpit rendering (aligned to the set):** `deriveState` in
+`src/renderer/beads/graphSelectors.ts` maps `closed`/`tombstone` → `done`
+(terminal); stored `blocked` → red; `deferred` → Deferred; `draft` → Draft;
+`in_progress` → its state; **only `status === 'open'` → Ready** (when unblocked).
+Everything else — `pinned` and any free-text value (`done`/`completed`/…) →
+`unknown` ("Other status", warn): never Ready, never hidden, so the bad status is
+visible and gets corrected (it still blocks dependents in `br`). Do NOT reintroduce
+the old `unknown → ready` fallback. Full model + transitions:
+[docs/DESIGN.md](docs/DESIGN.md) "Bead lifecycle states & transitions".
+
+## beads_rust dependency direction (workgraph)
+
+**Invariant:** A normalized `BeadsDep { from = issue_id, to = depends_on_id }`
+means *`from` depends on `to`* (beads_rust stores `br dep add <issue>
+<depends-on>` as `(issue_id, depends_on_id)`). So for a `blocks` edge **`to`
+blocks `from`** — `from` is the blocked/dependent node. `parent-child` edges are
+`{from = child, to = parent}` (structural hierarchy only).
+
+**Why this matters:** the renderer once read this inverted (treating `from` as
+the blocker of `to`), which marked the *wrong* side blocked. Verify against
+`br blocked`: it reports the `from` (issue_id) as blocked by its `to`
+(depends_on_id). The single source for all derivation is
+`src/renderer/beads/graphSelectors.ts` (`hasOpenBlockers`, `edgesFor`,
+`deriveState`, `childrenOf`); `graphLayout.ts` and every view consume it. Do not
+reintroduce a per-view direction guess.
+
+**State model:** `deriveState` is the one place mapping `(status, edges)` to a
+render state. Three distinct kinds of "blocked": `blocked` = stored
+`status === 'blocked'` (red, urgent, top), `dep_blocked` = open `blocks` dep
+(yellow, informational), `child_blocked` = epic with open children (yellow,
+app-derived — beads_rust does NOT auto-block epics). Only the explicit flag is
+red. `isTerminal` = closed/tombstone/deleted.
+
+**Regression check:** the open epic with a `blocks` dependency to open work must
+render yellow `dep_blocked` (not red), matching `br blocked`; an issue whose
+stored status is `blocked` renders red and sorts to the top of the List.
+
+## tmux control mode (`-CC`) byte handling
+
+**Invariant:** The entire `-CC` data pipeline — from node-pty to the renderer
+xterm — MUST carry raw bytes. Never let any layer UTF-8-decode the control
+stream into a JavaScript string.
+
+**Why this matters:** tmux's `%output` notifications only octal-escape control
+bytes (`< 0x20`) and backslash. **Bytes `> 0x7E` (the UTF-8 sequences for every
+non-ASCII Unicode glyph — powerline arrows, box-drawing, emoji, etc.) are
+emitted verbatim.** If any layer decodes the chunk as UTF-8 into a JS string,
+those raw bytes become Unicode codepoints (e.g. `U+E0B0`), and downstream
+byte-extraction (`charCodeAt(i) & 0xff`) truncates each codepoint to its low
+byte — destroying every multi-byte glyph. Result: every rich TUI (Claude Code,
+htop, vim, lazygit, …) renders as garbled replacement chars.
+
+**Required configuration:**
+
+- `electron/main/providers/local/tmuxControl.ts` spawns node-pty with
+  `encoding: null` so `onData` delivers raw `Buffer` chunks. Do not remove this.
+- The shared parser (`src/shared/tmux/parser.ts`) accepts `string | Uint8Array`
+  but ONLY the `Uint8Array` path (which uses `latin1Decode` to map each byte to
+  a char 0..255 1:1) preserves the wire faithfully for `%output`. Feeding a
+  UTF-8 string is wrong for production data.
+- `src/shared/tmux/codec.ts::decodeOutput` assumes its input string was produced
+  via the latin1 1:1 byte-to-char mapping (or contains only ASCII escape
+  sequences). It does `charCodeAt(i) & 0xff`, which only works when chars map
+  back to bytes.
+- The renderer sink in `src/renderer/tmux/controlPaneRegistry.ts` passes
+  `Uint8Array` straight to `term.write(...)`; xterm UTF-8-decodes it. Do not
+  intercept with a `TextDecoder` mid-stream unless it is stateful (`{stream:
+  true}`) AND per-pane — multi-byte sequences can span writes.
+- The **capture-pane seed** in the same registry has a subtle twist:
+  `parser.feed(Uint8Array)` stores reply lines as **latin1-mapped strings**
+  (each JS char code = the original byte 0..255). The seed must re-encode that
+  string back to a `Uint8Array` (`bytes[i] = text.charCodeAt(i) & 0xff`) before
+  `term.write` — otherwise xterm reads bytes ≥ 0x80 as Unicode codepoints, the
+  C1 control bytes (0x9B CSI, 0x90 DCS, 0x9D OSC, …) put the VT parser into
+  unrecoverable states, and you get `xterm.js: Parsing error: [object Object]`
+  on every captured pane containing escape sequences. Test: open a fresh
+  control-mode terminal; if any pane logs Parsing error, the seed is going
+  through as a string again.
+
+**If a future transport (e.g. remote/SSH control mode) is added:** it must do
+the same — deliver raw bytes from the wire to `parser.feed(Uint8Array)`. A
+transport that hands the parser a UTF-8 string will silently break every rich
+TUI.
+
+**Regression check before changing anything in this pipeline:** open a
+control-mode terminal and run a TUI that uses powerline glyphs or box drawing
+(`vim`, `htop`, `claude`). Garbled glyphs = the invariant has been violated.
+
+## Control-mode paste input must be chunked + encoding-classified (`send-keys` line limit)
+
+**Invariant:** A `send-keys` command is written to the tmux `-CC` stdin as a
+**single command line** (`tmuxControl.ts::command` → `proc.write(...\n)`), and
+tmux/PTY **silently drop an over-long control-command line** (PTY canonical
+`MAX_CANON` ≈ 4096; tmux's own command-line buffer is a second ceiling). So a
+large paste sent as one `send-keys` vanishes with no error while small input
+works — the classic "big paste does nothing" symptom. The hex form
+(`send-keys -H`) is **~3 chars per input byte** (two hex digits + a space), so it
+overflows at only ~1.3 KB of pasted text.
+
+**Required:** the chunking + encoding lives in the **main-process manager's
+`input()`** (`LocalTmuxControlManager` / `RemoteTmuxControlManager`), the single
+seam for keystrokes, paste, AND the mouse-wheel `Uint8Array` seq. It calls
+`buildSendKeysCommands(paneId, input)` (`src/shared/tmux/commands.ts`), which:
+- classifies bytes into runs — **printable ASCII (0x20–0x7E) → `send-keys -l`
+  literal** (~1 char/byte, `shellQuote`d so spaces/`;`/`$`/leading-`-` are inert),
+  **everything else (C0 controls, 0x7F, multibyte UTF-8 ≥ 0x80) → `send-keys -H`
+  raw hex** (preserves the raw-byte invariant above — multibyte glyphs are NEVER
+  sent as `-l`);
+- chunks each run so no command line exceeds ~1 KB (`MAX_SEND_KEYS_LITERAL_BYTES
+  = 512` for literals; hex runs use `chunkBytesForSendKeys`,
+  `MAX_SEND_KEYS_CHUNK_BYTES = 256`, never splitting a multi-byte UTF-8 codepoint
+  across a chunk);
+
+`input()` issues the commands **in order, awaited sequentially**. The renderer
+(`tmuxStore.sendInput`) stays dumb: it hex-encodes the bytes once
+(`toHex(data)`) and makes a single `input()` IPC call — main does all
+splitting. This one main-side seam covers **both** transports; do not move
+chunking back into the renderer or add a per-transport paste path. (`send -l` for
+printable runs is verified end-to-end against real tmux by
+`local/tmuxControl.test.ts`'s input round-trip.)
+
+**Do NOT add bracketed-paste markers (`ESC[200~`/`201~`) ourselves.** xterm.js's
+own paste handler already wraps pasted content **conditionally** on the pane
+app's bracketed-paste mode (DECSET 2004) before `onData` fires. Adding our own
+would double-wrap, and wrapping **unconditionally** leaks a literal `200~`/`00~`
+into apps that never enabled 2004 — the exact bug class iTerm2 documents.
+
+**Lessons copied from iTerm2's tmux integration (so we don't relearn them):**
+- iTerm2 splits long `send-keys` into **sub-1024-byte command lines** for this
+  same dropped-line reason — our 256-byte payload cap is the same defense.
+- iTerm2 adds bracketed-paste markers **only when the app enabled DECSET 2004**
+  (terminal-tracked), never unconditionally — hence we leave markers to xterm.js.
+- iTerm2 hit a real **"paste nothing" bug from splitting a codepoint at a chunk
+  boundary** — hence the UTF-8-codepoint-safe boundary back-off.
+- References: iTerm2 tmux integration docs
+  (`https://iterm2.com/documentation-tmux-integration.html`); Paste Bracketing
+  wiki (`https://gitlab.com/gnachman/iterm2/-/wikis/Paste-Bracketing`); DeepWiki
+  paste operations (`https://deepwiki.com/gnachman/iTerm2/4.3-paste-operations-and-string-utilities`);
+  leaked-marker write-up (`https://shivankaul.com/blog/paste-bracketing-iterm2`).
+
+**Regression check:** paste a multi-KB block into a control-mode pane on **both**
+local and remote — all of it must arrive. In an app with bracketed paste on
+(`zsh`, `vim`) a paste must NOT show a literal `00~`/`200~`, and small
+keystrokes must still send as one `send-keys` call.
+
+## Connection state has ONE authoritative owner (main); sessions are background-live
+
+**Invariant:** Per-project connection state is owned by the main-process
+`ConnectionMachine` (`electron/main/providers/connectionMachine.ts`) with guarded
+transitions. It is the single source of `ConnectionStatus`, forwarded to the
+renderer via one `evt:status`. The status indicator, terminal control session,
+and Changes/Explorer/Workgraph panels are **pure derivations** of that status
+(`sessionStore` + `isConnected`/`isDisconnected` selectors).
+
+**Every live session stays fully active — there is NO warm/hot distinction.**
+`suspend()`/`resume()` (and `isSuspended()`/`LocalWatchManager.setPaused`) are
+**removed**. `SessionManager.activate()` only sets/persists `activeId`; it never
+pauses another session. A backgrounded session keeps its terminal, its watch, and
+its helper RPC fully live, so its per-session data (Changes, Workgraph) stays
+continuously current. Per-session data is **resident in memory until the session
+ends** (explicit kill via `SessionManager.close`, or remote idle aging-out — see
+the session-liveness section). Liveness is **lazy**: a project becomes live when
+first activated, not pre-connected on boot.
+
+**Per-session data are pure derivations of `(activeId, perSessionStatus,
+byProject slice)`.** `changesStore`/`beadsStore` hold one `byProject[projectId]`
+slice per live session; active-slice selectors render `byProject[activeId]`. A
+single renderer `panelDataSync` orchestrator drives load/refresh/clear off
+**per-session connection status + `projectId`-routed watch events**, never panel
+focus or `activeId` alone. A panel MUST NEVER show another project's data, even
+transiently; a cold/absent slice renders that project's own
+loading/disconnected affordance.
+
+**Do NOT** reintroduce a parallel "connection-ish" state (e.g. a renderer
+`ControlSessionStatus` enum, a provider `statusValue` consumed independently of
+the machine, or panels reacting to `activeId` alone instead of connection
+status), and do NOT reintroduce `suspend()`/`resume()` or any second
+"connection truth". Multiple connection truths that can disagree is exactly the
+bug class this replaced: disconnect not reflected, terminal not recovering after
+reconnect, and panels showing a stale project's data.
+
+**Remote `connected` means helper-RPC-ready.** For remote, `toConnected()` fires
+**after** `RemoteHelperLauncher.launch()` resolves (RPC proven), not on raw
+socket-up; socket-up maps to `connecting`. A read issued the instant a project
+reports `connected` MUST NOT fail "helper unavailable". `connecting→disconnected`
+is a **legal** edge (a clean drop mid-provision resolves to `disconnected` rather
+than stranding the machine); `connecting→failed` is the thrown-error edge. Local
+projects short-circuit to `connected` (already "ready").
+
+**Three ordering/teardown traps that already bit us, keep them fixed:**
+
+- **Wire status BEFORE connect.** `SessionManager.open()` subscribes to provider
+  status before calling `connect()`. Wiring after connect drops the first
+  `connecting → connected` transition into the void and the UI sticks on the
+  `disconnected` fallback.
+- **Disconnect = symmetric teardown.** On the `disconnected` transition, dispose
+  the project's `controlPaneRegistry` entries (`disposeProject`) AND evict the
+  IPC `tmuxControl`/`tmuxDisposers`/`termDisposers` caches (via
+  `SessionManager.onEviction`). `controlPaneRegistry.acquire()` only binds a
+  pane's output sink when it *creates* the entry, and `activeControl()` only
+  wires a manager's notifications for a *fresh* subscription. If teardown is
+  asymmetric, a reconnect re-acquires a cached pane/manager with no sink/no
+  forwarder — input reaches tmux but no live `%output` renders (blank terminal),
+  or the terminal never recovers at all.
+- **Per-session watch teardown is symmetric.** The session-owned watch (one per
+  live session, started on `connected`) MUST be torn down on the provider's
+  **status → disconnected/failed** transition AND on `onEviction`. A plain
+  `SessionManager.disconnect()` keeps the session in the map and does **not** fire
+  `onEviction`, so wiring watch-stop only to eviction leaks the watcher on a plain
+  disconnect; the renderer slice is correspondingly cleared (`clearForDisconnect`)
+  on disconnect and evicted (`evict`) when the project is removed.
+
+**Regression check:** connect a remote project, disconnect (status → red,
+logged in the diagnostics window), reconnect → the terminal must re-acquire,
+re-focus, and show live output without an app restart; panels reload. With
+projects A and B both connected and A active, mutate B (commit / file write / `br`
+mutation) → switching to B shows B's current data with no spinner and no manual
+refresh; A→B→A never shows the other project's data at any frame.
+
+## Filesystem watch: single-source "what to watch"
+
+**Invariant:** "What to watch" has exactly **one** definition:
+`src/shared/watch/policy.ts`. No layer — local mechanism, remote Go helper, or
+renderer store — may add a private watch or exclusion set.
+
+**The watch is main-owned, one per live session over the session lifecycle.**
+`SessionManager` starts exactly one watch subscription per session when it reaches
+`connected` and stops it on the status → disconnected/failed transition AND on
+eviction (keyed by `(projectId, token)` in `watchSubs`). It is **no longer**
+renderer `activeId`-driven, and the `watch:subscribe`/`watch:unsubscribe` IPC
+channels were **removed** — main subscribes via `provider.subscribeWatch`
+directly. Events carry their `projectId` on the wire (`evt:watch {projectId,
+event}`); the renderer hub reads that tag and `panelDataSync` routes by
+`(projectId, category)` to the right per-project slice. Do not reintroduce a
+renderer-driven `watch.subscribe` keyed on `activeId`.
+
+**Required configuration:**
+
+- `LocalWatchProvider` reads exclusions, signal paths, and
+  `DIRECTORY_GRANULARITY` from the `WatchSpec` derived by `deriveWatchSpec()`.
+  Do not inline regexes or path lists in the local watch implementation.
+- The **remote Go helper** (`remote-helper/watch.go`) receives a `WatchSpec`
+  over the `watch.subscribe` RPC params. It **must NOT hardcode** its own
+  `excludedDirs`. The spec is the single authoring site projected over the wire.
+- The **ingest pipeline** (`electron/main/watch/ingest.ts`) runs
+  `classifyWatchPath` as the one classification call. Do not add category logic
+  in stores or providers.
+- The **renderer dispatch hub** (`src/renderer/watch/hub.ts`) routes by
+  `WatchCategory` interest. Stores subscribe to the hub; they do not re-implement
+  path filtering.
+- **Surfacing (Changes list)** uses `isHiddenFromChanges(rel, { showAll })` from
+  the policy. `.git` and `.beads` are hidden by default — this is a **display**
+  concern, not a watch exclusion. Both remain watched so their events still drive
+  refresh signals.
+
+**After changing `remote-helper/*.go`:** the dist binaries are **not checked in**
+— they are built by `remote-helper/build.sh`, which runs automatically via the
+`predev`/`prebuild` npm hooks (so a normal `npm run dev` / `build` / `package`
+regenerates them). The script short-circuits when the source hash is unchanged,
+so only a real Go change triggers a recompile; restart the app (or re-run
+`dev`/`build`) after editing Go so the rebuilt binary is picked up. The
+provisioner re-uploads on reconnect when the hash mismatches — otherwise the
+remote runs the stale helper. (Go is therefore a required build dependency.)
+
+**Regression check:** on a remote project, run `br sync --flush-only` (writes
+`.beads/issues.jsonl`) and verify the workgraph panel auto-refreshes; also
+commit and switch branches and verify the Changes panel auto-refreshes — all
+without a manual refresh.
+
+## Working-tree watch mechanism is platform-split (native recursive vs chokidar)
+
+**Invariant:** The local **working-tree** watcher
+(`electron/main/providers/local/workingTreeWatcher.ts`,
+`createWorkingTreeWatcher`) is split by platform and MUST stay that way:
+
+- **macOS / Windows** → a single `fs.watch(root, {recursive:true})` (FSEvents /
+  ReadDirectoryChangesW): ONE handle for the whole subtree, no upfront tree walk,
+  no per-file FD. This is the path that keeps large-repo load cheap.
+- **Linux** → chokidar. Linux has no recursive inotify; `fs.watch({recursive:true})`
+  there is **emulated** by adding a watch per directory (same cost as chokidar)
+  AND cannot prune `node_modules` before adding watches (the EMFILE risk
+  `NEVER_RECURSE` exists for), and is documented experimental. chokidar's
+  `ignored` prunes the descent, so it adds FEWER inotify watches — the better
+  Linux choice.
+
+**Why this matters:** chokidar v4 dropped its FSEvents backend and recurses by
+walking the tree + opening an `fs.watch` per directory, so on a big repo the old
+`chokidar.watch(['.'])` did a full walk and held thousands of handles. Whole-tree
+*coverage* is genuinely required (untracked/new files must be seen for the Changes
+panel) — but the per-FD cost was chokidar's implementation, not the requirement.
+The single native recursive handle keeps the coverage and drops the cost.
+
+**Do NOT** "simplify" to native-recursive-everywhere (regresses Linux to the
+EMFILE/experimental path) or back to chokidar-everywhere (reintroduces the
+large-repo walk + FD pressure on macOS). Both mechanisms apply the SAME
+`gitignore + excluded-segment` predicate — the native path filters in the event
+callback (no walk to prune), chokidar via `ignored`. The dedicated
+`.git`/`.git/refs`/`.beads` `fs.watch` watchers remain the single source of
+git-state/beads signals on BOTH platforms (the working-tree watcher excludes
+those segments), so the [filesystem-watch policy](#filesystem-watch-single-source-what-to-watch)
+stays the one definition of "what to watch".
+
+**Regression check:** on macOS, open a repo with a large untracked/gitignored
+tree (e.g. tens of thousands of files under `node_modules` or a `data/` dir): the
+process FD count must stay flat after the watch starts (no per-file growth), and
+the Changes panel must still update on an edit, a new untracked file, and a
+branch switch. `local.test.ts`'s file-change / git-refs / commit / `beads.db`
+integration tests exercise the native path on macOS.
+
+## Control-mode scrollback has a single source (`TERMINAL_SCROLLBACK`)
+
+**Invariant:** Control-mode scrollback depth has **one** definition,
+`TERMINAL_SCROLLBACK` (`src/shared/tmux/scrollback.ts`, currently 5000), applied
+consistently to **all three** layers that must agree: the tmux server
+`history-limit`, the `capture-pane -S` seed depth, and the renderer xterm
+`scrollback` buffer. Changing one without the others reintroduces lost/truncated
+history on (re)attach.
+
+**Required configuration:**
+
+- The tmux global `history-limit` is set to `TERMINAL_SCROLLBACK` on the socket
+  **before the first `new-session`** (`new-session -A` creates the initial pane
+  as part of session creation, and `set-option` does not retroactively resize
+  existing panes). This is applied in **both** the local opener
+  (`electron/main/providers/local/tmuxControl.ts`) and the remote opener — the
+  remote path is a parallel implementation and must not be missed.
+  - **`set -g` does NOT start a tmux server** — it requires a running one, and on
+    a fresh socket fails with `error connecting to <socket> (No such file or
+    directory)`. The **remote** opener chains the two tmux invocations in one
+    shell command with `&&`, so a failed `set -g` short-circuits and the
+    `-CC new-session` never runs — a hard control-mode connect failure that
+    presents as the channel dropping a few ms after "open ok" with **no `%exit`**
+    (the remote command exited before tmux entered control mode). The opener must
+    therefore run `tmux -L <socket> start-server \; set -g exit-empty off \; set
+    -g history-limit N` (`\;` reaches the remote shell as a literal `;`, tmux's
+    command separator): `start-server` gives `set -g` a server to target, and
+    `exit-empty off` keeps that sessionless server alive so the `history-limit`
+    survives to the `&&`-chained `-CC new-session` (without it the empty server
+    exits between the two invocations and the first cold-start pane falls back to
+    tmux's default 2000 scrollback). The **local** opener is exempt from the
+    connect bug because it
+    uses two **separate** `spawnSync` calls (not `&&`): a failed `set` there does
+    not block the subsequent `-CC new-session`. Do not collapse the local opener
+    into a single `&&` command, and do not drop `start-server` from the remote
+    one.
+- The seed passes `capturePane(paneId, { startLine: TERMINAL_SCROLLBACK })` so it
+  captures history, not just the visible screen, and the renderer xterm is
+  constructed with `scrollback: TERMINAL_SCROLLBACK`.
+- The existing latin1→`Uint8Array` seed re-encode (the raw-byte invariant above)
+  is unchanged — seeding from deeper history pushes more high bytes through that
+  path, so the glyph regression check still applies.
+
+## Reserved control-mode windows reconcile to exactly one of each
+
+**Invariant:** The reserved control-mode windows (`persistent` keep-alive,
+`run-N` Run-panel tty) are **reconciled to exactly one of each class on every
+attach** via a pure `reconcile()` in `src/renderer/tmux/controlSession.ts`. An
+empty `list-windows` reply is an **attach-race / not-ready signal** (a live
+session always has ≥1 window) — it is never grounds to create reserved windows;
+the ensure bails **without consuming the per-project one-shot init guard** so a
+later acquire/sync retries against a populated list. Violating either reintroduces
+unbounded duplicate-window accumulation (stray terminal tabs, bloated window
+list).
+
+**Required configuration:**
+
+- Reconcile keeps the first of each reserved class by **numeric window-id
+  ascending** (stable across reconnects), `kill-window`s the extras, and **never**
+  touches real terminal windows (classified via the single `isHiddenWindow`/
+  `RUN_RE` definition).
+- The surviving Run window MUST end up named literally `run-1` (RunPanel binds
+  that exact name); reconcile renames the survivor to `run-1` (`toRename`) so a
+  reaped survivor named `run-2` does not silently disable Run.
+- Concurrent/retried `acquireControlSession(projectId)` is **single-flight** (one
+  in-flight ensure promise per project); the slot clears on settle and
+  `initialized` is set only on a non-bail success.
+
+## Control-mode tab refresh is two-tier (repaint + resize round-trip; gated re-seed)
+
+**Invariant:** The toolbar refresh button (`refreshActiveTab(hard)` in
+`ControlTerminalPanel.tsx`) has two modes, both of which:
+
+1. repaint every pane **from xterm's OWN buffer** via the **non-destructive**
+   `recover()`/`recoverTab()` (`controlPaneRegistry.ts`) — refit (`fit`) +
+   glyph-atlas rebuild (`webgl?.clearTextureAtlas()` / `term.clearTextureAtlas?.()`)
+   + `term.refresh(0, rows-1)`; and
+2. force a **real client resize round-trip** via `nudgeClientSize(host)`
+   (`controlSession.ts`) — shrink one row, then restore. This is load-bearing:
+   tmux only re-emits `%output` (and SIGWINCHes the pane apps) when the client
+   size actually CHANGES, so a same-size `pushClientSize` is a tmux no-op — which
+   is why a plain repaint rarely fixes mis-wrapped / size-desynced output. The
+   manual resize the user does (drag the window) worked for exactly this reason.
+
+**Normal click = tiers 1+2 (always non-destructive).** `recover()` itself MUST
+stay non-destructive: do NOT make it dispose the xterm, re-seed from
+`capture-pane`, or remount — a re-seed writes the captured screen as plain buffer
+lines that a live **alt-screen TUI** (Claude Code, vim, htop) redraws over,
+producing **runaway scroll**.
+
+**Shift-click = hard refresh, with a STRICTLY GATED re-seed.** `hardRecoverTab()`
+queries each pane's tmux `#{alternate_on}` (`listPanesAltScreen`, one
+`list-panes` round-trip) and re-seeds ONLY panes positively on the **normal**
+screen (`reseedPane`: clear `ESC[3J ESC[2J ESC[H` + re-write via the shared
+`seedBytesFromCapture` latin1 re-encode). Alternate-screen panes get only the
+non-destructive repaint and rely on the resize round-trip's SIGWINCH to redraw.
+The safety gate is `mayReseed(alt) === (alt === false)`: **unknown /
+query-failed / alternate ALL fall back to repaint**, never re-seed. Do NOT widen
+`reseedPane` to alt-screen panes or flip the safe default — that reintroduces the
+runaway-scroll bug the gate prevents. Both modes work on local and remote
+(`capturePane`/`resizeClient`/`command` exist on both transports).
+
+**Ordering trap (keep it fixed):** the resize round-trip's first (shrink) push
+runs **SYNCHRONOUSLY** at click time, so it targets the project active **at click
+time**; the next-frame restore in `nudgeClientSize` is **guarded on
+`activeProjectId`** so a fast project switch never resizes the wrong project. Do
+not make the synchronous shrink deferred.
+
+**Related fix:** creating a split now takes **both** visual selection and xterm
+keyboard/input focus on the new pane — `split-window … -P -F '#{pane_id}'`
+captures the new pane id as a `pendingActivePaneRef`, and the active-pane
+resolution prefers it once it lands in `layout` (previously only visual focus
+moved; input stayed on the original pane).
+
+**Regression check:** mis-wrap an alt-screen TUI's output, **click** refresh →
+the resize round-trip reflows it cleanly with NO runaway scroll, tmux session
+intact, diagnostic `trigger=manual-refresh` logged. Desync a plain **shell**
+pane, **shift-click** → it re-seeds correctly (`trigger=hard-refresh`); do the
+same with a TUI in the pane → it must NOT re-seed (no runaway scroll). Switch
+projects during a refresh → the other project is never resized. Create a split →
+typing immediately goes to the new pane.
+
+## Remote `ssh2` is encapsulated behind `RemoteTransport`
+
+**Invariant:** `ssh2` (and `@types/ssh2`) is imported by **exactly one file**,
+`Ssh2Transport` (`electron/main/providers/remote/transport.ts`). All other code —
+`RemoteProvider`, `RemoteHelperLauncher`, `RemoteTerminalManager`, the
+control-mode path — depends only on the `RemoteTransport` interface
+(`transportTypes.ts`), never on `ssh2` types or a raw client. The
+`transport.client()` leak is gone; an ESLint `no-restricted-imports` rule enforces
+the boundary. A second transport plugs into `createRemoteTransport()`
+(`transportFactory.ts`) without touching consumers.
+
+**Required configuration:**
+
+- Control/RPC channels carry raw `Uint8Array`/`Buffer` end to end (`PtyChannel`/
+  `DuplexChannel` `onData` is typed `(b: Uint8Array) => void`); the raw-byte
+  invariant above is now a typed contract, not a convention. Do not UTF-8-decode
+  in the transport.
+- `Ssh2Transport` performs **host-key verification** against the user's
+  `known_hosts` (ssh2 `hostVerifier`); a mismatch surfaces as a typed
+  `RemoteTransportError` with `phase: 'hostkey'`, not a silent accept. The
+  `hostKeyPolicy` is part of the `connect` options contract so any future
+  transport satisfies the same verification.
+- The ssh2 path **resolves `~/.ssh/config` `Host`-alias fields** (an in-repo
+  resolver, `sshConfigResolve.ts`, applied in `Ssh2Transport`) because ssh2 does
+  not read `~/.ssh/config` — a project whose `host` is an alias would otherwise
+  fail `getaddrinfo ENOTFOUND <alias>`. Only `HostName`/`Port`/`User`/
+  `IdentityFile` are resolved (spec-explicit values win, then config, then
+  default); the resolver imports only `node:fs`/`node:os`/`node:path` so it does
+  not breach the single-`ssh2`-import boundary. **known_hosts verification uses
+  the RESOLVED host** (not the alias), so the host-key token matches the real
+  host. ProxyJump/`Match`/`Include` and the broader OpenSSH config surface stay
+  deferred to the native-ssh transport — do not grow this resolver into them.
+- `RemoteProvider` constructs its transport via the factory (not
+  `new Ssh2Transport()`), and connection status remains owned solely by
+  `ConnectionMachine`.
+
+## Panel focus: visual focus and keyboard focus are separate, routed via one seam
+
+**Invariant:** "Which Dockview panel/tab is active" (visual focus, owned by
+`panel.api.setActive()`) and "which DOM element has keyboard focus" are distinct
+concerns. Keyboard focus is moved through a single registry,
+`src/renderer/workspace/panelFocus.ts` (`focusPanel`/`focusPanelForce`, with a
+**pending** target for not-yet-mounted panels, a **suppression** flag for
+programmatic layout/preset application, and a **force** variant for explicit
+restore/Ctrl+`). `PanelHost` wraps each panel in a focusable root and registers a
+handler (default focuses the wrapper only when focus is not already inside it — a
+containment guard); panels override via `usePanelFocusOverride` (terminal → active
+xterm pane via `FOCUS_TERMINAL_EVENT`; run → command input). `focusMemory.ts` is
+persistence only, not a focus mechanism.
+
+**Two focus-race classes bit us — keep them fixed:**
+
+- **Library focus-restore.** The Panels dropdown (`ui/Menu.tsx`, Radix) must keep
+  `onCloseAutoFocus={(e) => e.preventDefault()}`; otherwise Radix restores focus to
+  the trigger button on close, *after* the selected action moved focus into a
+  panel, stealing it back.
+- **Re-emitted activation.** `onDidActivePanelChange` must only move focus on a
+  **genuine** panel-id change (guarded by a `lastActivePanelId`). Dockview re-emits
+  for the *same* panel when focus churns within it, and re-running `focusPanel`
+  re-fires the terminal override against the lagging active pane.
+
+Also: `choosePreset` (Cmd/Ctrl+E/R view switch) must `focusPanelForce` the view's
+active panel after `loadLayout`, since `loadLayout` suppresses focus during the
+layout cascade and nothing else restores it.
+
+**Known open:** keyboard focus does NOT reliably follow a newly-created tmux
+**split** inside the control-mode terminal (new windows/tabs work). The Dockview
+re-emit guard did not resolve it, so the cause is elsewhere (suspect:
+`ControlTerminalPanel`'s deferred-focus / `PaneXterm` active-transition timing).
+Diagnose with a focus trace (who calls `renderer.focus()` and for which pane)
+before changing logic — do not ship another untested guess.
+
+## Known upstream noise
+
+Radix Select (`@radix-ui/react-select` 2.2.6, latest as of writing) logs
+`Warning: Each child in a list should have a unique "key" prop. Check the
+render method of Select.` for every Select rendered in the Preferences dialog.
+The cause is inside the hidden form-support `BubbleSelect` in the Radix bundle:
+it passes a literal 2-element JSX children array (`[option-or-null,
+Array.from(nativeOptionsSet)]`) without keys on either element. This is not
+fixable at our layer; our `src/renderer/ui/Select.tsx` already de-dupes and
+keys its visible options. Treat it as upstream noise until Radix patches it.
+
+## Known issue: control-mode tight-split ghost `%`
+
+Tracked as `local_repo_explorer-7ah9` (P4, won't-fix-for-now).
+
+In the control-mode terminal panel, dragging a split separator small enough
+that one pane is roughly the width of the prompt produces zsh's `%`
+missing-newline marker on the next prompt. Root cause is independent
+rounding by three layers — React flex (pixel weights), xterm.js FitAddon
+(`floor((pane_px − ~22px chrome) / cellW)`), and tmux (cells divided by
+layout ratios with its own rounding). At normal pane sizes these agree
+within ±1 cell (invisible); at tight pane sizes ±1 cell is the prompt's
+worth of width, and the wrap exposes the `%`.
+
+Every compensating push strategy explored either drifts the same way
+under `floor()`, self-loops when triggered by tmux's layout-change ack
+(tmux normalizes pane sizes slightly differently each iteration so `===`
+dedupe doesn't catch it), or fires before xterm refits and pushes stale
+`term.cols`. Per-pane `resize-pane -x N -y M` after each fit would
+side-step it but adds cascade risk + IPC chatter on every drag. The
+current state (`pushClientSize` on host RO / cold-start / font / structural
+commands, with `clientCells` summing live `term.cols` + tmux separators)
+is the best stable compromise.
+
+Mitigation: resizing the panel/window forces a clean `pushClientSize`
+through the host ResizeObserver and clears the ghost.
+

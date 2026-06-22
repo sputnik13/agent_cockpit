@@ -3,8 +3,7 @@ import {
   buildSendKeysCommands,
   capturePane,
   listPanesAltScreen,
-  MAX_SEND_KEYS_LITERAL_BYTES,
-  sendKeysLiteral,
+  MAX_SEND_KEYS_CHUNK_BYTES,
   TERMINAL_SCROLLBACK,
 } from './index';
 
@@ -67,49 +66,46 @@ describe('format-subscription (refresh-client -B) builders', () => {
   });
 });
 
-describe('buildSendKeysCommands (encoding-aware input chunking)', () => {
+describe('buildSendKeysCommands (all -H; never splits escape sequences)', () => {
   it('returns [] for empty input', () => {
     expect(buildSendKeysCommands('%1', '')).toEqual([]);
     expect(buildSendKeysCommands('%1', new Uint8Array(0))).toEqual([]);
   });
 
-  it('sends a printable-ASCII run as one quoted -l literal', () => {
-    expect(buildSendKeysCommands('%1', 'echo hi')).toEqual(["send-keys -t %1 -l 'echo hi'"]);
+  it('sends a sub-chunk input as a single -H command', () => {
+    expect(buildSendKeysCommands('%1', 'echo hi')).toEqual(['send-keys -t %1 -H 65 63 68 6f 20 68 69']);
   });
 
-  it('quotes literals so spaces/;/$ and a leading - are not interpreted', () => {
-    expect(sendKeysLiteral('%1', '-rf; $x')).toBe("send-keys -t %1 -l '-rf; $x'");
-  });
-
-  it('sends control bytes via -H hex', () => {
+  it('sends control bytes via -H', () => {
     expect(buildSendKeysCommands('%1', '\r')).toEqual(['send-keys -t %1 -H 0d']);
   });
 
-  it('splits a mixed stream into ordered runs (literal / hex / literal)', () => {
-    // "ab\ncd": printable "ab", control 0x0a, printable "cd"
-    expect(buildSendKeysCommands('%2', 'ab\ncd')).toEqual([
-      "send-keys -t %2 -l 'ab'",
-      'send-keys -t %2 -H 0a',
-      "send-keys -t %2 -l 'cd'",
-    ]);
+  it('keeps an escape sequence in ONE command (ESC not split from the rest)', () => {
+    // SGR mouse report \x1b[<35;50;10M — must be a single send-keys, or it breaks
+    // over SSH (the regression this fixes).
+    const cmds = buildSendKeysCommands('%2', '\x1b[<35;50;10M');
+    expect(cmds).toHaveLength(1);
+    expect(cmds[0]).toBe('send-keys -t %2 -H 1b 5b 3c 33 35 3b 35 30 3b 31 30 4d');
   });
 
-  it('routes multibyte UTF-8 (>=0x80) through the -H hex path, never -l', () => {
-    // 'é' = c3 a9 — both bytes are non-printable, so one hex command.
+  it('sends multibyte UTF-8 (>=0x80) via -H', () => {
+    // 'é' = c3 a9
     expect(buildSendKeysCommands('%1', 'é')).toEqual(['send-keys -t %1 -H c3 a9']);
   });
 
-  it('chunks a long printable run into <=MAX_SEND_KEYS_LITERAL_BYTES literals', () => {
-    const n = MAX_SEND_KEYS_LITERAL_BYTES * 2 + 10;
+  it('chunks a large input by size into ordered -H commands whose bytes concatenate', () => {
+    const n = MAX_SEND_KEYS_CHUNK_BYTES * 2 + 10;
     const cmds = buildSendKeysCommands('%1', 'a'.repeat(n));
     expect(cmds).toHaveLength(3);
-    expect(cmds.every((c) => c.startsWith("send-keys -t %1 -l '"))).toBe(true);
-    // Reconstruct the literal payloads → original text.
-    const joined = cmds.map((c) => c.slice("send-keys -t %1 -l '".length, -1)).join('');
-    expect(joined).toBe('a'.repeat(n));
+    expect(cmds.every((c) => c.startsWith('send-keys -t %1 -H '))).toBe(true);
+    const bytes = cmds
+      .map((c) => c.slice('send-keys -t %1 -H '.length).split(' '))
+      .flat()
+      .map((h) => parseInt(h, 16));
+    expect(bytes).toEqual(Array.from({ length: n }, () => 0x61));
   });
 
-  it('accepts a pre-built hex string and decodes it (round-trips with the renderer path)', () => {
-    expect(buildSendKeysCommands('%1', '65 63 68 6f')).toEqual(["send-keys -t %1 -l 'echo'"]);
+  it('accepts a pre-built hex string and re-emits it (renderer path round-trip)', () => {
+    expect(buildSendKeysCommands('%1', '65 63 68 6f')).toEqual(['send-keys -t %1 -H 65 63 68 6f']);
   });
 });

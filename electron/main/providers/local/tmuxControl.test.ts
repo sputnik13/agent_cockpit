@@ -141,7 +141,7 @@ describe('LocalTmuxControlManager (real tmux -CC)', () => {
     expect(after.layout.root.type).toBe('split');
   });
 
-  it('round-trips input via send-keys (literal + hex) and seeds scrollback', async () => {
+  it('round-trips input via send-keys -H and seeds scrollback', async () => {
     active = spawnManager();
     if (!active) return;
     await waitFor(active.mgr, (n) => n.type === 'window-add');

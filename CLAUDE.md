@@ -169,38 +169,41 @@ TUI.
 control-mode terminal and run a TUI that uses powerline glyphs or box drawing
 (`vim`, `htop`, `claude`). Garbled glyphs = the invariant has been violated.
 
-## Control-mode paste input must be chunked + encoding-classified (`send-keys` line limit)
+## Control-mode input is chunked by SIZE only, all `send-keys -H` (never split escape sequences)
 
 **Invariant:** A `send-keys` command is written to the tmux `-CC` stdin as a
 **single command line** (`tmuxControl.ts::command` → `proc.write(...\n)`), and
 tmux/PTY **silently drop an over-long control-command line** (PTY canonical
 `MAX_CANON` ≈ 4096; tmux's own command-line buffer is a second ceiling). So a
 large paste sent as one `send-keys` vanishes with no error while small input
-works — the classic "big paste does nothing" symptom. The hex form
-(`send-keys -H`) is **~3 chars per input byte** (two hex digits + a space), so it
-overflows at only ~1.3 KB of pasted text.
+works — the classic "big paste does nothing" symptom.
 
-**Required:** the chunking + encoding lives in the **main-process manager's
-`input()`** (`LocalTmuxControlManager` / `RemoteTmuxControlManager`), the single
-seam for keystrokes, paste, AND the mouse-wheel `Uint8Array` seq. It calls
-`buildSendKeysCommands(paneId, input)` (`src/shared/tmux/commands.ts`), which:
-- classifies bytes into runs — **printable ASCII (0x20–0x7E) → `send-keys -l`
-  literal** (~1 char/byte, `shellQuote`d so spaces/`;`/`$`/leading-`-` are inert),
-  **everything else (C0 controls, 0x7F, multibyte UTF-8 ≥ 0x80) → `send-keys -H`
-  raw hex** (preserves the raw-byte invariant above — multibyte glyphs are NEVER
-  sent as `-l`);
-- chunks each run so no command line exceeds ~1 KB (`MAX_SEND_KEYS_LITERAL_BYTES
-  = 512` for literals; hex runs use `chunkBytesForSendKeys`,
-  `MAX_SEND_KEYS_CHUNK_BYTES = 256`, never splitting a multi-byte UTF-8 codepoint
-  across a chunk);
+**Required:** the chunking lives in the **main-process manager's `input()`**
+(`LocalTmuxControlManager` / `RemoteTmuxControlManager`), the single seam for
+keystrokes, paste, AND the mouse-wheel `Uint8Array` seq. It calls
+`buildSendKeysCommands(paneId, input)` (`src/shared/tmux/commands.ts`), which
+sends **every byte via `send-keys -H` (raw hex)**, chunked **only for size** via
+`chunkBytesForSendKeys` (`MAX_SEND_KEYS_CHUNK_BYTES = 256` → command line < ~800
+chars, never splitting a multi-byte UTF-8 codepoint across a chunk). A mouse
+report / keystroke / small paste fits in one chunk → one atomic `send-keys -H`.
+`input()` issues the chunks **in order, awaited sequentially**. The renderer
+(`tmuxStore.sendInput`) stays dumb: it hex-encodes once (`toHex(data)`) and makes
+a single `input()` IPC call — main does all splitting. One main-side seam covers
+**both** transports; do not move chunking back into the renderer.
 
-`input()` issues the commands **in order, awaited sequentially**. The renderer
-(`tmuxStore.sendInput`) stays dumb: it hex-encodes the bytes once
-(`toHex(data)`) and makes a single `input()` IPC call — main does all
-splitting. This one main-side seam covers **both** transports; do not move
-chunking back into the renderer or add a per-transport paste path. (`send -l` for
-printable runs is verified end-to-end against real tmux by
-`local/tmuxControl.test.ts`'s input round-trip.)
+**CRITICAL — do NOT split input by byte class (e.g. printable via `send-keys -l`,
+controls via `-H`).** That puts the ESC byte (control) and the rest of an escape
+sequence (printable) in **separate** `send-keys` commands. They arrive
+back-to-back locally (fine) but over **SSH the inter-command latency exceeds the
+receiving app's escape-sequence timeout**, so the app reads a lone ESC then
+literal text — corrupting mouse reports (`\x1b[<…M` typed as garbage), arrow/
+function keys, and bracketed-paste markers (`\x1b[200~`/`201~` separated from
+content, so a paste registers "one line at a time"). This was a real remote-only
+regression (`local_repo_explorer-gtls`); all-`-H` keeps each input event's bytes
+contiguous. A large paste still chunks by size, but its bracketed markers stay at
+the ends and the receiving app buffers `200~`..`201~` across the chunks. If
+genuinely-large *atomic* paste ever matters, use tmux `paste-buffer`, never a
+per-byte-class split.
 
 **Do NOT add bracketed-paste markers (`ESC[200~`/`201~`) ourselves.** xterm.js's
 own paste handler already wraps pasted content **conditionally** on the pane

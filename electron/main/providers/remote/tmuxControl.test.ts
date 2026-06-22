@@ -162,20 +162,20 @@ describe('RemoteTmuxControlManager (fake channel, no live SSH)', () => {
     expect(activity).toBe(2);
   });
 
-  it('sends printable input as a literal send-keys -l over the channel', async () => {
+  it('sends input as raw hex send-keys -H over the channel', async () => {
     const ch = new FakeChannel();
     const mgr = new RemoteTmuxControlManager(async () => ch);
     await mgr.open();
-    await mgr.input('%2', 'hi');
-    expect(ch.written.at(-1)).toContain("send-keys -t %2 -l 'hi'");
+    await mgr.input('%2', 'hi'); // 'hi' -> 68 69
+    expect(ch.written.at(-1)).toContain('send-keys -t %2 -H 68 69');
   });
 
-  it('sends control bytes as hex send-keys -H over the channel', async () => {
+  it('keeps an escape sequence in one -H command (not split at ESC)', async () => {
     const ch = new FakeChannel();
     const mgr = new RemoteTmuxControlManager(async () => ch);
     await mgr.open();
-    await mgr.input('%2', '\r'); // CR -> 0d, non-printable -> hex path
-    expect(ch.written.at(-1)).toContain('send-keys -t %2 -H 0d');
+    await mgr.input('%2', '\x1b[A'); // arrow up: 1b 5b 41 — must be one command
+    expect(ch.written.at(-1)).toContain('send-keys -t %2 -H 1b 5b 41');
   });
 
   it('structural mutation wrappers reject on a %error reply (non-tolerant)', async () => {

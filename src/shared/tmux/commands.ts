@@ -105,26 +105,6 @@ export function sendKeysHex(paneId: string, hexOrInput: string | Uint8Array): st
   return `send-keys -t ${paneId} -H ${hex}`;
 }
 
-/**
- * Max printable-ASCII bytes per `send-keys -l` (literal) command. The literal is
- * ~1 char/byte (vs. ~3 for `-H` hex), so the command line stays well under
- * tmux's ~1KB control-command limit even with quote expansion. iTerm2 caps its
- * literal `send -l` runs at ~1000 bytes for the same reason; 512 is conservative.
- */
-export const MAX_SEND_KEYS_LITERAL_BYTES = 512;
-
-/** True for a printable ASCII byte (`0x20`-`0x7E`) — safe to send via `-l`. */
-function isPrintableAscii(b: number): boolean {
-  return b >= 0x20 && b <= 0x7e;
-}
-
-/** One `send-keys -l` (literal) command for a printable-ASCII run. tmux dequotes
- *  the single-quoted arg, so a run containing spaces / `;` / `$` (or a leading
- *  `-`) is sent verbatim, not interpreted as command syntax or flags. */
-export function sendKeysLiteral(paneId: string, text: string): string {
-  return `send-keys -t ${paneId} -l ${shellQuote(text)}`;
-}
-
 /** Normalize input to raw bytes: a pre-built hex string is decoded, a plain
  *  string is UTF-8 encoded, a Uint8Array is used as-is. */
 function toInputBytes(input: string | Uint8Array): Uint8Array {
@@ -132,46 +112,26 @@ function toInputBytes(input: string | Uint8Array): Uint8Array {
   return isHex(input) ? fromHex(input) : new TextEncoder().encode(input);
 }
 
-/** Map a printable-ASCII byte run (0x20-0x7E) 1:1 to a JS string. */
-function asciiRunToString(bytes: Uint8Array): string {
-  let s = '';
-  for (let i = 0; i < bytes.length; i += 1) s += String.fromCharCode(bytes[i]!);
-  return s;
-}
-
 /**
- * Build the ordered `send-keys` commands for arbitrary pane input, classifying
- * bytes into runs:
- * - **printable ASCII** (0x20-0x7E) → `send-keys -l` literal (~1 char/byte);
- * - **everything else** (C0 controls, 0x7F, and multibyte UTF-8 ≥ 0x80) →
- *   `send-keys -H` raw hex, preserving the byte pipeline exactly.
+ * Build the ordered `send-keys` commands for arbitrary pane input. Sends every
+ * byte via `send-keys -H` (raw hex), chunked only for size so no command line
+ * exceeds tmux's control-command limit (an over-long single `send-keys` is
+ * silently dropped — the large-paste bug). Returns `[]` for empty input.
  *
- * Each run is chunked so no command line exceeds tmux's ~1KB control-command
- * limit (an over-long single `send-keys` is silently dropped — the large-paste
- * bug); hex runs use the UTF-8-codepoint-safe {@link chunkBytesForSendKeys}.
- * Returns `[]` for empty input. Mirrors iTerm2's encoding-classified chunking.
+ * CRITICAL — do NOT split by byte class (e.g. printable via `-l`, controls via
+ * `-H`): that separates the ESC byte from the rest of an escape sequence into
+ * different commands. Sent as two `send-keys` they arrive back-to-back locally
+ * but over SSH the inter-command latency exceeds the receiving app's
+ * escape-sequence timeout, so mouse reports / arrow keys / bracketed-paste
+ * markers are misread as literal text (remote-only regression). All-`-H` keeps
+ * each input event's bytes contiguous: a mouse report / small paste is one
+ * atomic command, and a large paste's bracketed markers stay at the ends while
+ * the receiving app buffers `200~`..`201~` across the size chunks.
  */
 export function buildSendKeysCommands(paneId: string, input: string | Uint8Array): string[] {
-  const bytes = toInputBytes(input);
-  const cmds: string[] = [];
-  let i = 0;
-  while (i < bytes.length) {
-    const printable = isPrintableAscii(bytes[i]!);
-    let j = i;
-    while (j < bytes.length && isPrintableAscii(bytes[j]!) === printable) j += 1;
-    const run = bytes.subarray(i, j);
-    if (printable) {
-      for (let k = 0; k < run.length; k += MAX_SEND_KEYS_LITERAL_BYTES) {
-        cmds.push(sendKeysLiteral(paneId, asciiRunToString(run.subarray(k, k + MAX_SEND_KEYS_LITERAL_BYTES))));
-      }
-    } else {
-      for (const chunk of chunkBytesForSendKeys(run, MAX_SEND_KEYS_CHUNK_BYTES)) {
-        cmds.push(sendKeysHex(paneId, chunk));
-      }
-    }
-    i = j;
-  }
-  return cmds;
+  return chunkBytesForSendKeys(toInputBytes(input), MAX_SEND_KEYS_CHUNK_BYTES).map((chunk) =>
+    sendKeysHex(paneId, chunk),
+  );
 }
 
 /** `capture-pane -peJ` history seed for a pane (optionally from `-S -<n>`). */

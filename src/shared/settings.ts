@@ -128,6 +128,14 @@ export interface AppSettings {
    * Default 2.
    */
   workgraphColumnsSoftCap: number;
+  /**
+   * Soft-wrap long lines in the Content panel's code views (diff + raw) instead
+   * of scrolling them horizontally. Off by default (horizontal scroll). Toggled
+   * from the control at the top of the Content panel; persisted so the choice
+   * survives file switches and restarts. Line-number gutters stay aligned in
+   * both modes.
+   */
+  wrapLines: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -146,6 +154,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   tmuxPauseMode: false,
   tmuxFormatSubscriptions: false,
   workgraphColumnsSoftCap: 2,
+  wrapLines: false,
 };
 
 /** Upper sanity bound for the idle timeout (minutes) — one day. */
@@ -228,6 +237,7 @@ export function normalizeSettings(input: unknown): AppSettings {
   const deterministicSessionNames = o.deterministicSessionNames === true;
   const tmuxPauseMode = o.tmuxPauseMode === true;
   const tmuxFormatSubscriptions = o.tmuxFormatSubscriptions === true;
+  const wrapLines = o.wrapLines === true;
   // Idle timeout: 0 = disabled; reject negatives/non-numbers -> default; clamp
   // to an upper sanity bound. Mirrors the fontSize precedent (validate then
   // fall back to the default on invalid input).
@@ -268,5 +278,6 @@ export function normalizeSettings(input: unknown): AppSettings {
     tmuxPauseMode,
     tmuxFormatSubscriptions,
     workgraphColumnsSoftCap,
+    wrapLines,
   };
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Panel, PanelHeader, PanelBody, EmptyState, Spinner } from '../ui';
 import { agentCockpit, useProjectsStore } from '../providerClient';
+import { useSettingsStore } from '@renderer/settings/settingsStore';
 import { FindBar } from './FindBar';
 import { useFindInContent } from './findInContent';
 import { parsePatch } from './parsePatch';
@@ -94,6 +95,10 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   const contentRef = useRef<HTMLDivElement>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
+  // Soft-wrap toggle (persisted, global) — applies to the code views (diff/raw).
+  const wrapLines = useSettingsStore((s) => s.settings.wrapLines);
+  const setSettings = useSettingsStore((s) => s.set);
+  const wrappable = mode === 'diff' || mode === 'raw';
   const findable = mode !== 'image';
   const revision = `${mode}|${path}|${diff.kind}|${source.kind}`;
   const find = useFindInContent(contentRef, findOpen && findable ? findQuery : '', revision);
@@ -120,7 +125,34 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     <Panel>
       <PanelHeader
         title={path}
-        actions={<ModeSwitcher available={available} active={mode} onChange={setMode} />}
+        actions={
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {wrappable && (
+              <button
+                type="button"
+                aria-pressed={wrapLines}
+                title={
+                  wrapLines
+                    ? 'Wrapping long lines — click to scroll instead'
+                    : 'Scrolling long lines — click to wrap'
+                }
+                onClick={() => void setSettings({ wrapLines: !wrapLines })}
+                style={{
+                  fontSize: 12,
+                  padding: '2px 8px',
+                  borderRadius: 4,
+                  border: '1px solid var(--border)',
+                  background: wrapLines ? 'var(--accent)' : 'var(--bg-panel)',
+                  color: wrapLines ? 'white' : 'var(--fg)',
+                  cursor: 'pointer',
+                }}
+              >
+                Wrap
+              </button>
+            )}
+            <ModeSwitcher available={available} active={mode} onChange={setMode} />
+          </div>
+        }
       />
       <PanelBody>
         <div ref={panelRef} className="relative h-full">
@@ -148,6 +180,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                   filePath={path}
                   worktreePath={worktreePath}
                   baseline={baseline}
+                  wrap={wrapLines}
                 />
               ))}
 
@@ -169,6 +202,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
               <RawFile
                 worktreePath={worktreePath}
                 filePath={path}
+                wrap={wrapLines}
                 {...(baseline !== undefined ? { gitRef: baseline } : {})}
               />
             )}

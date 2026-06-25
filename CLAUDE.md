@@ -633,6 +633,44 @@ re-emit guard did not resolve it, so the cause is elsewhere (suspect:
 Diagnose with a focus trace (who calls `renderer.focus()` and for which pane)
 before changing logic — do not ship another untested guess.
 
+## Content-panel code views: line-number gutters stay aligned; wrap is a toggle
+
+**Invariant:** In the Content panel's code views — the diff (`DiffView.tsx`) and
+raw file (`RawFile.tsx`) — each line is a flex row of fixed-width line-number
+gutter(s) + the code. The gutters MUST keep a straight vertical column
+regardless of code length, in BOTH the no-wrap (scroll) and wrap modes.
+
+**Why this is fragile:** the row is `display:flex` and the code is pre-formatted
+(`white-space: pre`/`pre-wrap`), so its min-content width is the whole line. With
+the gutters at default `flex-shrink:1`, a long line's large min-content makes flex
+distribute negative free space by **shrinking the gutters** (the code can't shrink
+below its min-content) — so long-line rows got a narrower gutter than short-line
+rows and the numbers stopped lining up. The fix is two parts, keep both:
+
+- **Gutters are `flexShrink:0`** (DiffView's two inline gutter spans;
+  `LineNoteGutter` already uses `shrink-0`) so they never get squeezed.
+- **No-wrap rows set `minWidth: 'max-content'`** so the row sizes to its content
+  (extending the row + its add/del background) and the outer `overflow:auto`
+  container scrolls horizontally — instead of the row staying viewport-width and
+  forcing the shrink.
+
+**Wrap mode** is a persisted global toggle (`AppSettings.wrapLines`, default off =
+scroll) flipped by the `Wrap` button in the Content `PanelHeader` actions (shown
+only for the `diff`/`raw` modes) and threaded as the `wrap` prop into both views.
+When on: the row uses `white-space: pre-wrap` and DROPS `minWidth:max-content`, and
+the code span gets `flex:1 1 auto; minWidth:0; overflowWrap:anywhere` so it wraps
+within the panel (breaking long unbroken tokens). Gutters stay `flexShrink:0` and
+keep the **default `align-items: stretch`** so the gutter (and its right border)
+spans the full wrapped-row height while the number renders at the **top** (first
+visual row) — do NOT switch to `align-items: flex-start` (that shrinks the gutter
+to one line, leaving a short border on wrapped rows).
+
+**Regression check:** open a diff/raw file whose hunk mixes short lines with a line
+that overflows the panel. With Wrap off, line numbers form one column and the long
+line scrolls horizontally. Toggle Wrap on: the long line soft-wraps within the
+panel, line numbers stay in the same column anchored at each line's first visual
+row, and the choice persists across files and restarts.
+
 ## Known upstream noise
 
 Radix Select (`@radix-ui/react-select` 2.2.6, latest as of writing) logs

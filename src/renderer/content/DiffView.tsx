@@ -17,6 +17,8 @@ interface DiffViewProps {
   filePath?: string;
   worktreePath?: string;
   baseline?: string;
+  /** Soft-wrap long lines instead of scrolling horizontally. */
+  wrap?: boolean;
 }
 
 /** Tokenize both sides of a diff for a supported language. Returns null on any failure. */
@@ -62,6 +64,7 @@ export function DiffView({
   onHunkClick,
   filePath,
   baseline,
+  wrap = false,
 }: DiffViewProps): JSX.Element {
   const parsed = useMemo(() => parsePatch(patch), [patch]);
   const theme = useSettingsStore((s) => s.settings.theme);
@@ -164,10 +167,28 @@ export function DiffView({
 
               return (
                 <Fragment key={j}>
-                  <div style={{ display: 'flex', background: color, whiteSpace: 'pre' }}>
+                  {/* No-wrap: `minWidth: max-content` makes the row size to its
+                      content so a long line extends the row (and its background)
+                      and the outer overflow:auto container scrolls horizontally;
+                      combined with `flexShrink: 0` on the gutters this stops flex
+                      from squeezing the fixed-width line-number columns on
+                      overflowing rows (which misaligned them against short rows).
+                      Wrap: the row stays at container width (no max-content), the
+                      code span wraps (see below), and the gutters — still
+                      flexShrink:0 and top-aligned — keep the number at the first
+                      visual row of the wrapped line. */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      background: color,
+                      whiteSpace: wrap ? 'pre-wrap' : 'pre',
+                      ...(wrap ? {} : { minWidth: 'max-content' }),
+                    }}
+                  >
                     <span
                       style={{
                         width: 50,
+                        flexShrink: 0,
                         textAlign: 'right',
                         paddingRight: 8,
                         color: 'var(--fg-dim)',
@@ -183,6 +204,7 @@ export function DiffView({
                       title={commentable ? `Add a note on line ${newLine}` : undefined}
                       style={{
                         width: 50,
+                        flexShrink: 0,
                         textAlign: 'right',
                         paddingRight: 8,
                         color: 'var(--fg-dim)',
@@ -216,7 +238,17 @@ export function DiffView({
                         </span>
                       )}
                     </span>
-                    <span style={{ paddingLeft: 8 }}>
+                    <span
+                      style={{
+                        paddingLeft: 8,
+                        // When wrapping, the code must be able to shrink below its
+                        // content width (minWidth:0) and break long unbroken tokens
+                        // (overflowWrap:anywhere) so it wraps within the panel.
+                        ...(wrap
+                          ? { flex: '1 1 auto', minWidth: 0, overflowWrap: 'anywhere' as const }
+                          : {}),
+                      }}
+                    >
                       {prefix}
                       {tokenLine ? <CodeLineTokens line={tokenLine} /> : ln.text}
                     </span>

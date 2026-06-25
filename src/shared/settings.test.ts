@@ -52,6 +52,17 @@ describe('normalizeSettings — tmuxFormatSubscriptions', () => {
   });
 });
 
+describe('normalizeSettings — wrapLines', () => {
+  it('defaults to false (horizontal scroll)', () => {
+    expect(normalizeSettings({}).wrapLines).toBe(false);
+    expect(DEFAULT_SETTINGS.wrapLines).toBe(false);
+  });
+  it('is true only for an exact boolean true', () => {
+    expect(normalizeSettings({ wrapLines: true }).wrapLines).toBe(true);
+    expect(normalizeSettings({ wrapLines: 'on' as unknown as boolean }).wrapLines).toBe(false);
+  });
+});
+
 describe('normalizeSettings — sessionIdleTimeoutMin bounds', () => {
   it('defaults to 20 when absent', () => {
     expect(normalizeSettings({}).sessionIdleTimeoutMin).toBe(20);

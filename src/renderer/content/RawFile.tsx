@@ -12,9 +12,11 @@ interface RawFileProps {
   /** Git ref to read the file at instead of the working tree. `ref` is a
    *  reserved React prop name, so this is exposed as `gitRef`. */
   gitRef?: string;
+  /** Soft-wrap long lines instead of scrolling horizontally. */
+  wrap?: boolean;
 }
 
-export function RawFile({ worktreePath, filePath, gitRef }: RawFileProps): JSX.Element {
+export function RawFile({ worktreePath, filePath, gitRef, wrap = false }: RawFileProps): JSX.Element {
   const [state, setState] = useState<
     | { kind: 'loading' }
     | { kind: 'text'; content: string }
@@ -57,7 +59,7 @@ export function RawFile({ worktreePath, filePath, gitRef }: RawFileProps): JSX.E
     case 'missing':
       return <div style={{ padding: 16, color: 'var(--fg-dim)' }}>File not found at ref.</div>;
     case 'text':
-      return <RawText content={state.content} filePath={filePath} />;
+      return <RawText content={state.content} filePath={filePath} wrap={wrap} />;
   }
 }
 
@@ -66,7 +68,15 @@ export function RawFile({ worktreePath, filePath, gitRef }: RawFileProps): JSX.E
  *  language, falling back to plain text per line otherwise. Each line is a note
  *  anchor: the gutter adds a note, and existing notes render inline beneath the
  *  line as a {@link LineNoteThread}. */
-function RawText({ content, filePath }: { content: string; filePath: string }): JSX.Element {
+function RawText({
+  content,
+  filePath,
+  wrap,
+}: {
+  content: string;
+  filePath: string;
+  wrap: boolean;
+}): JSX.Element {
   const theme = useSettingsStore((s) => s.settings.theme);
   const lang = resolveLanguage(filePath);
   const hl = useHighlightedTokens(content, lang, theme);
@@ -108,9 +118,26 @@ function RawText({ content, filePath }: { content: string; filePath: string }): 
         const open = composing === lineNo;
         return (
           <div key={i}>
-            <div style={{ display: 'flex', whiteSpace: 'pre' }}>
+            {/* No-wrap: minWidth:max-content extends the row so long lines scroll
+                in the outer container while the shrink-0 gutter stays aligned.
+                Wrap: pre-wrap + the code span breaking long tokens (minWidth:0,
+                overflowWrap:anywhere) so lines wrap within the panel; the gutter
+                stays aligned with the first visual row. */}
+            <div
+              style={{
+                display: 'flex',
+                whiteSpace: wrap ? 'pre-wrap' : 'pre',
+                ...(wrap ? {} : { minWidth: 'max-content' }),
+              }}
+            >
               <LineNoteGutter line={lineNo} hasNotes={lineNotes.length > 0} onAdd={setComposing} />
-              <span style={{ flex: '1 1 auto', paddingLeft: 8 }}>
+              <span
+                style={{
+                  flex: '1 1 auto',
+                  paddingLeft: 8,
+                  ...(wrap ? { minWidth: 0, overflowWrap: 'anywhere' as const } : {}),
+                }}
+              >
                 {tokenLines?.[i] ? <CodeLineTokens line={tokenLines[i]} /> : text}
               </span>
             </div>

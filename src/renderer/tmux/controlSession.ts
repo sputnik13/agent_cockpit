@@ -179,6 +179,28 @@ export async function createReservedWindow(name: string): Promise<void> {
 }
 
 /**
+ * Create a VISIBLE terminal window (a real tab) and give it a stable default
+ * title: the basename of its creation-time working directory. The new window is
+ * selected by tmux (no `-d`). The name is set via `rename-window … '#{b:pane_
+ * current_path}'`, whose format expands to the cwd basename at that instant and
+ * is stored as a static literal — and because `automatic-rename` is off globally
+ * (TMUX_SERVER_OPTIONS), it never drifts afterward. The user can override it by
+ * double-clicking the tab (rename-window with their text). Transport-agnostic:
+ * tmux computes the basename, so no project-path plumbing is needed and remote
+ * behaves identically. Returns the new window id (or null on failure).
+ *
+ * The single creation seam for real terminal tabs — used by `ensureWindows`
+ * (first tab) and every renderer new-window affordance (+, ⌘T, last-tab respawn)
+ * so the naming rule lives in exactly one place.
+ */
+export async function createTerminalWindow(): Promise<string | null> {
+  const reply = await store().command('new-window -P -F "#{window_id}"');
+  const id = reply.lines[0]?.trim() ?? null;
+  if (id) await store().command(`rename-window -t ${id} '#{b:pane_current_path}'`);
+  return id;
+}
+
+/**
  * Re-read all windows (ids, names, layouts) for `projectId` and fold them into
  * its store slice as synthetic notifications. Needed because re-attaching to an
  * already-open control client emits nothing — this repopulates the slice from
@@ -233,7 +255,7 @@ export async function ensureWindows(projectId: string): Promise<{ bailed: boolea
     for (const id of plan.toKill) await store().command(`kill-window -t ${id}`);
     for (const r of plan.toRename) await store().command(`rename-window -t ${r.id} ${r.to}`);
     for (const name of plan.toCreate) await createReservedWindow(name);
-    if (plan.createFirstTerminal) await store().command('new-window'); // first terminal tab
+    if (plan.createFirstTerminal) await createTerminalWindow(); // first terminal tab (dir-named)
     if (plan.toKill.length > 0 || plan.toCreate.length > 0 || plan.toRename.length > 0) {
       console.info(
         `[control-session] reap pass for ${projectId}: killed ${plan.toKill.length} ` +

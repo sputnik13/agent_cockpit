@@ -461,6 +461,52 @@ list).
   in-flight ensure promise per project); the slot clears on settle and
   `initialized` is set only on a non-bail success.
 
+## Control-mode window titles are stable & cockpit-owned (`automatic-rename off`)
+
+**Invariant:** A terminal tab's title is the **tmux window name**, and the cockpit
+is the sole author of that name. tmux's default `automatic-rename on` makes tmux
+re-derive every window's name from its active pane's foreground command on a
+server refresh — and a `new-window` triggers a refresh — so it emits
+`%window-renamed` for *idle* windows too. That produced two bugs: a tab's title
+drifted to the **last command/cwd**, and **opening a new window relabeled the
+existing ones**. `automatic-rename` is therefore pinned **off** at the single
+option source `TMUX_SERVER_OPTIONS` (`src/shared/tmux/terminalConfig.ts`),
+consumed by **both** the local argv opener (`tmuxServerOptionArgs`) and the remote
+shell opener (`tmuxServerOptionShell`) — so a window name only ever changes when
+the cockpit (or the user) explicitly `rename-window`s.
+
+**Required:**
+- **One creation seam:** every real terminal tab is created by
+  `createTerminalWindow()` (`src/renderer/tmux/controlSession.ts`) — used by
+  `ensureWindows` (first tab) and all three renderer affordances (the `+` button,
+  ⌘T, and the last-tab-closed respawn). It does `new-window -P -F "#{window_id}"`
+  then `rename-window -t <id> '#{b:pane_current_path}'`: tmux **format-expands**
+  the rename arg to the creation-time cwd **basename** and stores it as a static
+  literal (frozen, since automatic-rename is off). This is transport-agnostic —
+  tmux computes the basename, so no project-path plumbing is needed and remote
+  behaves identically. Do **not** revert any site to a bare `new-window` (it would
+  land unnamed → index-only label) or add `set-window-option automatic-rename`
+  back on per-window (the global off already covers it; reserved windows keep
+  their explicit off only because they predate the global and it's harmless).
+- **Label source:** the tab label in `ControlTerminalPanel.tsx` is
+  `name && name !== id ? name : String(i + 1)` — the tmux window name, index
+  fallback. Do **not** reintroduce `displayName` (the live SCREEN-title scrape) as
+  the label; it is **hover-only** now (the tab tooltip), which is what keeps titles
+  from drifting per command. The SCREEN-title **stripping** in
+  `extractScreenTitle` stays (it prevents garbage `\ek…\e\` glyphs); only its
+  promotion-to-label was removed.
+- **User rename:** double-clicking a tab opens an inline `<input>`; Enter/blur
+  commits via `renameWindow(id, text)`, Escape cancels. The user text is escaped
+  `#` → `##` before the rename because tmux format-expands the arg (a literal `#`
+  must not be read as a directive). The committed name persists until the user
+  renames again or the window closes (automatic-rename off guarantees it).
+
+**Regression check:** open two+ terminal tabs and run different commands in each —
+no tab's title changes when a command runs, and creating a new tab does not
+relabel the others. New tabs default to the project directory's basename.
+Double-click a tab, type a name, Enter → it persists across command runs and tab
+switches. `terminalConfig.test.ts` pins `automatic-rename off` in both openers.
+
 ## Control-mode tab refresh is two-tier (repaint + resize round-trip; gated re-seed)
 
 **Invariant:** The toolbar refresh button (`refreshActiveTab(hard)` in

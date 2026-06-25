@@ -32,6 +32,15 @@ export const TMUX_SERVER_OPTIONS: readonly TmuxServerOption[] = [
   { name: 'exit-empty', value: 'off' },
   // Scrollback depth — single source with the capture-pane seed + renderer buffer.
   { name: 'history-limit', value: String(TERMINAL_SCROLLBACK) },
+  // Keep window names STABLE: with automatic-rename on (tmux default), tmux
+  // re-derives every window's name from its active pane's foreground command on
+  // a server refresh — which a `new-window` triggers — and emits %window-renamed,
+  // so opening a new window relabels existing idle windows and a tab's title
+  // drifts to the last command. Off means a window's name only changes when we
+  // (or the user) explicitly `rename-window`, so the cockpit owns titles: a
+  // creation-time directory-basename default, overridable by double-click. Valid
+  // on every tmux the app targets.
+  { name: 'automatic-rename', value: 'off' },
   // Wheel → mouse-aware apps; otherwise tmux copy-mode (tmux's scrollback).
   { name: 'mouse', value: 'on' },
   // Forward DECSET 1004 focus-in/out to the focused pane's app. tmux defaults

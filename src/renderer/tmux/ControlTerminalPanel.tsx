@@ -15,6 +15,7 @@ import { readFocus, writeFocus } from '../workspace/focusMemory';
 import {
   acquireControlSession,
   controlBridgeReady,
+  createTerminalWindow,
   isHiddenWindow,
   nudgeClientSize,
   pushClientSize,
@@ -22,6 +23,7 @@ import {
   resetControlSession,
   syncFromTmux,
 } from './controlSession';
+import { renameWindow as renameWindowCmd } from '@shared/tmux';
 import { EmptyState, IconButton, TabbedPanelHeader, cn } from '../ui';
 
 /**
@@ -51,6 +53,9 @@ export function ControlTerminalPanel(): JSX.Element {
   });
   const [selectedWindow, setSelectedWindow] = useState<string | null>(null);
   const [activePaneId, setActivePaneId] = useState<string | null>(null);
+  // Inline tab rename: the window id being edited (null = none) + its draft text.
+  const [editingWindow, setEditingWindow] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
   const [bridgeMissing, setBridgeMissing] = useState(false);
   // The pane id created by the most recent split, captured deterministically
   // from the `split-window -P -F '#{pane_id}'` reply. The active-pane
@@ -316,6 +321,11 @@ export function ControlTerminalPanel(): JSX.Element {
   const cmd = (args: string): void => {
     void useTmuxStore.getState().command(args).then(afterStructural).catch(() => {});
   };
+  // Open a new terminal tab via the single dir-named creation seam (the title
+  // defaults to the directory basename and stays put — automatic-rename is off).
+  const newWindow = (): void => {
+    void createTerminalWindow().then(afterStructural).catch(() => {});
+  };
   const target = activePaneId ?? '';
 
   // Two-tier in-place tab refresh. Both repaint every pane from xterm's OWN
@@ -368,15 +378,13 @@ export function ControlTerminalPanel(): JSX.Element {
       ensuringRef.current = false;
     } else if (hadTerminalsRef.current && !ensuringRef.current) {
       ensuringRef.current = true;
-      void useTmuxStore.getState().command('new-window').then(afterStructural).catch(() => {});
+      void createTerminalWindow().then(afterStructural).catch(() => {});
     }
   }, [isOpen, tabWindows.length]);
 
   // Keyboard shortcuts: ⌘T new tab · ⌘D vertical split · ⌘⇧D horizontal split ·
   // ⌘⌥arrow move between splits · ⌘⇧[ / ⌘⇧] previous/next tab.
   useEffect(() => {
-    const run = (args: string): void =>
-      void useTmuxStore.getState().command(args).then(afterStructural).catch(() => {});
     // Split and capture the new pane id from the reply (`-P -F '#{pane_id}'`),
     // recording it as the pending-active pane so the resolution effect moves
     // BOTH visual and keyboard focus to it once it lands in the layout (FR4).
@@ -438,7 +446,7 @@ export function ControlTerminalPanel(): JSX.Element {
       const k = e.key.toLowerCase();
       if (k === 't' && !e.shiftKey) {
         e.preventDefault();
-        run('new-window');
+        void createTerminalWindow().then(afterStructural).catch(() => {});
       } else if (k === 'd' && !e.shiftKey && tgt) {
         e.preventDefault();
         splitPane('h', tgt);
@@ -582,10 +590,12 @@ export function ControlTerminalPanel(): JSX.Element {
             {tabWindows.map((id, i) => {
               const w = windows[id];
               const name = w?.name;
-              // Prefer the SCREEN-title-derived displayName so the tab tracks the
-              // active command/cwd; fall back to tmux window name; finally the
-              // 1-based tab index when nothing useful is set.
-              const label = w?.displayName ?? (name && name !== id ? name : String(i + 1));
+              // The title is the tmux WINDOW NAME — stable (automatic-rename off),
+              // defaulted to the directory basename at creation, and user-settable
+              // by double-click. Fall back to the 1-based index when unnamed. The
+              // live SCREEN-title displayName is now hover-only (tooltip), so the
+              // tab no longer drifts to the last command.
+              const label = name && name !== id ? name : String(i + 1);
               const titleAttr = [
                 id,
                 name && name !== id ? name : null,
@@ -593,7 +603,28 @@ export function ControlTerminalPanel(): JSX.Element {
               ]
                 .filter(Boolean)
                 .join(' · ');
-              return (
+              const commitRename = (): void => {
+                const next = editDraft.trim();
+                // tmux format-expands rename-window args; escape `#` as `##` so a
+                // literal `#` in the user's title isn't read as a format directive.
+                if (next && next !== name) cmd(renameWindowCmd(id, next.replace(/#/g, '##')));
+                setEditingWindow(null);
+              };
+              return editingWindow === id ? (
+                <input
+                  key={id}
+                  autoFocus
+                  value={editDraft}
+                  onChange={(e) => setEditDraft(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitRename();
+                    else if (e.key === 'Escape') setEditingWindow(null);
+                    e.stopPropagation();
+                  }}
+                  className="w-24 border-t-2 border-accent bg-bg px-2.5 py-1 text-xs text-fg outline-none"
+                />
+              ) : (
                 <div
                   key={id}
                   title={titleAttr}
@@ -601,6 +632,10 @@ export function ControlTerminalPanel(): JSX.Element {
                     setSelectedWindow(id);
                     // Select in tmux so split/pane navigation targets this window.
                     cmd(`select-window -t ${id}`);
+                  }}
+                  onDoubleClick={() => {
+                    setEditDraft(name && name !== id ? name : '');
+                    setEditingWindow(id);
                   }}
                   className={cn(
                     'cursor-pointer border-t-2 px-2.5 py-1 text-xs',
@@ -613,7 +648,7 @@ export function ControlTerminalPanel(): JSX.Element {
                 </div>
               );
             })}
-            <IconButton label="New tmux window" size="sm" onClick={() => cmd('new-window')}>
+            <IconButton label="New tmux window" size="sm" onClick={newWindow}>
               +
             </IconButton>
           </>

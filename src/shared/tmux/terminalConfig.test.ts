@@ -32,6 +32,29 @@ describe('tmux server options — focus-events', () => {
   });
 });
 
+// Regression: control-mode tab titles drifted to the last command and opening a
+// new window relabeled existing ones. tmux's default `automatic-rename on`
+// re-derives every window name from its foreground process on a server refresh
+// (which `new-window` triggers) and emits %window-renamed. Pin it OFF at the
+// single source so the cockpit owns window titles (dir-basename default + the
+// double-click rename) and they stay stable.
+describe('tmux server options — automatic-rename', () => {
+  it('disables automatic-rename (stable, cockpit-owned window titles)', () => {
+    const opt = TMUX_SERVER_OPTIONS.find((o) => o.name === 'automatic-rename');
+    expect(opt).toBeDefined();
+    expect(opt?.value).toBe('off');
+    expect(opt?.append ?? false).toBe(false);
+  });
+
+  it('emits `set -g automatic-rename off` in both openers', () => {
+    const args = tmuxServerOptionArgs();
+    const i = args.indexOf('automatic-rename');
+    expect(i).toBeGreaterThan(-1);
+    expect(args.slice(i - 2, i + 2)).toEqual(['set', '-g', 'automatic-rename', 'off']);
+    expect(tmuxServerOptionShell()).toContain("set -g automatic-rename 'off'");
+  });
+});
+
 // Regression: selecting terminal text only reached the tmux paste-buffer, never
 // the system clipboard. `set-clipboard on` plus advertising the OSC 52 clipboard
 // terminfo cap (`Ms`) makes tmux emit OSC 52 to the client when text is copied;

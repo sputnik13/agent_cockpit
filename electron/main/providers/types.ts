@@ -7,6 +7,7 @@ export type {
   ConnectionSpec,
   ConnectionState,
   ConnectionStatus,
+  DiffBundle,
   DirEntry,
   FileReadOptions,
   FileReadResult,

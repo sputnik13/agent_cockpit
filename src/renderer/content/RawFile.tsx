@@ -117,7 +117,10 @@ function RawText({
         const lineNotes = notesByLine.get(lineNo) ?? [];
         const open = composing === lineNo;
         return (
-          <div key={i}>
+          // content-visibility:auto skips layout/paint of off-screen lines (a big
+          // file's dominant cost) while keeping them in the DOM, so find-in-file,
+          // wrap, and note anchors keep working. See DiffView ROW_CONTAINMENT.
+          <div key={i} style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 1.2em' }}>
             {/* No-wrap: minWidth:max-content extends the row so long lines scroll
                 in the outer container while the shrink-0 gutter stays aligned.
                 Wrap: pre-wrap + the code span breaking long tokens (minWidth:0,

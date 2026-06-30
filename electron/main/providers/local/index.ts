@@ -17,6 +17,7 @@ import type {
 } from '@shared/ipc/channels';
 import { beadsArgs, parseComments, parseCreatedId, runBr } from '../../beads/runner';
 import type {
+  DiffBundle,
   DirEntry,
   ConnectionStatus,
   FileReadOptions,
@@ -109,6 +110,19 @@ export class LocalProvider implements WorkspaceProvider {
   }
   getFileDiff(worktreePath: string, filePath: string, baseline?: string): Promise<string> {
     return localFileDiff(worktreePath || this.rootPath, filePath, baseline);
+  }
+  async getDiffBundle(worktreePath: string, filePath: string, baseline?: string): Promise<DiffBundle> {
+    // Local reads are free, so just compose the existing primitives behind the
+    // shared one-call contract (the bundle exists to save round trips on remote).
+    const cwd = worktreePath || this.rootPath;
+    const [patch, newR, oldR] = await Promise.all([
+      localFileDiff(cwd, filePath, baseline),
+      localReadFile(this.rootPath, filePath),
+      baseline ? localReadFile(this.rootPath, filePath, { ref: baseline }) : Promise.resolve(null),
+    ]);
+    const usable = (r: FileReadResult | null): string | null =>
+      r && !r.truncated && !r.isBinary ? r.content : null;
+    return { patch, newContent: usable(newR), oldContent: usable(oldR) };
   }
   resolveBranchPoint(worktreePath: string): Promise<BranchPoint | null> {
     return gitResolveBranchPoint(worktreePath || this.rootPath);

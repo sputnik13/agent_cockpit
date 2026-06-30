@@ -430,6 +430,12 @@ export class Ssh2Transport implements RemoteTransport {
       // Verify the host key against the RESOLVED host (FR3), not the alias, so
       // the known_hosts token matches the real host.
       hostVerifier: this.buildHostVerifier(host, port, opts?.hostKeyPolicy),
+      // Offer SSH transport compression, preferred over none. The RPC payloads
+      // (unified diffs, file content, JSON frames) are highly compressible text,
+      // so a server that supports zlib shrinks the dominant bytes on the wire.
+      // `none` stays in the list as a fallback so a server without zlib still
+      // negotiates successfully — compression is best-effort, never required.
+      algorithms: { compress: ['zlib@openssh.com', 'zlib', 'none'] },
     };
 
     const agentSock = process.env.SSH_AUTH_SOCK;

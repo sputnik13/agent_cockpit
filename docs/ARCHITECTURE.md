@@ -697,14 +697,24 @@ the `ENTRIES` map + one fine-grained grammar import. No other module in the high
 pipeline changes. `resolveLanguage(filePath)` is the public API; it returns a `LangId`
 or `null` for plaintext fallback.
 
-### Highlighter core
+### Highlighter core (worker-offloaded + cached)
 
-`src/renderer/content/highlight/highlighter.ts` holds a promise-memoized singleton
-(`shiki/core` + the pure-JavaScript RegExp engine — no Oniguruma WASM, no web workers)
-that loads both Solarized themes once. Language grammars are lazy-loaded on first use and
-promise-memoized. `tokenizeLines(code, langId, theme)` is the public entry point; it
-returns a `TokenizeResult` with per-line token arrays and theme `fg`/`bg` colors (not
-HTML — no `dangerouslySetInnerHTML`).
+`src/renderer/content/highlight/highlighter.ts` is the public entry
+(`tokenizeLines(code, langId, theme) → TokenizeResult`, per-line token arrays +
+theme `fg`/`bg`, never HTML). It is a thin **cache + Web-Worker client**:
+
+- The actual Shiki tokenize lives in `tokenizeCore.ts` (`shiki/core` + the
+  pure-JavaScript RegExp engine — still no Oniguruma WASM, no `wasm-unsafe-eval`
+  CSP, nothing extra to package) with its own promise-memoized core + lazy,
+  per-language grammar loading.
+- It runs in an **ES-module Web Worker** (`tokenizeWorker.ts`, built with vite
+  `worker.format: 'es'` because the grammars are dynamic-imported) so a large
+  file no longer freezes the renderer main thread. If the worker can't start or
+  errors — and under test, where there is no functional `Worker` — it falls back
+  to inline `tokenizeInline`; output is identical because both call the same core.
+- A **content-addressed token cache** (keyed by `code`+`lang`+`theme`, entry-count
+  bounded) fronts both paths, so a re-opened file, a diff↔raw toggle, or an
+  unchanged-theme re-render never re-tokenizes.
 
 ### CodeTokens render boundary
 
@@ -727,6 +737,13 @@ changing any call site.
 so first paint is immediately readable, then resolves tokens asynchronously and flips to
 `{ state: 'ready', lines, fg, bg }`. Re-runs on content, language, or theme change.
 
+For large files, each diff/raw row carries `content-visibility: auto` +
+`contain-intrinsic-size`, so the browser skips layout/paint of off-screen rows
+(the dominant cost of thousands of token spans) while keeping every row in the
+DOM. That is a deliberate alternative to node-removing windowing: find-in-content
+walks the rendered DOM (a `TreeWalker`), so removing rows would break it —
+`content-visibility` preserves find, the wrap toggle, and note anchors.
+
 ### Raw mode wiring
 
 `RawFile.tsx` uses `resolveLanguage` + `useHighlightedTokens` + `CodeTokens` for the
@@ -734,12 +751,28 @@ so first paint is immediately readable, then resolves tokens asynchronously and 
 and for the progressive first-paint before tokens are ready. Loading/binary/too-large/missing
 cases are unchanged.
 
+### Diff bundle — one round trip + cache
+
+`ContentViewer` opens a changed file via a single provider call,
+`getDiffBundle(worktreePath, path, baseline) → { patch, newContent, oldContent }`
+(WorkspaceProvider; helper RPC `getDiffBundle` on remote, composed locally),
+instead of the old `getFileDiff` + 2× `readFile`. On remote that collapses three
+serialized SSH round trips into **one**; the helper reads the new side from the
+working tree, the old side via `git show <baseline>:<path>`, and the patch via
+`git diff` in one region (tolerant — added/deleted files yield a null side). A
+main-process `DiffBundleCache` (`providers/diffCache.ts`, keyed per project by
+worktree+path+baseline) serves re-opens / mode toggles with **zero** round trips;
+the existing filesystem watch invalidates it precisely (changed paths dropped; a
+git-state signal — HEAD/packed-refs/refs — clears the project as the baseline
+moved). (Remote `readFile` separately honors `opts.ref` via the same `git show`
+capability, fixing the old "raw at baseline" working-tree read.)
+
 ### Diff mode wiring
 
-For a supported-language changed file, `DiffView.tsx` fetches the **full old content**
-(`readFile` at the baseline ref) and **full new content** (`readFile` at the working tree)
-and tokenizes each side in full via `tokenizeLines`. This preserves cross-line grammar
-state (multi-line strings, block comments, template literals). For each rendered diff line,
+`DiffView.tsx` receives both sides' content from the bundle (it issues **no**
+`readFile` of its own) and tokenizes each side in full via `tokenizeLines`. Full-
+side tokenize preserves cross-line grammar state (multi-line strings, block
+comments, template literals). For each rendered diff line,
 `pickTokenLine` maps the 1-based `PatchLine.oldLine`/`newLine` to the correct token array
 entry (0-based index):
 

@@ -43,4 +43,19 @@ describe('tokenizeLines', () => {
     expect(r.lines.length).toBeGreaterThan(0);
     expect(r.lines.flat().some((t) => t.color)).toBe(true);
   });
+
+  it('content-addressed cache: same (code, lang, theme) returns the cached result', async () => {
+    __resetHighlighterForTest();
+    const first = await tokenizeLines('const x = 1;', 'typescript', 'solarized-dark');
+    const second = await tokenizeLines('const x = 1;', 'typescript', 'solarized-dark');
+    // Same object identity ⇒ served from cache, not re-tokenized.
+    expect(second).toBe(first);
+    // Different content recomputes (distinct object).
+    const other = await tokenizeLines('const y = 2;', 'typescript', 'solarized-dark');
+    expect(other).not.toBe(first);
+    // The reset clears the cache, so the same input recomputes a fresh object.
+    __resetHighlighterForTest();
+    const afterReset = await tokenizeLines('const x = 1;', 'typescript', 'solarized-dark');
+    expect(afterReset).not.toBe(first);
+  });
 });

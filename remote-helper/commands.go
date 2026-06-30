@@ -50,6 +50,11 @@ func runCommand(dir, name string, args ...string) (string, error) {
 
 type readFileParams struct {
 	Path string `json:"path"`
+	// Ref, when non-empty, reads the file AT a git ref via `git show <ref>:<path>`
+	// (e.g. the diff old side or the "raw at baseline" view) instead of the
+	// working tree. Path is then repo-relative and Cwd is the repo root.
+	Ref string `json:"ref,omitempty"`
+	Cwd string `json:"cwd,omitempty"`
 }
 
 type readFileResult struct {
@@ -64,6 +69,22 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 	}
 	if p.Path == "" {
 		return nil, fmt.Errorf("readFile: path must not be empty")
+	}
+	// Ref read: `git show <ref>:<repo-relative-path>` in the repo root. Same
+	// truncation cap as the working-tree path so callers see a uniform contract.
+	if p.Ref != "" {
+		if p.Cwd == "" {
+			return nil, fmt.Errorf("readFile: cwd must not be empty when ref is set")
+		}
+		out, err := runCommand(p.Cwd, "git", "show", p.Ref+":"+p.Path)
+		if err != nil {
+			return nil, err
+		}
+		truncated := len(out) > maxReadFileBytes
+		if truncated {
+			out = out[:maxReadFileBytes]
+		}
+		return readFileResult{Content: out, Truncated: truncated}, nil
 	}
 	f, err := os.Open(p.Path)
 	if err != nil {
@@ -82,6 +103,93 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 		n = maxReadFileBytes
 	}
 	return readFileResult{Content: string(buf[:n]), Truncated: truncated}, nil
+}
+
+// readCappedFile reads up to maxReadFileBytes of a working-tree file, reporting
+// truncation. Shared by getDiffBundle.
+func readCappedFile(path string) (string, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	buf := make([]byte, maxReadFileBytes+1)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", false, err
+	}
+	if n > maxReadFileBytes {
+		return string(buf[:maxReadFileBytes]), true, nil
+	}
+	return string(buf[:n]), false, nil
+}
+
+// gitShowCapped returns `git show <ref>:<path>` content (cwd = repo root), capped.
+func gitShowCapped(cwd, ref, path string) (string, bool, error) {
+	out, err := runCommand(cwd, "git", "show", ref+":"+path)
+	if err != nil {
+		return "", false, err
+	}
+	if len(out) > maxReadFileBytes {
+		return out[:maxReadFileBytes], true, nil
+	}
+	return out, false, nil
+}
+
+// --- getDiffBundle ---
+
+type getDiffBundleParams struct {
+	Cwd      string `json:"cwd"`
+	Path     string `json:"path"`
+	Baseline string `json:"baseline,omitempty"`
+}
+
+// getDiffBundleResult carries everything the Content view needs to render and
+// highlight a diff in ONE round trip: the unified patch plus both sides' content.
+// The *Readable flags distinguish "empty file" from "absent/unreadable" (an
+// added file has no old side; a deleted file has no new side) without erroring.
+type getDiffBundleResult struct {
+	Patch        string `json:"patch"`
+	NewContent   string `json:"newContent"`
+	NewReadable  bool   `json:"newReadable"`
+	NewTruncated bool   `json:"newTruncated"`
+	OldContent   string `json:"oldContent"`
+	OldReadable  bool   `json:"oldReadable"`
+	OldTruncated bool   `json:"oldTruncated"`
+}
+
+func handleGetDiffBundle(raw json.RawMessage) (interface{}, error) {
+	var p getDiffBundleParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("getDiffBundle: decode params: %w", err)
+	}
+	if p.Cwd == "" {
+		return nil, fmt.Errorf("getDiffBundle: cwd must not be empty")
+	}
+	if p.Path == "" {
+		return nil, fmt.Errorf("getDiffBundle: path must not be empty")
+	}
+	args := []string{"diff"}
+	if p.Baseline != "" {
+		args = append(args, p.Baseline)
+	}
+	args = append(args, "--", p.Path)
+	patch, err := runCommand(p.Cwd, "git", args...)
+	if err != nil {
+		return nil, err
+	}
+	res := getDiffBundleResult{Patch: patch}
+	// New side: working-tree file. Tolerant — a deleted file is simply unreadable.
+	if content, truncated, rerr := readCappedFile(filepath.Join(p.Cwd, p.Path)); rerr == nil {
+		res.NewContent, res.NewTruncated, res.NewReadable = content, truncated, true
+	}
+	// Old side: content at the baseline ref. Tolerant — an added file has none.
+	if p.Baseline != "" {
+		if content, truncated, gerr := gitShowCapped(p.Cwd, p.Baseline, p.Path); gerr == nil {
+			res.OldContent, res.OldTruncated, res.OldReadable = content, truncated, true
+		}
+	}
+	return res, nil
 }
 
 // --- stat ---

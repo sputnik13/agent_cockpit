@@ -21,6 +21,7 @@ import type {
 import type {
   ConnectionSpec,
   ConnectionStatus,
+  DiffBundle,
   DirEntry,
   FileReadOptions,
   FileReadResult,
@@ -68,6 +69,12 @@ export interface RendererApi {
     listWorktrees(projectId?: string): Promise<WorktreeRecord[]>;
     getChangeset(worktreePath: string, baseline?: string, projectId?: string): Promise<Changeset>;
     getFileDiff(worktreePath: string, filePath: string, baseline?: string, projectId?: string): Promise<string>;
+    getDiffBundle(
+      worktreePath: string,
+      filePath: string,
+      baseline?: string,
+      projectId?: string,
+    ): Promise<DiffBundle>;
     readFile(path: string, opts?: FileReadOptions, projectId?: string): Promise<FileReadResult>;
     stat(path: string, projectId?: string): Promise<StatResult>;
     listDir(dirPath: string, projectId?: string): Promise<DirEntry[]>;

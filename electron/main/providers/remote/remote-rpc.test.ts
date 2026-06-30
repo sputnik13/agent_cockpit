@@ -70,6 +70,23 @@ describe('frame codec', () => {
     const out = decoder.push(Buffer.concat([a, b]));
     expect(out).toHaveLength(2);
   });
+
+  it('reassembles a large frame fed one byte at a time (single-concat path)', () => {
+    // A large body arriving as many tiny chunks is the case the chunk-array
+    // (concat-once-per-frame) decoder is designed for. It must still yield the
+    // exact payload, and only on the final byte.
+    const payload = { id: 9, result: { content: 'x'.repeat(50_000) }, error: null };
+    const frame = encodeFrame(payload);
+    const decoder = new FrameDecoder();
+    let decoded: unknown[] = [];
+    for (let i = 0; i < frame.length; i += 1) {
+      const out = decoder.push(frame.subarray(i, i + 1));
+      if (i < frame.length - 1) expect(out).toHaveLength(0);
+      else decoded = out;
+    }
+    expect(decoded).toHaveLength(1);
+    expect(decoded[0]).toEqual(payload);
+  });
 });
 
 describe('HelperRpcClient correlation', () => {
@@ -87,6 +104,52 @@ describe('HelperRpcClient correlation', () => {
     ]);
     expect(stat).toEqual({ exists: true, size: 42, isDir: false, mtime: 'now' });
     expect(file).toEqual({ content: 'hello', truncated: false });
+  });
+
+  it('readFile forwards ref + cwd params for a git-ref read (and omits them otherwise)', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const { stream } = fakeHelper((req) => {
+      if (req.method === 'readFile') {
+        seen.push(req.params);
+        return { content: 'at-ref', truncated: false };
+      }
+      return null;
+    });
+    const client = new HelperRpcClient(stream);
+    await client.readFile('src/a.ts', { ref: 'HEAD', cwd: '/repo' });
+    await client.readFile('/repo/src/a.ts');
+    expect(seen[0]).toMatchObject({ path: 'src/a.ts', ref: 'HEAD', cwd: '/repo' });
+    // Working-tree read: ref/cwd are undefined, so JSON framing drops them.
+    expect(seen[1]!.ref).toBeUndefined();
+    expect(seen[1]!.cwd).toBeUndefined();
+  });
+
+  it('getDiffBundle issues ONE call carrying cwd/path/baseline and returns the bundle', async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const { stream } = fakeHelper((req) => {
+      calls.push({ method: req.method, params: req.params });
+      if (req.method === 'getDiffBundle') {
+        return {
+          patch: '@@ -1 +1 @@',
+          newContent: 'new',
+          newReadable: true,
+          newTruncated: false,
+          oldContent: 'old',
+          oldReadable: true,
+          oldTruncated: false,
+        };
+      }
+      return null;
+    });
+    const client = new HelperRpcClient(stream);
+    const bundle = await client.getDiffBundle('/repo', 'src/a.ts', 'HEAD');
+    // The whole point of the bundle: a diff open is a SINGLE round trip.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      method: 'getDiffBundle',
+      params: { cwd: '/repo', path: 'src/a.ts', baseline: 'HEAD' },
+    });
+    expect(bundle).toMatchObject({ patch: '@@ -1 +1 @@', newContent: 'new', oldContent: 'old' });
   });
 
   it('rejects with the helper-reported error string', async () => {

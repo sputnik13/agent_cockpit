@@ -109,6 +109,15 @@ export interface FileReadOptions {
   ref?: string;
 }
 
+/** One-round-trip diff bundle (see WorkspaceProvider.getDiffBundle). `newContent`
+ *  / `oldContent` are null when that side should not be highlighted (absent,
+ *  binary, too large, or unreadable). */
+export interface DiffBundle {
+  patch: string;
+  newContent: string | null;
+  oldContent: string | null;
+}
+
 export interface FileReadResult {
   content: string | null;
   truncated: boolean;
@@ -193,6 +202,15 @@ export interface WorkspaceProvider {
   listWorktrees(): Promise<WorktreeRecord[]>;
   getChangeset(worktreePath: string, baseline?: string): Promise<Changeset>;
   getFileDiff(worktreePath: string, filePath: string, baseline?: string): Promise<string>;
+  /**
+   * One-round-trip diff bundle for the Content view: the unified patch plus the
+   * file content needed to syntax-highlight both sides (working tree = new,
+   * `baseline` ref = old). Collapses what was getFileDiff + 2× readFile into a
+   * single provider call (one RPC on remote). `newContent`/`oldContent` are null
+   * when that side is absent (added/deleted file), binary, too large, or
+   * unreadable — the caller then renders that side as plain text.
+   */
+  getDiffBundle(worktreePath: string, filePath: string, baseline?: string): Promise<DiffBundle>;
   /**
    * Resolve the branch-point baseline for a worktree. The parent is the
    * configured upstream (@{upstream}) if set, otherwise the repo default branch

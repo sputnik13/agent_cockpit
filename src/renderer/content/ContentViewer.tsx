@@ -45,21 +45,24 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   const [mode, setMode] = useState<ContentMode>(() =>
     external ? (isMarkdownPath(path) ? 'rendered' : 'raw') : defaultModeFor(path, kind),
   );
-  const [diff, setDiff] = useState<{ kind: 'loading' } | { kind: 'ready'; patch: string }>({
-    kind: 'loading',
-  });
+  const [diff, setDiff] = useState<
+    | { kind: 'loading' }
+    | { kind: 'ready'; patch: string; oldContent: string | null; newContent: string | null }
+  >({ kind: 'loading' });
 
-  // Load the unified diff once per file (drives diff mode + markdown callouts).
-  // Skipped for out-of-project files, which have no git baseline.
+  // Load the diff BUNDLE once per file: the patch plus both sides' content for
+  // highlighting, in ONE provider round trip (was getFileDiff + 2× readFile —
+  // three serialized SSH round trips on remote). Skipped for out-of-project
+  // files, which have no git baseline.
   useEffect(() => {
     if (external) {
-      setDiff({ kind: 'ready', patch: '' });
+      setDiff({ kind: 'ready', patch: '', oldContent: null, newContent: null });
       return;
     }
     let active = true;
     setDiff({ kind: 'loading' });
-    void agentCockpit.provider.getFileDiff(worktreePath, path, baseline).then((patch) => {
-      if (active) setDiff({ kind: 'ready', patch });
+    void agentCockpit.provider.getDiffBundle(worktreePath, path, baseline).then((b) => {
+      if (active) setDiff({ kind: 'ready', patch: b.patch, oldContent: b.oldContent, newContent: b.newContent });
     });
     return () => {
       active = false;
@@ -181,6 +184,8 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                   worktreePath={worktreePath}
                   baseline={baseline}
                   wrap={wrapLines}
+                  oldContent={diff.oldContent}
+                  newContent={diff.newContent}
                 />
               ))}
 

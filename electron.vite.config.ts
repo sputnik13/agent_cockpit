@@ -61,6 +61,14 @@ export default defineConfig({
         },
       },
     },
+    // The syntax-highlight tokenize worker (highlight/tokenizeWorker) lazy-imports
+    // Shiki grammars/themes via dynamic import(), which only works in an ES-module
+    // worker — Vite's default build worker format is 'iife' (no import()), so pin
+    // 'es'. Module workers are supported by the renderer's Chromium in dev and in
+    // the packaged file:// build.
+    worker: {
+      format: 'es',
+    },
     server: {
       port: 5173,
     },

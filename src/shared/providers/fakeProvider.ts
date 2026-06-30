@@ -13,6 +13,7 @@ import type {
 } from '../ipc/channels';
 import type {
   ConnectionStatus,
+  DiffBundle,
   FileReadOptions,
   FileReadResult,
   ProjectKind,
@@ -145,6 +146,12 @@ export class FakeProvider implements WorkspaceProvider {
   }
   async getFileDiff(_worktreePath: string, filePath: string): Promise<string> {
     return this.data.fileDiffs?.[filePath] ?? '';
+  }
+  async getDiffBundle(_worktreePath: string, filePath: string, baseline?: string): Promise<DiffBundle> {
+    const patch = this.data.fileDiffs?.[filePath] ?? '';
+    const file = this.data.files?.[filePath];
+    const newContent = file && !file.truncated && !file.isBinary ? file.content : null;
+    return { patch, newContent, oldContent: baseline ? newContent : null };
   }
   async resolveBranchPoint(_worktreePath: string): Promise<BranchPoint | null> {
     return this.data.branchPoint ?? null;

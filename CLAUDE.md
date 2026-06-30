@@ -118,6 +118,32 @@ red. `isTerminal` = closed/tombstone/deleted.
 render yellow `dep_blocked` (not red), matching `br blocked`; an issue whose
 stored status is `blocked` renders red and sorts to the top of the List.
 
+## Workgraph refresh keeps the view MOUNTED (cold-load spinner only)
+
+**Invariant:** A workgraph refresh — a bead action from Task Detail
+(`beadsClose`/`beadsReopen`/`beadsCreate` → `load()`), or a `.beads` watch event
+routed through `panelDataSync` → `load()` — must update the data **in place**
+without unmounting the rendered view. `BeadsPanel`'s `renderBody` shows the
+full-panel `<Spinner/>` **only on a cold load** (`loading && graph == null`); when
+a graph is already present it keeps rendering the current view (Tree/Graph/Flat/
+Columns) through the `loading:true → false` flip.
+
+**Why:** `beadsStore.load()` sets `loading: true` at the **start of every**
+(re)load. `TreeView`'s per-row collapse is local `useState(false)` keyed by
+`issue.id`; a plain re-render with a replaced `graph` object **preserves** it
+(stable keys → React reconciles, never remounts). But swapping the whole body to a
+spinner **unmounts** the view, so the remount after `loading:false` **re-expands
+every collapsed node** (and drops scroll/selection) — and flashes a reload on
+every action. Showing the spinner only when there is no graph yet keeps the
+mounted instances alive across a refresh. Do NOT restore the unconditional
+`if (loading)` spinner. (Persisting collapse across project/view switches — which
+*do* legitimately remount — is a separate, not-yet-done concern.)
+
+**Regression check:** in Tree view, collapse a parent, then act on a bead (or let
+a `.beads` watch reload fire): the parent stays collapsed and no spinner flashes;
+the initial cold load still shows the spinner. Covered by the deferred-read test
+in `beads.test.tsx` ("preserves tree collapse across a reload").
+
 ## tmux control mode (`-CC`) byte handling
 
 **Invariant:** The entire `-CC` data pipeline — from node-pty to the renderer
@@ -670,6 +696,34 @@ that overflows the panel. With Wrap off, line numbers form one column and the lo
 line scrolls horizontally. Toggle Wrap on: the long line soft-wraps within the
 panel, line numbers stay in the same column anchored at each line's first visual
 row, and the choice persists across files and restarts.
+
+## Native modules on Electron 42: `cpu-features` is stripped post-install
+
+**Invariant:** A `postinstall` (`scripts/strip-cpu-features.mjs`) deletes
+`node_modules/cpu-features` after every install. `cpu-features` is a transitive
+**optional** dependency of `ssh2` (it detects AES-NI etc. to pick faster crypto)
+that calls `v8::External::New` with the pre-V8-13.6 **two-argument** signature —
+in its own `binding.cc` and via `nan` (2.28 still ships the old signature) — so it
+**fails to compile on Electron 42 (V8 13.6)** and aborts `electron-builder`'s
+native rebuild, even though every REQUIRED native (`better-sqlite3`, `node-pty`)
+builds cleanly. `ssh2` guards `require('cpu-features')` in a try/catch and falls
+back to pure-JS / OpenSSL crypto, so removing it is functionally safe (only a
+crypto micro-optimization is lost). Do NOT remove the postinstall or re-add
+cpu-features until it (or `nan`) ships V8-13.6 support.
+
+**Do NOT** "fix" this with `.npmrc omit=optional` — that would also drop
+`fsevents` (the macOS file-watch backend). The strip must be cpu-features-specific.
+
+**Known dev-tooling gap (not an app problem):** Playwright's `_electron.launch`
+(1.60/1.61) cannot DRIVE Electron 42, so the screenshot/verify harnesses
+(`scripts/screenshots/*`) fail at `firstWindow` even though the app itself
+launches, runs, and packages fine under Electron 42 (verified standalone). Re-test
+the harnesses when Playwright adds Electron 42 support.
+
+**Regression check:** after `npm install`, `node_modules/cpu-features` must be
+absent; `npm run package:dir` must rebuild `better-sqlite3` + `node-pty` and
+produce an app bundle without a cpu-features compile error; the app must launch
+under Electron 42 (`electron out/main/index.js`) without a native-load crash.
 
 ## Known upstream noise
 

@@ -311,7 +311,12 @@ function renderBody({
   onTogglePin,
   columnsSoftCap,
 }: BodyProps): JSX.Element {
-  if (loading) {
+  // Cold-load spinner ONLY: show it while loading when there is no graph to show
+  // yet. A refresh-while-loaded (e.g. after a bead action from Task Detail, or a
+  // .beads watch event) keeps the current view MOUNTED so the data updates in
+  // place — unmounting it for a spinner would reset TreeView's per-row collapse
+  // state (local useState) and flash a full reload. See CLAUDE.md.
+  if (loading && graph == null) {
     return (
       <div className="flex h-full items-center justify-center">
         <Spinner />

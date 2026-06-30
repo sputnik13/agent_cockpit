@@ -3,59 +3,45 @@ import { useSettingsStore } from '@renderer/settings/settingsStore';
 import { useProjectsStore } from '../providerClient';
 import { parsePatch } from './parsePatch';
 import { resolveLanguage } from './highlight/languages';
-import { tokenizeLines, type TokenLine, type TokenizeResult } from './highlight/highlighter';
+import { tokenizeLines, type TokenLine } from './highlight/highlighter';
 import { CodeLineTokens } from './highlight/CodeTokens';
 import { LineNoteThread, lineNotesByLine, useNotesStore } from '../notes';
 import { pickTokenLine } from './diffTokens';
-import type { ThemeId } from '@shared/settings';
+
+/** Above this content length a side is left un-highlighted (rendered plain). */
+const SIZE_LIMIT = 256 * 1024;
+
+/**
+ * Per-row rendering containment for large files. `content-visibility: auto` lets
+ * the browser SKIP layout/paint of off-screen rows (the real cost for a big
+ * file's thousands of token spans) while KEEPING every row in the DOM — so
+ * find-in-file (a DOM TreeWalker), the wrap toggle, and note anchors all keep
+ * working. `contain-intrinsic-size` gives skipped rows a placeholder height so
+ * the scrollbar is right; `auto` remembers each row's real height once measured.
+ * This is the deliberate alternative to node-removing windowing, which would
+ * break the DOM-based find. Harmless on small files.
+ */
+const ROW_CONTAINMENT = {
+  contentVisibility: 'auto',
+  containIntrinsicSize: 'auto 1.2em',
+} as const;
 
 interface DiffViewProps {
   patch: string;
   emptyHint?: string;
   onHunkClick?: (hunkIndex: number) => void;
-  /** When provided, enables per-line Shiki highlighting by fetching full old/new content. */
+  /** When provided, enables per-line Shiki highlighting of the supplied content. */
   filePath?: string;
   worktreePath?: string;
   baseline?: string;
   /** Soft-wrap long lines instead of scrolling horizontally. */
   wrap?: boolean;
-}
-
-/** Tokenize both sides of a diff for a supported language. Returns null on any failure. */
-async function tokenizeBothSides(
-  filePath: string,
-  baseline: string | undefined,
-  theme: ThemeId,
-): Promise<{ old: TokenLine[] | null; new: TokenLine[] | null } | null> {
-  const lang = resolveLanguage(filePath);
-  if (!lang) return null;
-  // Capture in a non-null local so the nested async function can close over it.
-  const resolvedLang = lang;
-
-  const SIZE_LIMIT = 256 * 1024;
-
-  async function readSide(opts: { ref?: string }): Promise<TokenizeResult | null> {
-    try {
-      const r = await window.api.provider.readFile(filePath, opts);
-      if (r.content === null || r.truncated || r.isBinary || r.sizeBytes > SIZE_LIMIT) return null;
-      return await tokenizeLines(r.content, resolvedLang, theme);
-    } catch {
-      return null;
-    }
-  }
-
-  const [oldResult, newResult] = await Promise.all([
-    baseline ? readSide({ ref: baseline }) : Promise.resolve(null),
-    readSide({}),
-  ]);
-
-  // If we have neither side, no point highlighting.
-  if (!oldResult && !newResult) return null;
-
-  return {
-    old: oldResult?.lines ?? null,
-    new: newResult?.lines ?? null,
-  };
+  /** New (working-tree) side content for highlighting; null = don't highlight. */
+  newContent?: string | null;
+  /** Old (baseline-ref) side content for highlighting; null = don't highlight.
+   *  Both come from the provider's one-call diff bundle, so DiffView no longer
+   *  issues its own readFile round trips. */
+  oldContent?: string | null;
 }
 
 export function DiffView({
@@ -63,8 +49,9 @@ export function DiffView({
   emptyHint,
   onHunkClick,
   filePath,
-  baseline,
   wrap = false,
+  newContent = null,
+  oldContent = null,
 }: DiffViewProps): JSX.Element {
   const parsed = useMemo(() => parsePatch(patch), [patch]);
   const theme = useSettingsStore((s) => s.settings.theme);
@@ -91,20 +78,30 @@ export function DiffView({
   } | null>(null);
 
   useEffect(() => {
-    // Only attempt highlighting when filePath is provided and language is supported.
-    if (!filePath || !resolveLanguage(filePath)) {
+    // Tokenize the content supplied by the diff bundle (no readFile here). Only
+    // for a supported language; oversized/absent sides render plain.
+    const lang = filePath ? resolveLanguage(filePath) : null;
+    if (!lang) {
       setTokenSides(null);
       return;
     }
     let active = true;
     setTokenSides(null);
-    void tokenizeBothSides(filePath, baseline, theme).then((result) => {
-      if (active) setTokenSides(result);
+    const tokSide = async (content: string | null): Promise<TokenLine[] | null> => {
+      if (content == null || content.length > SIZE_LIMIT) return null;
+      try {
+        return (await tokenizeLines(content, lang, theme)).lines;
+      } catch {
+        return null;
+      }
+    };
+    void Promise.all([tokSide(oldContent), tokSide(newContent)]).then(([old, nw]) => {
+      if (active) setTokenSides(old || nw ? { old, new: nw } : null);
     });
     return () => {
       active = false;
     };
-  }, [filePath, baseline, theme]);
+  }, [filePath, theme, oldContent, newContent]);
 
   if (parsed.hunks.length === 0) {
     return (
@@ -183,6 +180,7 @@ export function DiffView({
                       background: color,
                       whiteSpace: wrap ? 'pre-wrap' : 'pre',
                       ...(wrap ? {} : { minWidth: 'max-content' }),
+                      ...ROW_CONTAINMENT,
                     }}
                   >
                     <span

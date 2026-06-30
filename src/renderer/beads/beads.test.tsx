@@ -108,6 +108,21 @@ async function loadSlice(): Promise<void> {
 }
 
 beforeEach(() => {
+  // This runner's jsdom lacks a working localStorage; provide a fresh in-memory
+  // one so the per-project view/filter/focus persistence that `load()` re-reads
+  // on every reload behaves like the real app (otherwise a reload reverts the
+  // view to the flat default).
+  const mem = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => void mem.set(k, String(v)),
+    removeItem: (k: string) => void mem.delete(k),
+    clear: () => mem.clear(),
+    key: (i: number) => [...mem.keys()][i] ?? null,
+    get length() {
+      return mem.size;
+    },
+  });
   useBeadsStore.setState({ byProject: {} });
   // The active slice selector reads byProject[activeId]; tests need an active id.
   useProjectsStore.setState({ activeId: PROJECT });
@@ -115,6 +130,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 describe('BeadsPanel', () => {
@@ -549,6 +565,51 @@ describe('TreeView render (T3, FR2/FR4)', () => {
 
     fireEvent.click(within(tree).getByRole('button', { name: 'Expand' }));
     expect(within(tree).getAllByText('child').length).toBeGreaterThan(0);
+  });
+
+  it('preserves tree collapse across a reload — view stays mounted while loading (e7c0)', async () => {
+    installApi(TREE_FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    const tree = screen.getByRole('tree', { name: 'Task tree' });
+    // Collapse the epic → its child is hidden.
+    fireEvent.click(within(tree).getByRole('button', { name: 'Collapse' }));
+    expect(within(tree).queryByText('child')).not.toBeInTheDocument();
+
+    // Begin a reload whose graph read is DEFERRED, so the loading:true state is
+    // actually committed and rendered — mirroring a real bead action (mutate,
+    // then await the disk read). Regression: the cold-load spinner used to
+    // UNMOUNT the view on every reload, resetting each row's collapse.
+    let resolveGraph!: (g: BeadsTaskGraph) => void;
+    api.provider.getTaskGraph.mockReturnValueOnce(
+      new Promise<BeadsTaskGraph>((r) => {
+        resolveGraph = r;
+      }),
+    );
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = useBeadsStore.getState().load(PROJECT);
+      // Flush the resolved detectBeads() so load() parks on the deferred read.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Mid-reload: loading is true, but because a graph is already shown the view
+    // MUST remain mounted (no spinner swap) and the collapse intact.
+    expect(useBeadsStore.getState().byProject[PROJECT]!.loading).toBe(true);
+    const treeDuring = screen.getByRole('tree', { name: 'Task tree' });
+    expect(within(treeDuring).queryByText('child')).not.toBeInTheDocument();
+
+    // Finish the reload; collapse still preserved (caret offers Expand).
+    await act(async () => {
+      resolveGraph(TREE_FIXTURE);
+      await pending;
+    });
+    const treeAfter = screen.getByRole('tree', { name: 'Task tree' });
+    expect(within(treeAfter).queryByText('child')).not.toBeInTheDocument();
+    expect(within(treeAfter).getByRole('button', { name: 'Expand' })).toBeInTheDocument();
   });
 
   it('allows collapsing subtrees inside focus mode (e009)', async () => {

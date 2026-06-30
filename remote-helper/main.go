@@ -104,6 +104,8 @@ func (s *server) handle(req Request) (interface{}, error) {
 		return handleGitStatus(req.Params)
 	case "gitDiff":
 		return handleGitDiff(req.Params)
+	case "getDiffBundle":
+		return handleGetDiffBundle(req.Params)
 	case "gitBranchPoint":
 		return handleGitBranchPoint(req.Params)
 	case "listWorktrees":

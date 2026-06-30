@@ -11,6 +11,7 @@
 import type {
   ConnectionSpec,
   ConnectionStatus,
+  DiffBundle,
   DirEntry,
   FileReadOptions,
   FileReadResult,
@@ -44,6 +45,7 @@ export const Channels = {
   providerListWorktrees: 'provider:list-worktrees',
   providerGetChangeset: 'provider:get-changeset',
   providerGetFileDiff: 'provider:get-file-diff',
+  providerGetDiffBundle: 'provider:get-diff-bundle',
   providerReadFile: 'provider:read-file',
   providerStat: 'provider:stat',
   providerListDir: 'provider:list-dir',
@@ -321,6 +323,10 @@ export interface IpcContract {
   [Channels.providerGetFileDiff]: {
     request: { worktreePath: string; filePath: string; baseline?: string; projectId?: string };
     response: { patch: string };
+  };
+  [Channels.providerGetDiffBundle]: {
+    request: { worktreePath: string; filePath: string; baseline?: string; projectId?: string };
+    response: { bundle: DiffBundle };
   };
   [Channels.providerReadFile]: {
     request: { path: string; opts?: FileReadOptions; projectId?: string };

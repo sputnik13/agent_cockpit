@@ -70,6 +70,16 @@ export interface GitDiffResult {
   patch: string;
 }
 
+export interface GitDiffBundleResult {
+  patch: string;
+  newContent: string;
+  newReadable: boolean;
+  newTruncated: boolean;
+  oldContent: string;
+  oldReadable: boolean;
+  oldTruncated: boolean;
+}
+
 /** Result of the gitBranchPoint RPC call. Null-sentinel is indicated by an
  *  empty parentRef (the Go handler returns {} for null). */
 export interface GitBranchPointResult {
@@ -134,22 +144,35 @@ export function encodeFrame(payload: unknown): Buffer {
  * payloads as they become available, buffering partial frames across chunks.
  */
 export class FrameDecoder {
-  private buf: Buffer = Buffer.alloc(0);
+  // Pending chunks held WITHOUT concatenation, plus their running byte total.
+  // Concatenating the whole accumulated buffer on every chunk (the old approach)
+  // is O(n^2) in chunk count for a large payload that arrives as many small SSH
+  // packets; here we concat exactly once per complete frame instead.
+  private chunks: Buffer[] = [];
+  private buffered = 0;
 
   /** Append a chunk and return any complete payloads decoded from the buffer. */
   push(chunk: Buffer): unknown[] {
-    this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
+    if (chunk.length === 0) return [];
+    this.chunks.push(chunk);
+    this.buffered += chunk.length;
     const out: unknown[] = [];
     for (;;) {
-      if (this.buf.length < HEADER_BYTES) break;
-      const length = this.buf.readUInt32BE(0);
+      if (this.buffered < HEADER_BYTES) break;
+      // Coalesce only when we have at least a header to read; one concat yields a
+      // contiguous view for both the length read and the body slice below.
+      const buf = this.chunks.length === 1 ? this.chunks[0]! : Buffer.concat(this.chunks, this.buffered);
+      this.chunks = [buf];
+      const length = buf.readUInt32BE(0);
       if (length > MAX_MESSAGE_BYTES) {
         throw new HelperRpcError(`frame too large: ${length} bytes`);
       }
-      if (this.buf.length < HEADER_BYTES + length) break;
-      const body = this.buf.subarray(HEADER_BYTES, HEADER_BYTES + length);
+      if (buf.length < HEADER_BYTES + length) break;
+      const body = buf.subarray(HEADER_BYTES, HEADER_BYTES + length);
       out.push(JSON.parse(body.toString('utf8')));
-      this.buf = this.buf.subarray(HEADER_BYTES + length);
+      const rest = buf.subarray(HEADER_BYTES + length);
+      this.chunks = rest.length > 0 ? [rest] : [];
+      this.buffered = rest.length;
     }
     return out;
   }
@@ -264,8 +287,11 @@ export class HelperRpcClient {
     return this.call<HandshakeResult>('handshake', { protocolVersion: PROTOCOL_VERSION });
   }
 
-  readFile(path: string): Promise<ReadFileResult> {
-    return this.call<ReadFileResult>('readFile', { path });
+  readFile(path: string, opts?: { ref?: string; cwd?: string }): Promise<ReadFileResult> {
+    // ref/cwd are omitted from the JSON when undefined, so the helper sees an
+    // empty Ref and reads the working tree (unchanged behavior). When set, the
+    // helper reads at the git ref via `git show`.
+    return this.call<ReadFileResult>('readFile', { path, ref: opts?.ref, cwd: opts?.cwd });
   }
 
   stat(path: string): Promise<StatResult> {
@@ -282,6 +308,13 @@ export class HelperRpcClient {
     const params: Record<string, unknown> = { cwd, path };
     if (baseline !== undefined) params['baseline'] = baseline;
     return this.call<GitDiffResult>('gitDiff', params);
+  }
+
+  /** One round trip: unified patch + both sides' content for highlighting. */
+  getDiffBundle(cwd: string, path: string, baseline?: string): Promise<GitDiffBundleResult> {
+    const params: Record<string, unknown> = { cwd, path };
+    if (baseline !== undefined) params['baseline'] = baseline;
+    return this.call<GitDiffBundleResult>('getDiffBundle', params);
   }
 
   /** Resolve the branch-point (parent ref + merge-base SHA) for a worktree.

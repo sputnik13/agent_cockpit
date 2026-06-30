@@ -43,6 +43,13 @@ const api: RendererApi = {
       invoke<{ patch: string }>(Channels.providerGetFileDiff, { worktreePath, filePath, baseline, projectId }).then(
         (r) => r.patch,
       ),
+    getDiffBundle: (worktreePath, filePath, baseline, projectId) =>
+      invoke<{ bundle: never }>(Channels.providerGetDiffBundle, {
+        worktreePath,
+        filePath,
+        baseline,
+        projectId,
+      }).then((r) => r.bundle),
     readFile: (path, opts, projectId) =>
       invoke<{ file: never }>(Channels.providerReadFile, { path, opts, projectId }).then((r) => r.file),
     stat: (path, projectId) =>

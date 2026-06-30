@@ -8,18 +8,19 @@ import { useProjectsStore } from '../providerClient';
 
 // Mirror content.test.tsx: the ContentViewer subtree resolves its reads through
 // the provider client and window.api, so stub both before importing the host.
-const { getFileDiff, readFile } = vi.hoisted(() => ({
+const { getFileDiff, getDiffBundle, readFile } = vi.hoisted(() => ({
   getFileDiff: vi.fn(),
+  getDiffBundle: vi.fn(),
   readFile: vi.fn(),
 }));
 
 vi.mock('../providerClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../providerClient')>();
-  return { ...actual, agentCockpit: { provider: { getFileDiff, readFile } } };
+  return { ...actual, agentCockpit: { provider: { getFileDiff, getDiffBundle, readFile } } };
 });
 
 (globalThis as unknown as { window: Window }).window ??= globalThis as unknown as Window;
-(window as unknown as { api: unknown }).api = { provider: { getFileDiff, readFile } };
+(window as unknown as { api: unknown }).api = { provider: { getFileDiff, getDiffBundle, readFile } };
 
 // Import the real host (renders the real ContentViewer subtree) after the shims.
 import { ContentPanelHost } from '../workspace/panels';
@@ -54,8 +55,10 @@ function select(projectId: string, path: string, kind: 'change' | 'file', baseli
 
 beforeEach(() => {
   getFileDiff.mockReset();
+  getDiffBundle.mockReset();
   readFile.mockReset();
   getFileDiff.mockResolvedValue(SAMPLE_DIFF);
+  getDiffBundle.mockResolvedValue({ patch: SAMPLE_DIFF, oldContent: null, newContent: null });
   readFile.mockResolvedValue({ content: '# Title\n\nbody', truncated: false, isBinary: false, sizeBytes: 13 });
   useContentSelection.setState({ selections: {} });
   useProjectsStore.setState({ activeId: null, projects: [] });
@@ -84,41 +87,41 @@ describe('ContentPanelHost (store -> panel reactivity)', () => {
     select('p1', 'a.ts', 'change', 'HEAD');
 
     await waitFor(() => expect(screen.queryByText('No file selected')).not.toBeInTheDocument());
-    await waitFor(() => expect(getFileDiff).toHaveBeenCalledWith('', 'a.ts', 'HEAD'));
+    await waitFor(() => expect(getDiffBundle).toHaveBeenCalledWith('', 'a.ts', 'HEAD'));
   });
 
   it('shows each project its own selection and restores on switch-back', async () => {
-    select('p1', 'p1-file.ts', 'change', 'HEAD'); // .ts change -> diff -> getFileDiff
+    select('p1', 'p1-file.ts', 'change', 'HEAD'); // .ts change -> diff -> getDiffBundle
     select('p2', 'p2-readme.md', 'file'); // .md file -> rendered -> readFile
 
     setActive('p1');
     render(<ContentPanelHost />);
-    await waitFor(() => expect(getFileDiff).toHaveBeenCalledWith('', 'p1-file.ts', 'HEAD'));
+    await waitFor(() => expect(getDiffBundle).toHaveBeenCalledWith('', 'p1-file.ts', 'HEAD'));
 
     // Switch to p2 -> p2's own selection (markdown renders the working-tree
     // source, so readFile is called for the p2 path). The diff is also fetched
     // for p2's path (it drives markdown change callouts), confirming the panel
     // reacted to the active-project switch rather than retaining p1's content.
-    getFileDiff.mockClear();
+    getDiffBundle.mockClear();
     readFile.mockClear();
     setActive('p2');
     await waitFor(() => expect(readFile.mock.calls.some((c) => c[0] === 'p2-readme.md')).toBe(true));
-    expect(getFileDiff).not.toHaveBeenCalledWith('', 'p1-file.ts', 'HEAD');
+    expect(getDiffBundle).not.toHaveBeenCalledWith('', 'p1-file.ts', 'HEAD');
 
     // Switch back to p1 -> p1's selection is restored.
-    getFileDiff.mockClear();
+    getDiffBundle.mockClear();
     setActive('p1');
-    await waitFor(() => expect(getFileDiff).toHaveBeenCalledWith('', 'p1-file.ts', 'HEAD'));
+    await waitFor(() => expect(getDiffBundle).toHaveBeenCalledWith('', 'p1-file.ts', 'HEAD'));
   });
 
   it('updates the view when a different file is selected under the same project', async () => {
     select('p1', 'first.ts', 'change', 'HEAD');
     setActive('p1');
     render(<ContentPanelHost />);
-    await waitFor(() => expect(getFileDiff).toHaveBeenCalledWith('', 'first.ts', 'HEAD'));
+    await waitFor(() => expect(getDiffBundle).toHaveBeenCalledWith('', 'first.ts', 'HEAD'));
 
-    getFileDiff.mockClear();
+    getDiffBundle.mockClear();
     select('p1', 'second.ts', 'change', 'HEAD');
-    await waitFor(() => expect(getFileDiff).toHaveBeenCalledWith('', 'second.ts', 'HEAD'));
+    await waitFor(() => expect(getDiffBundle).toHaveBeenCalledWith('', 'second.ts', 'HEAD'));
   });
 });

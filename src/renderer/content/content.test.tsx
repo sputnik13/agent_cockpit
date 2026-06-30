@@ -6,8 +6,9 @@ import { afterEach } from 'vitest';
 import type { ContentSelection } from './selectionStore';
 import { useContentSelection } from './selectionStore';
 
-const { getFileDiff, readFile } = vi.hoisted(() => ({
+const { getFileDiff, getDiffBundle, readFile } = vi.hoisted(() => ({
   getFileDiff: vi.fn(),
+  getDiffBundle: vi.fn(),
   readFile: vi.fn(),
 }));
 
@@ -17,7 +18,7 @@ const { getFileDiff, readFile } = vi.hoisted(() => ({
 // too for their reads.
 vi.mock('../providerClient', () => ({
   agentCockpit: {
-    provider: { getFileDiff, readFile },
+    provider: { getFileDiff, getDiffBundle, readFile },
     // RawFile/notes load through the notes store; stub an empty list.
     notes: {
       list: vi.fn().mockResolvedValue([]),
@@ -37,7 +38,7 @@ vi.mock('../providerClient', () => ({
 
 (globalThis as unknown as { window: Window }).window ??= globalThis as unknown as Window;
 (window as unknown as { api: unknown }).api = {
-  provider: { getFileDiff, readFile },
+  provider: { getFileDiff, getDiffBundle, readFile },
 };
 
 import { ContentViewer } from './ContentViewer';
@@ -105,8 +106,11 @@ describe('useContentSelection (per-project store)', () => {
 describe('ContentViewer', () => {
   beforeEach(() => {
     getFileDiff.mockReset();
+    getDiffBundle.mockReset();
     readFile.mockReset();
     getFileDiff.mockResolvedValue(SAMPLE_DIFF);
+    // Diff mode now loads a one-call bundle (patch + both sides' content).
+    getDiffBundle.mockResolvedValue({ patch: SAMPLE_DIFF, oldContent: null, newContent: null });
     readFile.mockResolvedValue({ content: '# Title\n\nbody', truncated: false, isBinary: false, sizeBytes: 13 });
   });
 
@@ -127,7 +131,7 @@ describe('ContentViewer', () => {
   it('defaults to diff mode for a .ts change', async () => {
     render(<ContentViewer selection={sel('src/file.ts')} />);
     await waitFor(() =>
-      expect(getFileDiff).toHaveBeenCalledWith('/wt', 'src/file.ts', undefined),
+      expect(getDiffBundle).toHaveBeenCalledWith('/wt', 'src/file.ts', undefined),
     );
     const diff = screen.getByRole('tab', { name: 'Diff' });
     expect(diff).toHaveAttribute('aria-selected', 'true');

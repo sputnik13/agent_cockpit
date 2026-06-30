@@ -28,6 +28,7 @@ import type {
 import type {
   ConnectionStatus,
   DirEntry,
+  DiffBundle,
   FileReadOptions,
   FileReadResult,
   ProjectKind,
@@ -439,6 +440,13 @@ export class RemoteProvider implements WorkspaceProvider {
     return posix.isAbsolute(path) ? path : posix.join(this.spec.remotePath, path);
   }
 
+  /** Path relative to the remote repository root — the pathspec form `git show
+   *  <ref>:<path>` expects. Selection paths are usually already repo-relative;
+   *  an absolute path is made relative to the repo root. */
+  private repoRelative(path: string): string {
+    return posix.isAbsolute(path) ? posix.relative(this.spec.remotePath, path) : path;
+  }
+
   // Git (read-only) — helper RPC reads (br h7a.7.3).
   async listWorktrees(): Promise<WorktreeRecord[]> {
     const entries = await this.rpc().listWorktrees(this.spec.remotePath);
@@ -464,6 +472,19 @@ export class RemoteProvider implements WorkspaceProvider {
     const res = await this.rpc().gitDiff(cwd, filePath, baseline);
     return res.patch;
   }
+  async getDiffBundle(worktreePath: string, filePath: string, baseline?: string): Promise<DiffBundle> {
+    // One round trip: patch + both sides' content. The helper reads the new side
+    // from the working tree and the old side via `git show <baseline>:<path>`
+    // (repo-relative). Unreadable/truncated sides come back as null so the
+    // renderer falls back to plain text for that side.
+    const cwd = worktreePath || this.spec.remotePath;
+    const res = await this.rpc().getDiffBundle(cwd, this.repoRelative(filePath), baseline);
+    return {
+      patch: res.patch,
+      newContent: res.newReadable && !res.newTruncated ? res.newContent : null,
+      oldContent: baseline && res.oldReadable && !res.oldTruncated ? res.oldContent : null,
+    };
+  }
   async resolveBranchPoint(worktreePath: string): Promise<BranchPoint | null> {
     const cwd = worktreePath || this.spec.remotePath;
     const res = await this.rpc().gitBranchPoint(cwd);
@@ -473,8 +494,13 @@ export class RemoteProvider implements WorkspaceProvider {
   }
 
   // Filesystem (read-only) — helper RPC reads (br h7a.7.3).
-  async readFile(path: string, _opts?: FileReadOptions): Promise<FileReadResult> {
-    const res = await this.rpc().readFile(this.resolve(path));
+  async readFile(path: string, opts?: FileReadOptions): Promise<FileReadResult> {
+    // Honor opts.ref: read the file AT the git ref (diff old side / raw at
+    // baseline) via the helper's `git show <ref>:<repo-relative-path>` instead of
+    // the working tree. Without a ref, read the working-tree file as before.
+    const res = opts?.ref
+      ? await this.rpc().readFile(this.repoRelative(path), { ref: opts.ref, cwd: this.spec.remotePath })
+      : await this.rpc().readFile(this.resolve(path));
     return {
       content: res.content,
       truncated: res.truncated,

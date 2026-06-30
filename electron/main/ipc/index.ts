@@ -10,6 +10,7 @@ import { Channels } from '@shared/ipc/channels';
 import type { BeadsCreateInput, ProjectInfo } from '@shared/ipc/channels';
 import type { ConnectionStatus, WorkspaceProvider } from '../providers/types';
 import { sessionManager } from '../providers';
+import { diffCache } from '../providers/diffCache';
 import {
   addProject,
   getProject,
@@ -163,9 +164,12 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   // lifecycle (started on connect, stopped on disconnect/close); the renderer no
   // longer drives watch.subscribe — the watchSubscribe/Unsubscribe IPC channels
   // were removed. The renderer hub routes these by (projectId, category).
-  sessionManager.setWatchListener((projectId, event) =>
-    send(Channels.evtWatch, { projectId, event }),
-  );
+  sessionManager.setWatchListener((projectId, event) => {
+    // Precise diff-bundle invalidation: drop changed paths (or clear the project
+    // on a git-state/baseline change) BEFORE the renderer reacts and re-reads.
+    diffCache.onWatch(projectId, event.paths);
+    send(Channels.evtWatch, { projectId, event });
+  });
 
   // IPC cache cleanup on provider eviction (D2/FR5).
   // When a provider is evicted (disconnect/reconnect/close/failed-connect), the
@@ -193,6 +197,8 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
         termDisposers.delete(key);
       }
     }
+    // Drop this project's cached diff bundles (a reconnect re-reads fresh).
+    diffCache.evictProject(projectId);
     logger.info(`IPC cache evicted for project ${projectId}`, 'ipc-eviction');
   });
 
@@ -343,6 +349,20 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     async (_e, req: { worktreePath: string; filePath: string; baseline?: string; projectId?: string }) => ({
       patch: await providerFor(req?.projectId).getFileDiff(req.worktreePath, req.filePath, req.baseline),
     }),
+  );
+  ipcMain.handle(
+    Channels.providerGetDiffBundle,
+    async (_e, req: { worktreePath: string; filePath: string; baseline?: string; projectId?: string }) => {
+      // Cache by the RESOLVED project id (req.projectId may be undefined → active
+      // project) so re-opens / mode toggles hit the cache; the watch invalidates.
+      const provider = providerFor(req?.projectId);
+      const pid = provider.projectId;
+      const hit = diffCache.get(pid, req.worktreePath, req.filePath, req.baseline);
+      if (hit) return { bundle: hit };
+      const bundle = await provider.getDiffBundle(req.worktreePath, req.filePath, req.baseline);
+      diffCache.set(pid, req.worktreePath, req.filePath, req.baseline, bundle);
+      return { bundle };
+    },
   );
   ipcMain.handle(Channels.providerReadFile, async (_e, req: { path: string; opts?: never; projectId?: string }) => ({
     file: await providerFor(req?.projectId).readFile(requireString(req?.path, 'path'), req.opts),

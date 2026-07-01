@@ -63,7 +63,10 @@ export async function switchTerminalRenderer(next: TerminalRenderer): Promise<vo
   // terminals, release + reset the control session, and clear its tmux view.
   controlPaneRegistry.disposeProject(projectId);
   releaseControlSession();
-  resetControlSession();
+  // Per-project reset: keeps this project's channelEpoch so the re-acquire below
+  // re-inits even though a backend switch leaves tmux open (no fresh attach), and
+  // never touches other projects' state.
+  resetControlSession(projectId);
   useTmuxStore.getState().resetProject(projectId);
 
   // Re-acquire (mirrors the panel's reconnect branch) so tmux replays and panes

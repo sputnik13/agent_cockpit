@@ -241,6 +241,31 @@ describe('RemoteTmuxControlManager (fake channel, no live SSH)', () => {
     mgr.close();
   });
 
+  it('emits an `attached` epoch on first open and a higher one on reattach', async () => {
+    const channels: FakeChannel[] = [];
+    const opener = async (): Promise<ControlChannel> => {
+      const c = new FakeChannel();
+      channels.push(c);
+      return c;
+    };
+    const mgr = new RemoteTmuxControlManager(opener);
+    const epochs: number[] = [];
+    mgr.onNotification((n) => {
+      if (n.type === 'attached') epochs.push(n.epoch);
+    });
+
+    await mgr.open();
+    expect(epochs).toEqual([1]); // first attach announces epoch 1
+
+    // Unexpected drop -> backoff reattach opens a fresh channel and re-announces.
+    channels[0]!.drop();
+    await new Promise((r) => setTimeout(r, 700));
+
+    expect(channels.length).toBe(2);
+    expect(epochs).toEqual([1, 2]); // strictly increasing, one per successful attach
+    mgr.close();
+  });
+
   it('does not reattach after an explicit close', async () => {
     const channels: FakeChannel[] = [];
     const opener = async (): Promise<ControlChannel> => {
@@ -285,6 +310,49 @@ describe('RemoteTmuxControlManager (fake channel, no live SSH)', () => {
       // It gave up and surfaced an exit so the UI can show disconnected.
       expect(exits.length).toBeGreaterThanOrEqual(1);
       expect(mgr.isOpen()).toBe(false);
+      mgr.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fires reconnecting then reattached status hooks around a silent channel flap', async () => {
+    const channels: FakeChannel[] = [];
+    const opener = async (): Promise<ControlChannel> => {
+      const c = new FakeChannel();
+      channels.push(c);
+      return c;
+    };
+    const mgr = new RemoteTmuxControlManager(opener);
+    const events: string[] = [];
+    mgr.onReconnecting = () => events.push('reconnecting');
+    mgr.onReattached = () => events.push('reattached');
+
+    await mgr.open();
+    expect(events).toEqual([]); // first open is not a reconnect
+
+    channels[0]!.drop(); // silent flap
+    await new Promise((r) => setTimeout(r, 700));
+
+    expect(channels.length).toBe(2);
+    expect(events).toEqual(['reconnecting', 'reattached']);
+    mgr.close();
+  });
+
+  it('fires onReattachExhausted when the backoff is exhausted', async () => {
+    vi.useFakeTimers();
+    try {
+      const opener = async (): Promise<ControlChannel> => {
+        const c = new FakeChannel();
+        setTimeout(() => c.drop(), 0); // flap every time
+        return c;
+      };
+      const mgr = new RemoteTmuxControlManager(opener);
+      let exhausted = 0;
+      mgr.onReattachExhausted = () => (exhausted += 1);
+      await mgr.open();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(exhausted).toBe(1);
       mgr.close();
     } finally {
       vi.useRealTimers();

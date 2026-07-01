@@ -12,18 +12,45 @@ const api = vi.hoisted(() => {
     resize: vi.fn().mockResolvedValue(undefined),
     capturePane: vi.fn().mockResolvedValue([]),
   };
-  const events = { onTmux: vi.fn(() => () => {}) };
-  const fake = { tmuxControl, events };
+  // Capture live onTmux handlers so tests can fire an `attached` epoch (the
+  // signal main emits on every channel (re)attach) and drive the reinit path.
+  type TmuxSink = (e: { projectId: string; notification: unknown }) => void;
+  const tmuxHandlers: TmuxSink[] = [];
+  const events = {
+    onTmux: vi.fn((h: TmuxSink) => {
+      tmuxHandlers.push(h);
+      return () => {
+        const i = tmuxHandlers.indexOf(h);
+        if (i >= 0) tmuxHandlers.splice(i, 1);
+      };
+    }),
+  };
+  const fake = { tmuxControl, events, tmuxHandlers };
   const w = (globalThis as unknown as { window: Record<string, unknown> }).window;
   w.api = fake;
   return fake;
 });
+
+/** Simulate the main-process control manager announcing a fresh channel (first
+ *  open or a silent reattach) at `epoch` for `projectId`. */
+function emitAttached(projectId: string, epoch: number): void {
+  for (const h of [...api.tmuxHandlers]) h({ projectId, notification: { type: 'attached', epoch } });
+}
+
+/** Count `list-windows` commands issued so far (1 reconcile read + 2 sync reads
+ *  = 3 per completed reinit). */
+function listWindowsCount(): number {
+  return api.tmuxControl.command.mock.calls.filter((c) => (c[0] as string).startsWith('list-windows'))
+    .length;
+}
 
 import {
   acquireControlSession,
   ensureWindows,
   reconcile,
   resetControlSession,
+  restoreActiveWindow,
+  syncFromTmux,
   whenReady,
 } from './controlSession';
 import { useTmuxStore } from './tmuxStore';
@@ -293,6 +320,77 @@ describe('ensureWindows (wires reconcile into tmux commands)', () => {
   });
 });
 
+describe('syncFromTmux (authoritative window sync)', () => {
+  beforeEach(() => {
+    useTmuxStore.getState().reset();
+    useTmuxStore.getState().setActiveProject(PROJ);
+    api.tmuxControl.command.mockReset();
+  });
+  afterEach(() => resetControlSession());
+
+  it('prunes a slice window absent from list-windows (closed while the channel was down)', async () => {
+    const store = useTmuxStore.getState();
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@1' });
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@2' });
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@3' });
+    expect(useTmuxStore.getState().byProject[PROJ]?.windowOrder).toEqual(['@1', '@2', '@3']);
+
+    // The live session now reports only @1 and @3 — @2 was closed during the
+    // channel drop, and a reattach replays no %window-close for what is gone.
+    withWindows([
+      ['@1', 'persistent'],
+      ['@3', 'zsh'],
+    ]);
+    await syncFromTmux(PROJ);
+
+    expect(useTmuxStore.getState().byProject[PROJ]?.windowOrder).toEqual(['@1', '@3']);
+  });
+});
+
+describe('restoreActiveWindow (reconnect focuses the last-worked window)', () => {
+  beforeEach(() => {
+    useTmuxStore.getState().reset();
+    useTmuxStore.getState().setActiveProject(PROJ);
+    api.tmuxControl.command.mockReset();
+  });
+  afterEach(() => resetControlSession());
+
+  it('adopts tmux active window as the store active window even when it is not the first', async () => {
+    const store = useTmuxStore.getState();
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@1' });
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@3' });
+    store.applyNotification(PROJ, { type: 'window-renamed', windowId: '@3', name: 'editor' });
+
+    // tmux reports @3 as the session's active window (the last one focused).
+    api.tmuxControl.command.mockImplementation(async (args: string) =>
+      args.startsWith('display-message')
+        ? { num: 1, error: false, lines: ['@3'] }
+        : { num: 1, error: false, lines: [] },
+    );
+    await restoreActiveWindow(PROJ);
+
+    expect(useTmuxStore.getState().byProject[PROJ]?.activeWindowId).toBe('@3');
+  });
+
+  it('does not adopt a reserved (hidden) window — leaves the current selection', async () => {
+    const store = useTmuxStore.getState();
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@1' });
+    store.applyNotification(PROJ, { type: 'window-renamed', windowId: '@1', name: 'persistent' });
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@2' });
+    store.applyNotification(PROJ, { type: 'session-window-changed', windowId: '@2' });
+
+    // tmux's active window is the reserved persistent holder — must be ignored.
+    api.tmuxControl.command.mockImplementation(async (args: string) =>
+      args.startsWith('display-message')
+        ? { num: 1, error: false, lines: ['@1'] }
+        : { num: 1, error: false, lines: [] },
+    );
+    await restoreActiveWindow(PROJ);
+
+    expect(useTmuxStore.getState().byProject[PROJ]?.activeWindowId).toBe('@2');
+  });
+});
+
 describe('acquireControlSession single-flight', () => {
   beforeEach(() => {
     useTmuxStore.getState().reset();
@@ -307,7 +405,7 @@ describe('acquireControlSession single-flight', () => {
   });
   afterEach(() => resetControlSession());
 
-  it('runs ONE ensure when two acquires fire in the same tick', async () => {
+  it('opens exactly once when two acquires fire in the same tick', async () => {
     // Defer open so both acquires register before it settles.
     let release!: (s: string) => void;
     api.tmuxControl.open.mockImplementationOnce(
@@ -322,50 +420,88 @@ describe('acquireControlSession single-flight', () => {
 
     // open invoked exactly once (single-flight collapsed the second acquire).
     expect(api.tmuxControl.open).toHaveBeenCalledTimes(1);
-    // Exactly one ensure ran: 1 reconcile-snapshot read + 2 syncFromTmux reads.
-    const lists = api.tmuxControl.command.mock.calls
-      .map((c) => c[0] as string)
-      .filter((a) => a.startsWith('list-windows'));
-    expect(lists.length).toBe(3);
   });
 
-  it('marks initialized on success so a later acquire is a no-op ensure', async () => {
+  it('runs ONE ensure when the attach epoch arrives and acquire backstops it', async () => {
     acquireControlSession(PROJ);
     await whenReady(PROJ);
-    const firstLists = api.tmuxControl.command.mock.calls.filter((c) =>
-      (c[0] as string).startsWith('list-windows'),
-    ).length;
-    expect(firstLists).toBe(3); // one ensure: reconcile read + 2 sync reads
-
-    // A second acquire after settle must not re-run ensure (already initialized).
-    acquireControlSession(PROJ);
-    await whenReady(PROJ);
-    const totalLists = api.tmuxControl.command.mock.calls.filter((c) =>
-      (c[0] as string).startsWith('list-windows'),
-    ).length;
-    expect(totalLists).toBe(3); // unchanged — no second ensure
+    emitAttached(PROJ, 1); // main announces the fresh channel during/after open
+    // Exactly one authoritative window sync runs for the epoch.
+    await vi.waitFor(() => expect(listWindowsCount()).toBe(3));
+    // Give any duplicate reinit a chance to (wrongly) run, then assert it did not.
+    await Promise.resolve();
+    expect(listWindowsCount()).toBe(3);
   });
 
-  it('does NOT mark initialized on an empty-list bail; a later acquire retries', async () => {
+  it('re-runs ensure on a channel reattach (higher epoch) — the reconnect fix', async () => {
+    acquireControlSession(PROJ);
+    await whenReady(PROJ);
+    emitAttached(PROJ, 1);
+    await vi.waitFor(() => expect(listWindowsCount()).toBe(3));
+
+    // Silent reattach: SAME session stays connected, only the channel flapped.
+    // A new epoch must re-run the authoritative window sync with no re-acquire.
+    emitAttached(PROJ, 2);
+    await vi.waitFor(() => expect(listWindowsCount()).toBe(6));
+  });
+
+  it('does NOT re-run ensure for a repeated (same) epoch', async () => {
+    acquireControlSession(PROJ);
+    await whenReady(PROJ);
+    emitAttached(PROJ, 1);
+    await vi.waitFor(() => expect(listWindowsCount()).toBe(3));
+
+    emitAttached(PROJ, 1); // duplicate announcement of the same channel
+    await Promise.resolve();
+    expect(listWindowsCount()).toBe(3); // unchanged — already initialized this epoch
+  });
+
+  it('per-project reset keeps the shared subscription; full reset drops it', async () => {
+    acquireControlSession(PROJ);
+    await whenReady(PROJ);
+    expect(api.tmuxHandlers.length).toBe(1);
+
+    resetControlSession(PROJ); // one project disconnecting
+    expect(api.tmuxHandlers.length).toBe(1); // other live projects keep routing
+
+    resetControlSession(); // full teardown (no arg)
+    expect(api.tmuxHandlers.length).toBe(0);
+  });
+
+  it('per-project reset re-inits on re-acquire even without a fresh attach (backend switch)', async () => {
+    acquireControlSession(PROJ);
+    await whenReady(PROJ);
+    emitAttached(PROJ, 1);
+    await vi.waitFor(() => expect(listWindowsCount()).toBe(3));
+
+    // Backend switch: per-project reset, then re-acquire with tmux still open —
+    // open() resolves but emits NO new `attached`. Re-init must still run because
+    // the kept channelEpoch is now ahead of the cleared initializedEpoch.
+    resetControlSession(PROJ);
+    acquireControlSession(PROJ);
+    await whenReady(PROJ);
+    await vi.waitFor(() => expect(listWindowsCount()).toBe(6));
+  });
+
+  it('does NOT mark the epoch initialized on an empty-list bail; a later epoch retries', async () => {
     withWindows([]); // first ensure sees an empty list → bail
     acquireControlSession(PROJ);
     await whenReady(PROJ);
+    emitAttached(PROJ, 1);
+    await vi.waitFor(() => expect(listWindowsCount()).toBeGreaterThan(0));
     expect(
       api.tmuxControl.command.mock.calls.some((c) => (c[0] as string).startsWith('kill-window')),
     ).toBe(false);
 
-    // Now the session is populated; the retry must re-run ensure.
+    // Now the session is populated; a later attach epoch must re-run ensure
+    // (the bail did not consume the guard).
     api.tmuxControl.command.mockClear();
     withWindows([
       ['@1', 'persistent'],
       ['@2', 'run-1'],
       ['@3', 'zsh'],
     ]);
-    acquireControlSession(PROJ);
-    await whenReady(PROJ);
-    const lists = api.tmuxControl.command.mock.calls.filter((c) =>
-      (c[0] as string).startsWith('list-windows'),
-    ).length;
-    expect(lists).toBe(3); // ensure ran again on retry (reconcile read + 2 sync reads)
+    emitAttached(PROJ, 2);
+    await vi.waitFor(() => expect(listWindowsCount()).toBe(3));
   });
 });

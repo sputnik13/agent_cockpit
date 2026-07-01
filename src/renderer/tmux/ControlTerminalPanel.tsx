@@ -21,6 +21,7 @@ import {
   pushClientSize,
   releaseControlSession,
   resetControlSession,
+  subscribeReinit,
   syncFromTmux,
 } from './controlSession';
 import { renameWindow as renameWindowCmd } from '@shared/tmux';
@@ -89,7 +90,7 @@ export function ControlTerminalPanel(): JSX.Element {
       // reaches tmux. Disposing forces acquire() to rebuild + rebind on reconnect.
       paneRegistry.disposeProject(activeId);
       releaseControlSession();
-      resetControlSession();
+      resetControlSession(activeId); // per-project: never clobber other live projects
       useTmuxStore.getState().resetProject(activeId);
       return;
     }
@@ -295,6 +296,35 @@ export function ControlTerminalPanel(): JSX.Element {
   // stale project after a switch.
   const activeIdRef = useRef<string | null>(activeId);
   activeIdRef.current = activeId;
+
+  // Restore live pane displays after a control-channel (re)attach. A SILENT
+  // `-CC` reattach (network/keepalive flap, sleep/wake) keeps the project
+  // `connected`, so no status transition fires and nothing else re-seeds the
+  // panes or forces tmux to re-emit — the terminal would show its stale buffer
+  // until a manual refresh. controlSession fires `subscribeReinit` after the
+  // authoritative window sync for a fresh channel epoch; mirror the toolbar HARD
+  // refresh (re-seed normal-screen panes from capture-pane so content missed
+  // during the drop is recovered + a resize round-trip that SIGWINCHes the apps;
+  // alt-screen TUIs are gated to repaint-only inside hardRecoverTab, no runaway
+  // scroll). Subscribed once; reads live state via refs. Deferred a frame so any
+  // panes mounted by the just-synced layout are acquired into the registry first.
+  useEffect(() => {
+    return subscribeReinit((projectId) => {
+      if (projectId !== activeIdRef.current) return; // only the visible project has mounted panes
+      requestAnimationFrame(() => {
+        const pid = activeIdRef.current;
+        const win = currentWindowRef.current;
+        if (!pid || pid !== projectId || !win) return;
+        void paneRegistry.hardRecoverTab(pid, win).catch(() => {});
+        nudgeClientSize(hostRef.current);
+        logDiagnostic(
+          'info',
+          'control-terminal',
+          `reattach-reseed project=${pid} window=${win} trigger=channel-reattach`,
+        );
+      });
+    });
+  }, []);
 
   // Persist the active pane per project so it can be restored on switch-back /
   // after an app restart. Guarded on layout membership: during a project switch

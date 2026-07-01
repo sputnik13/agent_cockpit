@@ -100,6 +100,38 @@ describe('ControlTerminalPanel', () => {
     await waitFor(() => expect(container.querySelector('.ac-term')).not.toBeNull());
   });
 
+  it('re-seeds the active tab on a silent control-channel reattach (attached epoch, no status change)', async () => {
+    const { container } = render(<ControlTerminalPanel />);
+    await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
+    act(() => {
+      setActiveSlice({
+        windowOrder: ['@0'],
+        windows: { '@0': { windowId: '@0', name: 'shell', layout: leaf('%0') } },
+        activeWindowId: '@0',
+        panes: { '%0': { paneId: '%0', windowId: '@0' } },
+      });
+    });
+    await waitFor(() => expect(container.querySelector('.ac-term')).not.toBeNull());
+
+    // list-windows returns a populated session so the reinit's ensureWindows does
+    // not bail and fires the reinit notification the panel listens for.
+    api.tmuxControl.command.mockImplementation(async (args: string) =>
+      args.startsWith('list-windows')
+        ? { num: 1, error: false, lines: ['@0 shell'] }
+        : { num: 1, error: false, lines: [] },
+    );
+    const hardSpy = vi.spyOn(paneRegistry, 'hardRecoverTab').mockResolvedValue(undefined);
+
+    // A silent `-CC` reattach announces a fresh channel epoch with NO connection
+    // status transition — the case that previously left the display stale.
+    act(() => api.emitTmux({ projectId: ACTIVE, notification: { type: 'attached', epoch: 7 } }));
+
+    await waitFor(() => expect(hardSpy).toHaveBeenCalledWith(ACTIVE, '@0'));
+    hardSpy.mockRestore();
+    api.tmuxControl.command.mockReset();
+    api.tmuxControl.command.mockResolvedValue({ num: 1, error: false, lines: [] });
+  });
+
   it('routes notifications to the addressed project and only renders the active one', async () => {
     render(<ControlTerminalPanel />);
     await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());

@@ -212,7 +212,20 @@ export async function syncFromTmux(projectId: string): Promise<void> {
   try {
     const apply = (wire: Parameters<ReturnType<typeof store>['applyNotification']>[1]): void =>
       store().applyNotification(projectId, wire);
-    for (const w of await listWindows('#{window_id} #{window_name}')) {
+    const nameRows = await listWindows('#{window_id} #{window_name}');
+    const liveIds = new Set(nameRows.map((w) => w.id));
+    // Authoritative prune: a window closed while the channel was down (a silent
+    // reattach re-syncs from `list-windows`, but tmux replays no `%window-close`
+    // for what is already gone) must be dropped from the slice, or the tab strip
+    // shows a phantom window until the next manual switch. Reserved windows
+    // (persistent/run-1) are in `list-windows` too, so they are never pruned.
+    const slice = store().byProject[projectId];
+    if (slice) {
+      for (const id of [...slice.windowOrder]) {
+        if (!liveIds.has(id)) apply({ type: 'window-close', windowId: id });
+      }
+    }
+    for (const w of nameRows) {
       apply({ type: 'window-add', windowId: w.id });
       apply({ type: 'window-renamed', windowId: w.id, name: w.rest });
     }
@@ -222,6 +235,37 @@ export async function syncFromTmux(projectId: string): Promise<void> {
     }
   } catch {
     /* best effort */
+  }
+}
+
+/**
+ * Adopt tmux's active window for `projectId` on re-init so a reconnect focuses
+ * the window the user was last working in, not the first tab. tmux preserves the
+ * session's current window across a detach; `display-message -p '#{window_id}'`
+ * returns it for the attached `-CC` client. Applied as a synthetic
+ * `session-window-changed` (the same reducer path a real window switch uses), so
+ * the panel selects it and its existing focus effect restores keyboard focus.
+ *
+ * Only called from the re-init path — NOT from the general {@link syncFromTmux}
+ * that `afterStructural` runs, so it never fights live `%window-pane-changed`
+ * during normal use. A silent reattach where the user never switched re-asserts
+ * the SAME window (a no-op for the panel), so the current selection is preserved.
+ * Best-effort: a failed/empty query leaves the current selection untouched.
+ */
+export async function restoreActiveWindow(projectId: string): Promise<void> {
+  try {
+    const reply = await store().command(`display-message -p '#{window_id}'`);
+    const id = reply.lines[0]?.trim();
+    // Only adopt a real, non-reserved window (never steal focus to persistent/
+    // run-1). Reserved windows are hidden from the tab strip, so selecting one
+    // would render an empty body.
+    if (!id) return;
+    const view = store().byProject[projectId];
+    const name = view?.windows[id]?.name;
+    if (isHiddenWindow(name)) return;
+    store().applyNotification(projectId, { type: 'session-window-changed', windowId: id });
+  } catch {
+    /* best effort — leave the current selection */
   }
 }
 
@@ -377,19 +421,110 @@ export function nudgeClientSize(host: HTMLElement | null): void {
 
 // ---- Project-scoped lifecycle (single shared subscription) ----
 let subscription: (() => void) | null = null;
-/** Projects whose windows have been initialized (non-bail `ensureWindows`) this
- *  session. An empty-list bail does NOT mark a project initialized, so a later
- *  acquire/sync retries the ensure against a populated list. */
-const initialized = new Set<string>();
-/** Per-project single-flight: the in-flight open+ensure promise. Stored
- *  synchronously before awaiting so concurrent acquires (the two mount sites
- *  fire in the same tick) await the same promise rather than each running their
- *  own ensure. Cleared when it settles so a future retry is allowed. */
+/** Latest channel-attach epoch announced by the main-process control manager for
+ *  a project (via an `attached` notification). Bumped on the first open AND every
+ *  silent `-CC` reattach. This is the trigger for re-init — NOT the connection
+ *  status, which never transitions on a silent reattach (CLAUDE.md "control-mode
+ *  reconnect"). */
+const channelEpoch = new Map<string, number>();
+/** The channel epoch the renderer has already re-initialized (authoritative
+ *  window sync + pane re-seed) for a project. A reinit runs whenever
+ *  `channelEpoch !== initializedEpoch` — any change, since a hard reconnect
+ *  builds a fresh manager whose epoch restarts at 1 (i.e. can go "backwards"
+ *  relative to the prior manager). Replaces the old boolean `initialized` guard,
+ *  whose one-shot nature skipped re-init on reattach. */
+const initializedEpoch = new Map<string, number>();
+/** Per-project single-flight for reinit, so a burst of `attached` events (or an
+ *  acquire racing an `attached`) runs exactly one reinit at a time. */
+const reinitInFlight = new Map<string, Promise<void>>();
+/** Projects for which a reinit was requested while one was already in flight, so
+ *  a newer channel epoch that arrives mid-sync is re-drained on settle (rather
+ *  than dropped) — WITHOUT re-running a bare empty-list bail on a loop. */
+const reinitPending = new Set<string>();
+/** Listeners fired after a successful reinit for a project, so panel-owned
+ *  concerns (pane re-seed + resize round-trip) can restore live displays. The
+ *  window-list rebuild is done here; pane display is the subscriber's job. */
+const reinitListeners = new Set<(projectId: string) => void>();
+/** Per-project single-flight: the in-flight open promise. Stored synchronously
+ *  before awaiting so concurrent acquires (the two mount sites fire in the same
+ *  tick) await the same promise rather than each opening. Cleared on settle. */
 const inFlight = new Map<string, Promise<void>>();
-/** Per-project readiness: resolves once the session is open (and, on first
- *  acquire, its windows initialized). Pane seeding awaits this so `capture-pane`
- *  never targets a not-yet-open session. */
+/** Per-project readiness: resolves once the session is open. Pane seeding awaits
+ *  this so `capture-pane` never targets a not-yet-open session. */
 const ready = new Map<string, Promise<void>>();
+
+/** Subscribe to per-project reinit completions (a fresh channel finished its
+ *  authoritative window sync). Used by the terminal panel to re-seed visible
+ *  panes and force a resize round-trip. Returns an unsubscribe. */
+export function subscribeReinit(fn: (projectId: string) => void): () => void {
+  reinitListeners.add(fn);
+  return () => reinitListeners.delete(fn);
+}
+
+function notifyReinit(projectId: string): void {
+  for (const fn of reinitListeners) {
+    try {
+      fn(projectId);
+    } catch (e) {
+      // Isolate listener errors so one bad subscriber can't break the reinit.
+      console.error('[control-session] reinit listener threw', e);
+    }
+  }
+}
+
+/**
+ * Record a channel-attach epoch and re-initialize if it differs from what the
+ * renderer last initialized for this project. Commands issued during re-init
+ * (`list-windows`, `capture-pane`) target the ACTIVE provider on the main side,
+ * so a re-init is only safe for the currently-active project; a backgrounded
+ * project's flap is deferred and picked up by {@link acquireControlSession} when
+ * it is next activated (channelEpoch is retained until then).
+ */
+function onAttached(projectId: string, epoch: number): void {
+  channelEpoch.set(projectId, epoch);
+  maybeReinit(projectId);
+}
+
+function maybeReinit(projectId: string): void {
+  if (store().activeProjectId !== projectId) return; // commands target active project only
+  const target = channelEpoch.get(projectId);
+  if (target === undefined || initializedEpoch.get(projectId) === target) return; // caught up
+  if (reinitInFlight.has(projectId)) {
+    // A reinit is already running; record that a (possibly newer) epoch is
+    // pending so the in-flight run re-drains on settle instead of dropping it.
+    reinitPending.add(projectId);
+    return;
+  }
+  const run = async (): Promise<void> => {
+    const { bailed } = await ensureWindows(projectId); // reconcile + authoritative sync
+    // An empty `list-windows` is an attach race (not a real state): leave the
+    // project uninitialized so a later acquire/attached retries against a
+    // populated list. Do NOT mark this epoch done, and (below) do NOT re-drain
+    // on a bare bail — that would spin on a persistently-empty/dead session.
+    if (bailed) return;
+    await restoreActiveWindow(projectId); // focus the window the user last worked in
+    initializedEpoch.set(projectId, target);
+    notifyReinit(projectId); // panel re-seeds panes + resize round-trip
+  };
+  const p = run()
+    .catch((e: unknown) => {
+      // Leave initializedEpoch behind the channel epoch so a later acquire /
+      // attached retries; do not strand the project on a transient sync error.
+      console.error(`[control-session] reinit failed for ${projectId}:`, e);
+    })
+    .finally(() => {
+      if (reinitInFlight.get(projectId) === p) reinitInFlight.delete(projectId);
+      // Re-drain only when a reinit was explicitly requested mid-run (a newer
+      // epoch arrived) OR we made progress and the channel has since moved on.
+      // A bare bail with no new request does not re-drain (no spin).
+      const requested = reinitPending.delete(projectId);
+      const advanced =
+        initializedEpoch.get(projectId) !== undefined &&
+        channelEpoch.get(projectId) !== initializedEpoch.get(projectId);
+      if (requested || advanced) maybeReinit(projectId);
+    });
+  reinitInFlight.set(projectId, p);
+}
 
 /** Whether the tmux IPC bridge is present (false on a stale dev preload). */
 export function controlBridgeReady(): boolean {
@@ -401,7 +536,16 @@ export function controlBridgeReady(): boolean {
  *  and switching back is instant. */
 function ensureSubscription(): void {
   if (subscription) return;
-  subscription = agentCockpit.events.onTmux((e) => store().applyNotification(e.projectId, e.notification));
+  subscription = agentCockpit.events.onTmux((e) => {
+    // `attached` is a synthetic (non-tmux) signal that a fresh `-CC` channel is
+    // live; it drives re-init rather than folding into the view. Everything else
+    // is a real notification for the store slice.
+    if (e.notification.type === 'attached') {
+      onAttached(e.projectId, e.notification.epoch);
+      return;
+    }
+    store().applyNotification(e.projectId, e.notification);
+  });
 }
 
 /**
@@ -435,12 +579,12 @@ export function acquireControlSession(projectId: string): void {
 
   const p = store()
     .open(projectId)
-    .then(async () => {
-      if (initialized.has(projectId)) return;
-      const { bailed } = await ensureWindows(projectId);
-      // Mark initialized only on a non-bail success so an empty-list bail does
-      // not consume the one-shot guard (a later acquire/sync retries).
-      if (!bailed) initialized.add(projectId);
+    .then(() => {
+      // Re-init is driven by the `attached` epoch (fired during open() on the
+      // first attach, and on every silent reattach). This call is the backstop
+      // that catches (a) an `attached` that raced ahead of open() resolving and
+      // (b) switching TO a project whose channel flapped while backgrounded.
+      maybeReinit(projectId);
     })
     .catch((err: unknown) => {
       // Record the failure so the UI can surface it with a Retry affordance
@@ -448,11 +592,10 @@ export function acquireControlSession(projectId: string): void {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[control-session] open failed for project ${projectId}:`, err);
       store().setOpenError(projectId, message);
-      initialized.delete(projectId);
     })
     .finally(() => {
       // Clear the slot on settle (success or failure) so a future retry is
-      // allowed, but two concurrent ensures never run.
+      // allowed, but two concurrent opens never run.
       if (inFlight.get(projectId) === p) inFlight.delete(projectId);
     });
 
@@ -473,11 +616,39 @@ export function releaseControlSession(): void {
   /* intentionally a no-op: state is decoupled from mount lifecycle */
 }
 
-/** Tear down the subscription and per-project lifecycle state (teardown/tests). */
-export function resetControlSession(): void {
+/**
+ * Reset control-session lifecycle state.
+ *
+ * With a `projectId`: PER-PROJECT teardown (a single project's disconnect, or a
+ * renderer backend switch). Clears only that project's lifecycle so a re-acquire
+ * re-initializes — but KEEPS its `channelEpoch` (the channel identity is
+ * unchanged) so a re-acquire that does NOT cause a fresh attach (e.g. a backend
+ * switch with tmux still open, which emits no new `attached`) still re-inits,
+ * because `initializedEpoch` is now behind `channelEpoch`. The shared `onTmux`
+ * subscription and every OTHER project's state are left intact — disconnecting
+ * one project must never clobber another live one.
+ *
+ * Without a `projectId`: FULL teardown (tests / global reset) — also drops the
+ * shared subscription.
+ *
+ * Never clears `reinitListeners`: those are component-owned subscriptions whose
+ * lifecycle is the component's, not this reset's.
+ */
+export function resetControlSession(projectId?: string): void {
+  if (projectId !== undefined) {
+    initializedEpoch.delete(projectId);
+    reinitInFlight.delete(projectId);
+    reinitPending.delete(projectId);
+    inFlight.delete(projectId);
+    ready.delete(projectId);
+    return;
+  }
   subscription?.();
   subscription = null;
-  initialized.clear();
+  channelEpoch.clear();
+  initializedEpoch.clear();
+  reinitInFlight.clear();
+  reinitPending.clear();
   inFlight.clear();
   ready.clear();
 }

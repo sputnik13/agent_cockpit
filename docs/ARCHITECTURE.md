@@ -307,6 +307,61 @@ stateDiagram-v2
   Freeze-and-reattach (preserving scrollback across a disconnect) is a deferred
   future option, not the v1 behavior.
 
+### Control-channel reattach & re-init (epoch signal, invariant)
+
+A remote tmux control channel (`tmux -CC`) reconnects **independently of the SSH
+transport and the `ConnectionMachine`**. When the channel drops for a transient
+reason — network/keepalive blip, laptop sleep/wake, or the responsiveness
+watchdog failing the link — `RemoteTmuxControlManager.scheduleReattach`
+([electron/main/providers/remote/tmuxControl.ts](../electron/main/providers/remote/tmuxControl.ts))
+opens a **fresh** channel (with a fresh parser) and re-attaches to the surviving
+remote tmux session. The `ConnectionMachine` stays `connected` the entire time,
+so **no status transition fires**. Re-init therefore cannot be driven off
+connection status; it is driven off a **channel-attach epoch**.
+
+- **Epoch signal.** Each control manager (local and remote) keeps a monotonic
+  `epoch` bumped on every successful attach — the first open **and** every silent
+  reattach — and emits a synthetic `{ type: 'attached', epoch }` notification
+  through the same `onNotification` → `evt:tmux` seam as real tmux notifications.
+  This unifies first-connect and reattach: both mean "a fresh channel is live".
+- **Renderer re-init keyed on epoch, not status.** `controlSession`
+  ([src/renderer/tmux/controlSession.ts](../src/renderer/tmux/controlSession.ts))
+  keeps a per-project `channelEpoch` (latest announced) and `initializedEpoch`
+  (latest re-initialized). When they differ for the active project it runs
+  `reinitProject`: an **authoritative** `syncFromTmux` (folds `list-windows` and
+  **prunes** windows absent from it — a window closed during the drop replays no
+  `%window-close`), reserved-window reconcile, and `restoreActiveWindow` (adopts
+  tmux's session-active window via a synthetic `session-window-changed` so a
+  reconnect focuses the **last-worked** window, not the first tab). A single-flight
+  with a pending re-drain catches an epoch that lands mid-sync without spinning on
+  a bare empty-list attach race. The boolean "initialized once" guard this
+  replaced was the root cause of the stale-window-list / stale-display class:
+  it skipped re-init entirely on a reattach.
+- **Display restore.** After the window sync, `controlSession` fires
+  `subscribeReinit`; `ControlTerminalPanel` mirrors the toolbar **hard refresh**
+  for the active project — `hardRecoverTab` (capture-pane re-seed of normal-screen
+  panes, so content missed during the drop is recovered; alt-screen TUIs are gated
+  to a repaint only, no runaway scroll) plus a `nudgeClientSize` resize round-trip
+  that makes tmux re-emit `%output` and SIGWINCH the pane apps.
+- **Per-project teardown.** `resetControlSession(projectId)` clears only that
+  project's lifecycle and **keeps** the shared `evt:tmux` subscription and that
+  project's `channelEpoch`, so disconnecting one project never clobbers another
+  live one, and a re-acquire that causes no fresh attach (a renderer backend
+  switch with tmux still open) still re-inits because `initializedEpoch` is now
+  behind the kept `channelEpoch`.
+- **Honest status (observability).** The manager exposes
+  `onReconnecting`/`onReattached`/`onReattachExhausted` hooks that the
+  `RemoteProvider` wires to `machine.toReconnecting()`/`toConnected()`/`toFailed()`
+  so a flap shows a `reconnecting` dot. This is observability only — correctness
+  of re-init depends on the epoch, never on the status transition, so wiring
+  `reconnecting` cannot reintroduce the status-inferred re-init bug.
+
+**Regression check:** on a remote project, force a `-CC` channel flap (kill the
+SSH transport, or sleep/wake the host) so it auto-reattaches with **no** user
+action: the window list and every pane display must be correct without a manual
+refresh or window switch, and the tab focused must be the window the user was
+last working in (not the first).
+
 ### Terminal Lifecycle Decoupling (invariant)
 
 Terminal/xterm lifecycle is **decoupled from React mount and from project

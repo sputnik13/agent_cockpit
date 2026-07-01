@@ -106,6 +106,12 @@ export class RemoteTmuxControlManager {
   private readonly pending: PendingCommand[] = [];
   private closed = false;
   private reattachAttempt = 0;
+  /** Monotonic per-manager attach counter. Bumped on every successful attach
+   *  (first open AND each silent reattach) and emitted as an `attached`
+   *  notification so the renderer re-inits a fresh channel without needing a
+   *  ConnectionMachine status transition — a silent reattach never produces one.
+   *  See CLAUDE.md "control-mode reconnect". */
+  private epoch = 0;
   /** In-flight attach, cached so concurrent open() calls (and a pending reattach)
    *  share one channel instead of each racing through the pre-assignment await
    *  gap and opening a duplicate `tmux -CC` client. */
@@ -141,6 +147,20 @@ export class RemoteTmuxControlManager {
    * the dropped channel already drives the connection state).
    */
   onUnresponsive?: (info: UnresponsiveInfo) => void;
+  /**
+   * Optional status hooks for the control-channel reattach cycle. The `-CC`
+   * channel reconnects independently of the SSH transport, so without these the
+   * ConnectionMachine would stay `connected` through a silent flap. Wire them to
+   * surface an honest `reconnecting`/`connected`/`failed` status. These are
+   * observability only — the renderer's re-init is driven by the `attached`
+   * epoch, not by these transitions.
+   * - `onReconnecting`: the live channel dropped and a reattach is scheduled.
+   * - `onReattached`: a reattach (not the first open) re-established the channel.
+   * - `onReattachExhausted`: the backoff schedule was exhausted; give up.
+   */
+  onReconnecting?: () => void;
+  onReattached?: () => void;
+  onReattachExhausted?: () => void;
   /** Polls the oldest-pending age; runs while a channel is open. */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   /** True once the current stall episode has fired onUnresponsive (warn-once). */
@@ -219,6 +239,22 @@ export class RemoteTmuxControlManager {
     this.stableTimer.unref?.();
     logger.info('tmux control-mode channel open ok', 'remote-tmux-control');
     this.startWatchdog();
+    // A successful attach while mid-reattach (reattachAttempt > 0, not the first
+    // open) resolves the flap: surface `connected` again. Fire before the epoch
+    // emit so status leads the re-init.
+    if (this.reattachAttempt > 0) {
+      try {
+        this.onReattached?.();
+      } catch (e) {
+        console.error('[remote-tmux-control] onReattached hook threw', e);
+      }
+    }
+    // Announce the fresh channel to the renderer (first open + every reattach).
+    // Emitted AFTER the channel/parser are live so a re-init the renderer kicks
+    // off in response can immediately issue commands (list-windows, capture-pane)
+    // over the new channel.
+    this.epoch += 1;
+    this.emit({ type: 'attached', epoch: this.epoch });
     channel.onData((chunk) => {
       try {
         // Diagnostic-only: keep a short latin1 preview of the first bytes so an
@@ -275,8 +311,20 @@ export class RemoteTmuxControlManager {
           (this.lastExitReason ? ` (last %exit: ${this.lastExitReason})` : ''),
         'remote-tmux-control',
       );
+      try {
+        this.onReattachExhausted?.();
+      } catch (e) {
+        console.error('[remote-tmux-control] onReattachExhausted hook threw', e);
+      }
       this.emit({ type: 'exit', reason: this.lastExitReason ?? 'reattach exhausted' });
       return;
+    }
+    // The live channel dropped and we are about to retry: surface `reconnecting`.
+    // Fired each attempt; the ConnectionMachine coalesces repeat transitions.
+    try {
+      this.onReconnecting?.();
+    } catch (e) {
+      console.error('[remote-tmux-control] onReconnecting hook threw', e);
     }
     const delay = REATTACH_BACKOFF_MS[Math.min(this.reattachAttempt, REATTACH_BACKOFF_MS.length - 1)]!;
     this.reattachAttempt += 1;

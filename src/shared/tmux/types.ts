@@ -166,6 +166,21 @@ export interface UnknownNotification {
   line: string;
 }
 
+/**
+ * Synthetic (app-level, not a tmux wire line) notification emitted by a control
+ * manager whenever it (re)attaches a `-CC` channel — the first open AND every
+ * silent reattach after a drop. `epoch` is a per-manager monotonic counter that
+ * strictly increases on each successful attach, so the renderer can tell a fresh
+ * channel apart from the one it already initialized and re-run its full re-init
+ * (authoritative window sync + gated pane re-seed + resize round-trip) without
+ * depending on a ConnectionMachine status transition (a silent reattach never
+ * produces one). See CLAUDE.md "control-mode reconnect".
+ */
+export interface AttachedNotification {
+  type: 'attached';
+  epoch: number;
+}
+
 export type TmuxNotification =
   | OutputNotification
   | WindowAddNotification
@@ -186,6 +201,7 @@ export type TmuxNotification =
   | PauseNotification
   | SubscriptionChangedNotification
   | ReplyNotification
+  | AttachedNotification
   | UnknownNotification;
 
 export type TmuxNotificationType = TmuxNotification['type'];

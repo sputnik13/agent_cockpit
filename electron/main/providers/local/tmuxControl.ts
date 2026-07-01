@@ -107,6 +107,12 @@ export class LocalTmuxControlManager {
   private readonly pending: PendingCommand[] = [];
   private commandSeq = 0;
   private opened = false;
+  /** Monotonic per-manager attach counter, emitted as an `attached` notification
+   *  on each successful open so the renderer drives its re-init off a fresh
+   *  channel uniformly with the remote transport (see CLAUDE.md "control-mode
+   *  reconnect"). The local pty does not silently reattach, so in practice this
+   *  bumps once per open()/re-open. */
+  private epoch = 0;
   /** tmux emits one unsolicited `%begin/%end` block on attach (its own output);
    *  it is not a reply to a client command and must not consume a pending slot. */
   private sawInitialBlock = false;
@@ -207,6 +213,11 @@ export class LocalTmuxControlManager {
     );
     this.opened = true;
     this.sawInitialBlock = false;
+    // Announce the fresh channel to the renderer (parity with the remote
+    // manager). The onNotification forwarder is wired in activeControl() before
+    // this synchronous open() runs, so the first `attached` is not missed.
+    this.epoch += 1;
+    this.emit({ type: 'attached', epoch: this.epoch });
     // Isolate handler throws so a listener error can never reach node-pty's
     // N-API layer (which would SIGABRT the process).
     this.proc.onData((chunk) => {

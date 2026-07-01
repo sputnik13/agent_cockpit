@@ -329,6 +329,47 @@ projects A and B both connected and A active, mutate B (commit / file write / `b
 mutation) → switching to B shows B's current data with no spinner and no manual
 refresh; A→B→A never shows the other project's data at any frame.
 
+## Control-mode reconnect is epoch-driven, NOT status-driven
+
+**Invariant:** A remote `tmux -CC` control channel reattaches **independently of
+the `ConnectionMachine`**. On a silent flap — network/keepalive blip, sleep/wake,
+or the watchdog failing the link — `RemoteTmuxControlManager.scheduleReattach`
+(`electron/main/providers/remote/tmuxControl.ts`) opens a **fresh** channel and
+re-attaches to the surviving remote session while the machine stays `connected`
+the whole time. So **no `connecting`/`disconnected`/`connected` transition fires**,
+and renderer re-init MUST NOT be inferred from connection status — the old status-
+gated `initialized`-once guard skipped re-init on every reattach, which is exactly
+what left the window list stale (until a manual window switch) and pane displays
+frozen (until a manual refresh).
+
+**Required:** every control manager (local + remote) keeps a monotonic `epoch`,
+bumped on each successful attach (first open AND every reattach), and emits a
+synthetic `{ type: 'attached', epoch }` through the existing `onNotification` →
+`evt:tmux` seam. The renderer (`src/renderer/tmux/controlSession.ts`) keys re-init
+on `channelEpoch !== initializedEpoch` (per project), running an **authoritative**
+`syncFromTmux` (folds `list-windows` AND **prunes** windows absent from it — a
+window closed during the drop replays no `%window-close`), reserved-window
+reconcile, `restoreActiveWindow` (adopts tmux's session-active window via a
+synthetic `session-window-changed` so reconnect focuses the LAST-worked window,
+not `tabWindows[0]`), then fires `subscribeReinit` so `ControlTerminalPanel`
+mirrors the toolbar HARD refresh (`hardRecoverTab` capture-pane re-seed of
+normal-screen panes — alt-screen gated to repaint-only, no runaway scroll — plus a
+`nudgeClientSize` resize round-trip). Re-init single-flights with a pending
+re-drain (catch a mid-sync epoch) and never spins on a bare empty-list bail.
+`resetControlSession(projectId)` is **per-project** (keeps the shared subscription
++ that project's `channelEpoch`, so a backend switch with tmux still open still
+re-inits and one project's disconnect never clobbers another). The
+`onReconnecting`/`onReattached`/`onReattachExhausted` manager hooks drive
+`machine.toReconnecting/toConnected/toFailed` for an honest status dot —
+**observability only**; do NOT gate re-init on that status. Do not reintroduce the
+boolean `initialized` guard or a status-inferred re-init. Full design:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) "Control-channel reattach & re-init".
+
+**Regression check:** on a remote project, force a `-CC` flap (kill the SSH
+transport, or sleep/wake the host) so it auto-reattaches with NO user action: the
+window list and every pane display must be correct with no manual refresh/window
+switch, and the focused tab must be the window last worked in (not the first).
+
 ## Filesystem watch: single-source "what to watch"
 
 **Invariant:** "What to watch" has exactly **one** definition:

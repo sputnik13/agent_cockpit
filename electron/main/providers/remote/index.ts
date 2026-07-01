@@ -307,6 +307,15 @@ export class RemoteProvider implements WorkspaceProvider {
         return ctrl;
       };
       this.controlMgr = new RemoteTmuxControlManager(opener);
+      // Surface the control-channel reattach cycle in the connection status. The
+      // `-CC` channel reconnects independently of the SSH transport, so without
+      // this the machine would stay `connected` through a silent flap. This is
+      // observability only — the renderer re-init is driven by the `attached`
+      // epoch, not by these transitions. Machine guards make illegal transitions
+      // (e.g. a hook firing outside the connected/reconnecting window) safe no-ops.
+      this.controlMgr.onReconnecting = () => this.machine.toReconnecting();
+      this.controlMgr.onReattached = () => this.machine.toConnected();
+      this.controlMgr.onReattachExhausted = () => this.machine.toFailed('tmux control channel lost');
     }
     return this.controlMgr;
   }

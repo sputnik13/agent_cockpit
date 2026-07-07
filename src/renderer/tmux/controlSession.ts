@@ -270,7 +270,9 @@ export async function restoreActiveWindow(projectId: string): Promise<void> {
     const view = store().byProject[projectId];
     const name = view?.windows[id]?.name;
     if (isHiddenWindow(name)) return;
-    store().applyNotification(projectId, { type: 'session-window-changed', windowId: id });
+    // sessionId is unused by the reducer (only windowId is read — see tmuxStore
+    // `session-window-changed` case); '' matches the parser's own fallback.
+    store().applyNotification(projectId, { type: 'session-window-changed', sessionId: '', windowId: id });
   } catch {
     /* best effort — leave the current selection */
   }

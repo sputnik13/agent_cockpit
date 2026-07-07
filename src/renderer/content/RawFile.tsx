@@ -27,7 +27,7 @@ export function RawFile({ worktreePath, filePath, gitRef, wrap = false }: RawFil
 
   useEffect(() => {
     let active = true;
-    const opts: { ref?: string } = {};
+    const opts: { ref?: string; worktreePath?: string } = { worktreePath };
     if (gitRef !== undefined) opts.ref = gitRef;
     void window.api.provider.readFile(filePath, opts).then((r) => {
       if (!active) return;

@@ -48,12 +48,16 @@ export async function localReadFile(
   const fetchOpts: { ref?: string; maxBytes?: number } = {};
   if (opts?.ref !== undefined) fetchOpts.ref = opts.ref;
   if (opts?.maxBytes !== undefined) fetchOpts.maxBytes = opts.maxBytes;
-  return getFile(rootPath, path, fetchOpts);
+  // Resolve against the worktree root when supplied; empty/absent = project root.
+  const base = opts?.worktreePath || rootPath;
+  return getFile(base, path, fetchOpts);
 }
 
-export function localListDir(rootPath: string, dirPath: string): DirEntry[] {
+export function localListDir(rootPath: string, dirPath: string, worktreePath?: string): DirEntry[] {
   const rel = dirPath === '.' ? '' : dirPath;
-  const abs = isAbsolute(rel) ? rel : join(rootPath, rel);
+  // Resolve against the worktree root when supplied; empty/absent = project root.
+  const base = worktreePath || rootPath;
+  const abs = isAbsolute(rel) ? rel : join(base, rel);
   const entries = readdirSync(abs, { withFileTypes: true });
   return entries
     .map((e) => ({

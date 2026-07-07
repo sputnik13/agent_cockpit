@@ -77,7 +77,7 @@ export interface RendererApi {
     ): Promise<DiffBundle>;
     readFile(path: string, opts?: FileReadOptions, projectId?: string): Promise<FileReadResult>;
     stat(path: string, projectId?: string): Promise<StatResult>;
-    listDir(dirPath: string, projectId?: string): Promise<DirEntry[]>;
+    listDir(dirPath: string, worktreePath?: string, projectId?: string): Promise<DirEntry[]>;
     /** Resolve + validate + classify a link target (inside/outside project). */
     resolvePath(input: string, opts?: ResolvePathOptions, projectId?: string): Promise<ResolvedPath>;
     detectBeads(projectId?: string): Promise<boolean>;

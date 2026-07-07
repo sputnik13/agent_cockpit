@@ -40,13 +40,11 @@ vi.mock('@renderer/providerClient', () => ({
   ),
 }));
 
-import { useChangesStore } from './changesStore';
+import { useChangesStore, type ChangesSlice } from './changesStore';
+import { useWorktreeStore } from '@renderer/worktree/worktreeStore';
 
 const WT_A: WorktreeRecord[] = [
   { path: '/repo-a', branch: 'main', head: 'abc', locked: false, prunable: false, detached: false },
-];
-const WT_B: WorktreeRecord[] = [
-  { path: '/repo-b', branch: 'feat', head: 'def', locked: false, prunable: false, detached: false },
 ];
 
 const CS_A: Changeset = {
@@ -57,97 +55,93 @@ const CS_A: Changeset = {
   generatedAt: new Date().toISOString(),
 };
 
-function resetStore(): void {
+/** Build a full Changes slice from partial overrides. */
+function changesSlice(over: Partial<ChangesSlice> = {}): ChangesSlice {
+  return {
+    baseline: undefined,
+    changeset: null,
+    loading: false,
+    selectedPath: null,
+    target: 'head',
+    branchPoint: undefined,
+    ...over,
+  };
+}
+
+/** Seed the worktree store so `changesStore.refresh` sees a selection. */
+function seedWorktree(projectId: string, worktrees: WorktreeRecord[], active: string | null): void {
+  useWorktreeStore.setState((s) => ({
+    byProject: { ...s.byProject, [projectId]: { worktrees, activeWorktree: active, loading: false } },
+  }));
+}
+
+function resetStores(): void {
   useChangesStore.setState({ byProject: {} });
+  useWorktreeStore.setState({ byProject: {} });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  resetStore();
+  resetStores();
   _activeId = 'project-a';
 });
 
-describe('changesStore byProject slices (T4)', () => {
-  it('loads worktrees + changeset into the addressed project slice', async () => {
+describe('changesStore refresh reads the worktree from worktreeStore (T2)', () => {
+  it('loads the changeset for the worktree selected in worktreeStore', async () => {
     mockListWorktrees.mockResolvedValue(WT_A);
     mockGetChangeset.mockResolvedValue(CS_A);
 
-    await useChangesStore.getState().loadWorktrees('project-a');
+    await useWorktreeStore.getState().loadWorktrees('project-a');
+    await useChangesStore.getState().refresh('project-a');
 
+    expect(useWorktreeStore.getState().byProject['project-a']!.activeWorktree).toBe('/repo-a');
     const slice = useChangesStore.getState().byProject['project-a']!;
-    expect(slice.worktrees).toEqual(WT_A);
     expect(slice.changeset).toEqual(CS_A);
     expect(slice.loading).toBe(false);
     // Reads are addressed by projectId.
-    expect(mockListWorktrees).toHaveBeenCalledWith('project-a');
     expect(mockGetChangeset).toHaveBeenLastCalledWith('/repo-a', undefined, 'project-a');
   });
 
-  it('isolates slices per project (no cross-project bleed)', async () => {
-    mockListWorktrees.mockResolvedValueOnce(WT_A).mockResolvedValueOnce(WT_B);
-    mockGetChangeset.mockResolvedValue(CS_A);
+  it('is a no-op changeset when no worktree is selected', async () => {
+    seedWorktree('project-a', [], null);
+    await useChangesStore.getState().refresh('project-a');
 
-    await useChangesStore.getState().loadWorktrees('project-a');
-    await useChangesStore.getState().loadWorktrees('project-b');
-
-    expect(useChangesStore.getState().byProject['project-a']!.worktrees).toEqual(WT_A);
-    expect(useChangesStore.getState().byProject['project-b']!.worktrees).toEqual(WT_B);
+    expect(mockGetChangeset).not.toHaveBeenCalled();
+    expect(useChangesStore.getState().byProject['project-a']!.changeset).toBeNull();
   });
 
-  it('drops a stale resolution when the slice was evicted mid-load', async () => {
-    let resolveWT!: (v: WorktreeRecord[]) => void;
-    mockListWorktrees.mockReturnValue(new Promise<WorktreeRecord[]>((r) => { resolveWT = r; }));
+  it('isolates changeset slices per project (no cross-project bleed)', async () => {
+    const CS_B: Changeset = { ...CS_A, worktree: '/repo-b' };
+    seedWorktree('project-a', WT_A, '/repo-a');
+    seedWorktree('project-b', WT_A, '/repo-b');
+    mockGetChangeset.mockResolvedValueOnce(CS_A).mockResolvedValueOnce(CS_B);
 
-    const loadPromise = useChangesStore.getState().loadWorktrees('project-a');
-    // Evict the slice before the worktrees resolve.
-    useChangesStore.getState().evict('project-a');
-    resolveWT(WT_A);
-    await loadPromise;
+    await useChangesStore.getState().refresh('project-a');
+    await useChangesStore.getState().refresh('project-b');
 
-    // The stale result must not recreate the slice.
-    expect(useChangesStore.getState().byProject['project-a']).toBeUndefined();
+    expect(useChangesStore.getState().byProject['project-a']!.changeset).toEqual(CS_A);
+    expect(useChangesStore.getState().byProject['project-b']!.changeset).toEqual(CS_B);
   });
 
-  it('clears to empty (not stale data) on load error', async () => {
+  it('drops a changeset selection when the worktree changed (picker switch)', async () => {
+    // Slice holds repo-a's changeset + selection; worktreeStore now points at repo-b.
     useChangesStore.setState({
-      byProject: {
-        'project-a': {
-          worktrees: WT_A,
-          activeWorktree: '/repo-a',
-          baseline: undefined,
-          changeset: CS_A,
-          loading: false,
-          selectedPath: null,
-          target: 'head',
-          branchPoint: undefined,
-        },
-      },
+      byProject: { 'project-a': changesSlice({ changeset: CS_A, selectedPath: 'foo.ts' }) },
     });
-    mockListWorktrees.mockRejectedValue(new Error('SSH disconnected'));
+    seedWorktree('project-a', WT_A, '/repo-b');
+    const CS_B: Changeset = { ...CS_A, worktree: '/repo-b' };
+    mockGetChangeset.mockResolvedValue(CS_B);
 
-    await useChangesStore.getState().loadWorktrees('project-a');
+    await useChangesStore.getState().refresh('project-a');
 
     const slice = useChangesStore.getState().byProject['project-a']!;
-    expect(slice.worktrees).toEqual([]);
-    expect(slice.changeset).toBeNull();
-    expect(slice.loading).toBe(false);
+    expect(slice.changeset).toEqual(CS_B);
+    expect(mockGetChangeset).toHaveBeenLastCalledWith('/repo-b', undefined, 'project-a');
   });
 
-  it('refresh() addresses the project and keeps last-good changeset on transient error', async () => {
-    useChangesStore.setState({
-      byProject: {
-        'project-a': {
-          worktrees: WT_A,
-          activeWorktree: '/repo-a',
-          baseline: undefined,
-          changeset: CS_A,
-          loading: false,
-          selectedPath: null,
-          target: 'head',
-          branchPoint: undefined,
-        },
-      },
-    });
+  it('keeps last-good changeset on a transient refresh error', async () => {
+    useChangesStore.setState({ byProject: { 'project-a': changesSlice({ changeset: CS_A }) } });
+    seedWorktree('project-a', WT_A, '/repo-a');
     mockGetChangeset.mockRejectedValue(new Error('transient'));
 
     await useChangesStore.getState().refresh('project-a');
@@ -155,6 +149,19 @@ describe('changesStore byProject slices (T4)', () => {
     const slice = useChangesStore.getState().byProject['project-a']!;
     expect(slice.changeset).toEqual(CS_A); // last-good retained
     expect(slice.loading).toBe(false);
+  });
+
+  it('drops a stale refresh when the slice was evicted mid-load', async () => {
+    seedWorktree('project-a', WT_A, '/repo-a');
+    let resolveCS!: (v: Changeset) => void;
+    mockGetChangeset.mockReturnValue(new Promise<Changeset>((r) => { resolveCS = r; }));
+
+    const p = useChangesStore.getState().refresh('project-a');
+    useChangesStore.getState().evict('project-a');
+    resolveCS(CS_A);
+    await p;
+
+    expect(useChangesStore.getState().byProject['project-a']).toBeUndefined();
   });
 });
 
@@ -172,22 +179,24 @@ describe('changesStore target / branchPoint (diff-target selector)', () => {
     generatedAt: new Date().toISOString(),
   };
 
-  it('default target is head; refresh does not call resolveBranchPoint', async () => {
+  async function selectWorktree(): Promise<void> {
     mockListWorktrees.mockResolvedValue(WT_A);
-    mockGetChangeset.mockResolvedValue(CS_A);
+    await useWorktreeStore.getState().loadWorktrees('project-a');
+  }
 
-    await useChangesStore.getState().loadWorktrees('project-a');
+  it('default target is head; refresh does not call resolveBranchPoint', async () => {
+    mockGetChangeset.mockResolvedValue(CS_A);
+    await selectWorktree();
+    await useChangesStore.getState().refresh('project-a');
 
     expect(mockResolveBranchPoint).not.toHaveBeenCalled();
     expect(useChangesStore.getState().byProject['project-a']!.target).toBe('head');
   });
 
   it('switching to branchPoint calls resolveBranchPoint and sets baseline', async () => {
-    mockListWorktrees.mockResolvedValue(WT_A);
     mockGetChangeset.mockResolvedValue(CS_BP);
     mockResolveBranchPoint.mockResolvedValue(BP);
-
-    await useChangesStore.getState().loadWorktrees('project-a');
+    await selectWorktree();
     await useChangesStore.getState().setTarget('project-a', 'branchPoint');
 
     const slice = useChangesStore.getState().byProject['project-a']!;
@@ -198,11 +207,9 @@ describe('changesStore target / branchPoint (diff-target selector)', () => {
   });
 
   it('refresh re-resolves the branch-point each time (live tracking)', async () => {
-    mockListWorktrees.mockResolvedValue(WT_A);
     mockGetChangeset.mockResolvedValue(CS_BP);
     mockResolveBranchPoint.mockResolvedValue(BP);
-
-    await useChangesStore.getState().loadWorktrees('project-a');
+    await selectWorktree();
     await useChangesStore.getState().setTarget('project-a', 'branchPoint');
     // Simulate HEAD advancing: a new merge-base on next resolve.
     const BP2: BranchPoint = { ...BP, mergeBase: 'cafebabe00000000000000000000000000000000' };
@@ -214,33 +221,27 @@ describe('changesStore target / branchPoint (diff-target selector)', () => {
   });
 
   it('switching back to head clears baseline and branchPoint', async () => {
-    mockListWorktrees.mockResolvedValue(WT_A);
     mockGetChangeset.mockResolvedValue(CS_A);
     mockResolveBranchPoint.mockResolvedValue(BP);
-
-    await useChangesStore.getState().loadWorktrees('project-a');
+    await selectWorktree();
     await useChangesStore.getState().setTarget('project-a', 'branchPoint');
     await useChangesStore.getState().setTarget('project-a', 'head');
 
     const slice = useChangesStore.getState().byProject['project-a']!;
     expect(slice.target).toBe('head');
     expect(slice.baseline).toBeUndefined();
-    // branchPoint undefined means "not in branchPoint mode" (cleared).
     expect(slice.branchPoint).toBeUndefined();
     expect(mockGetChangeset).toHaveBeenLastCalledWith('/repo-a', undefined, 'project-a');
   });
 
   it('branchPoint null (no parent) stays null and falls back to HEAD diff', async () => {
-    mockListWorktrees.mockResolvedValue(WT_A);
     mockGetChangeset.mockResolvedValue(CS_A);
     mockResolveBranchPoint.mockResolvedValue(null);
-
-    await useChangesStore.getState().loadWorktrees('project-a');
+    await selectWorktree();
     await useChangesStore.getState().setTarget('project-a', 'branchPoint');
 
     const slice = useChangesStore.getState().byProject['project-a']!;
     expect(slice.branchPoint).toBeNull();
-    // baseline is undefined when mergeBase is not available -> falls back to HEAD diff.
     expect(slice.baseline).toBeUndefined();
     expect(mockGetChangeset).toHaveBeenLastCalledWith('/repo-a', undefined, 'project-a');
   });
@@ -250,16 +251,7 @@ describe('changesStore clearForDisconnect / evict (D3/FR4/FR7)', () => {
   function seed(): void {
     useChangesStore.setState({
       byProject: {
-        'project-a': {
-          worktrees: WT_A,
-          activeWorktree: '/repo-a',
-          baseline: undefined,
-          changeset: CS_A,
-          loading: false,
-          selectedPath: '/repo-a/foo.ts',
-          target: 'head',
-          branchPoint: undefined,
-        },
+        'project-a': changesSlice({ changeset: CS_A, selectedPath: '/repo-a/foo.ts' }),
       },
     });
   }
@@ -268,8 +260,6 @@ describe('changesStore clearForDisconnect / evict (D3/FR4/FR7)', () => {
     seed();
     useChangesStore.getState().clearForDisconnect('project-a');
     const slice = useChangesStore.getState().byProject['project-a']!;
-    expect(slice.worktrees).toEqual([]);
-    expect(slice.activeWorktree).toBeNull();
     expect(slice.changeset).toBeNull();
     expect(slice.selectedPath).toBeNull();
     expect(slice.loading).toBe(false);

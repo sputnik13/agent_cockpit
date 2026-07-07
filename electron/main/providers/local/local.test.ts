@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalProvider } from './index';
+import { localListDir, localReadFile } from './reads';
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'pipe' });
@@ -73,6 +74,33 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     const sub = await p.listDir('src');
     expect(sub.map((e) => e.path).sort()).toEqual(['src/a.ts', 'src/b.ts']);
     expect(sub.every((e) => !e.isDir)).toBe(true);
+  });
+
+  it('resolves reads against a linked worktree root when worktreePath is supplied', async () => {
+    // A linked worktree on its own branch, holding a file that exists ONLY there
+    // (absent from the main worktree root) — so the base switch is observable.
+    const linked = mkdtempSync(join(tmpdir(), 'cockpit-linked-'));
+    // git worktree add refuses a pre-existing non-empty dir; remove ours first
+    // and let git create it.
+    rmSync(linked, { recursive: true, force: true });
+    git(repo, ['worktree', 'add', '-q', '-b', 'wt-branch', linked]);
+    mkdirSync(join(linked, 'only'), { recursive: true });
+    writeFileSync(join(linked, 'only', 'wt.txt'), 'worktree-only\n');
+
+    // With the worktree override, the read resolves against the linked root.
+    const inWt = await localReadFile(repo, 'only/wt.txt', { worktreePath: linked });
+    expect(inWt.content).toContain('worktree-only');
+
+    // Without it, the same relative path resolves against the project root, where
+    // the file does not exist — proving the base actually switched.
+    const inRoot = await localReadFile(repo, 'only/wt.txt');
+    expect(inRoot.content).toBeNull();
+
+    // listDir with the worktree override lists the worktree-only file.
+    const entries = localListDir(repo, 'only', linked);
+    expect(entries.map((e) => e.name)).toContain('wt.txt');
+
+    git(repo, ['worktree', 'remove', '--force', linked]);
   });
 
   it('stats existing and missing paths', async () => {

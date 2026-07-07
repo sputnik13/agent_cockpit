@@ -240,7 +240,7 @@ describe('ensureWindows (wires reconcile into tmux commands)', () => {
       ['@3', 'zsh'],
     ]);
     const res = await ensureWindows(PROJ);
-    expect(res).toEqual({ bailed: false });
+    expect(res).toEqual({ bailed: false, synced: true });
     const issued = api.tmuxControl.command.mock.calls.map((c) => c[0] as string);
     // No new-window -n run-1 issued; persistent already present so no create at all.
     expect(issued.some((a) => a.startsWith('new-window -dP -n run-1'))).toBe(false);
@@ -271,7 +271,7 @@ describe('ensureWindows (wires reconcile into tmux commands)', () => {
   it('bails (no commands, bailed=true) on an empty list', async () => {
     withWindows([]);
     const res = await ensureWindows(PROJ);
-    expect(res).toEqual({ bailed: true });
+    expect(res).toEqual({ bailed: true, synced: false });
     const issued = api.tmuxControl.command.mock.calls.map((c) => c[0] as string);
     expect(issued.some((a) => a.startsWith('kill-window'))).toBe(false);
     expect(issued.some((a) => a.startsWith('new-window'))).toBe(false);
@@ -285,7 +285,7 @@ describe('ensureWindows (wires reconcile into tmux commands)', () => {
       ['@4', 'zsh'],
     ]);
     const res = await ensureWindows(PROJ);
-    expect(res).toEqual({ bailed: false });
+    expect(res).toEqual({ bailed: false, synced: true });
     const issued = api.tmuxControl.command.mock.calls.map((c) => c[0] as string);
     expect(issued).toContain('kill-window -t @2');
     expect(issued).toContain('rename-window -t @3 run-1');
@@ -299,7 +299,7 @@ describe('ensureWindows (wires reconcile into tmux commands)', () => {
       ['@3', 'zsh'],
     ]);
     const res = await ensureWindows(PROJ);
-    expect(res).toEqual({ bailed: false });
+    expect(res).toEqual({ bailed: false, synced: true });
     const issued = api.tmuxControl.command.mock.calls.map((c) => c[0] as string);
     expect(issued.some((a) => a.startsWith('kill-window'))).toBe(false);
     expect(issued.some((a) => a.startsWith('rename-window'))).toBe(false);
@@ -483,25 +483,33 @@ describe('acquireControlSession single-flight', () => {
     await vi.waitFor(() => expect(listWindowsCount()).toBe(6));
   });
 
-  it('does NOT mark the epoch initialized on an empty-list bail; a later epoch retries', async () => {
-    withWindows([]); // first ensure sees an empty list → bail
+  it('retries when list-windows races empty and converges once queryable (no manual switch)', async () => {
+    // Attach race: the -CC channel is up but the session isn't queryable yet, so
+    // list-windows comes back empty. This is exactly the fresh-connect / reconnect
+    // window where the old code falsely marked the channel initialized and left the
+    // window list wrong until the user switched windows.
+    withWindows([]);
     acquireControlSession(PROJ);
     await whenReady(PROJ);
     emitAttached(PROJ, 1);
+    // The empty read must NOT mark the epoch initialized (a re-run must still be
+    // possible) and must NOT issue reconcile mutations from an empty list.
     await vi.waitFor(() => expect(listWindowsCount()).toBeGreaterThan(0));
+    expect(useTmuxStore.getState().byProject[PROJ]?.windowOrder ?? []).toEqual([]);
     expect(
       api.tmuxControl.command.mock.calls.some((c) => (c[0] as string).startsWith('kill-window')),
     ).toBe(false);
 
-    // Now the session is populated; a later attach epoch must re-run ensure
-    // (the bail did not consume the guard).
-    api.tmuxControl.command.mockClear();
+    // The session becomes queryable — with NO new attach epoch and NO user action,
+    // the bounded retry must re-run and populate the correct window list.
     withWindows([
       ['@1', 'persistent'],
       ['@2', 'run-1'],
       ['@3', 'zsh'],
     ]);
-    emitAttached(PROJ, 2);
-    await vi.waitFor(() => expect(listWindowsCount()).toBe(3));
+    await vi.waitFor(
+      () => expect(useTmuxStore.getState().byProject[PROJ]?.windowOrder).toContain('@3'),
+      { timeout: 2000 },
+    );
   });
 });

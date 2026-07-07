@@ -117,8 +117,13 @@ export class LocalProvider implements WorkspaceProvider {
     const cwd = worktreePath || this.rootPath;
     const [patch, newR, oldR] = await Promise.all([
       localFileDiff(cwd, filePath, baseline),
-      localReadFile(this.rootPath, filePath),
-      baseline ? localReadFile(this.rootPath, filePath, { ref: baseline }) : Promise.resolve(null),
+      // Read both sides from the worktree (not the fixed project root) so a linked
+      // worktree's content is highlighted — matching remote, which already reads
+      // the new side from the worktree.
+      localReadFile(this.rootPath, filePath, { worktreePath: cwd }),
+      baseline
+        ? localReadFile(this.rootPath, filePath, { ref: baseline, worktreePath: cwd })
+        : Promise.resolve(null),
     ]);
     const usable = (r: FileReadResult | null): string | null =>
       r && !r.truncated && !r.isBinary ? r.content : null;
@@ -135,8 +140,8 @@ export class LocalProvider implements WorkspaceProvider {
   async stat(path: string): Promise<StatResult> {
     return localStat(this.resolve(path));
   }
-  async listDir(dirPath: string): Promise<DirEntry[]> {
-    return localListDir(this.rootPath, dirPath);
+  async listDir(dirPath: string, worktreePath?: string): Promise<DirEntry[]> {
+    return localListDir(this.rootPath, dirPath, worktreePath);
   }
   async resolvePath(input: string, opts?: ResolvePathOptions): Promise<ResolvedPath> {
     return localResolvePath(this.rootPath, input, opts);

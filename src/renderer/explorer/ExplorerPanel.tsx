@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { DirEntry } from '@shared/providers/types';
 import { agentCockpit, useProjectsStore, useSessionStore, isDisconnected } from '../providerClient';
+import { useActiveWorktree, useWorktreeStore } from '@renderer/worktree/worktreeStore';
 import { useContentSelection } from '../content';
 import { useExplorerStore } from './explorerStore';
 import { FileTypeIcon } from './icons/FileTypeIcon';
 import { FolderIcon } from './icons/FolderIcon';
-import { EmptyState, Panel, PanelBody, PanelHeader, Row, Spinner } from '../ui';
+import { EmptyState, Panel, PanelBody, PanelHeader, Row, Select, Spinner, Toolbar } from '../ui';
 
 const IGNORED = new Set(['.git', 'node_modules', '.DS_Store']);
 const INDENT = 12;
@@ -15,6 +16,13 @@ const INDENT = 12;
 export function ExplorerPanel(): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
   const disconnected = useSessionStore(isDisconnected(activeId));
+  // Which worktree the Explorer lists/opens from — the shared SSOT (also drives
+  // Changes). Null (or the primary worktree) reads from the project root.
+  const { worktrees, activeWorktree } = useActiveWorktree();
+  const setWorktree = useWorktreeStore((s) => s.setWorktree);
+  // Same option shape/label rule as the Changes panel selector, bound to the
+  // shared store so a switch here also moves Changes (and vice-versa).
+  const worktreeOptions = worktrees.map((w) => ({ value: w.path, label: w.branch ?? w.path }));
   if (!activeId) {
     return (
       <Panel>
@@ -34,21 +42,47 @@ export function ExplorerPanel(): JSX.Element {
   return (
     <Panel>
       <PanelHeader title="Explorer" />
+      {worktreeOptions.length > 0 && (
+        <Toolbar>
+          <Select
+            aria-label="Worktree"
+            value={activeWorktree ?? ''}
+            onValueChange={(v) => void setWorktree(activeId, v)}
+            options={worktreeOptions}
+            placeholder="Worktree"
+            className="max-w-[220px] shrink"
+          />
+        </Toolbar>
+      )}
       <PanelBody>
-        {/* key on project+connection so the tree resets on reconnect */}
-        <DirChildren key={activeId} dirPath="" depth={0} />
+        {/* key on project+worktree so the tree resets on reconnect AND on a
+            worktree switch (drops stale expanded children of the old worktree) */}
+        <DirChildren
+          key={`${activeId}:${activeWorktree ?? ''}`}
+          dirPath=""
+          depth={0}
+          worktreePath={activeWorktree ?? undefined}
+        />
       </PanelBody>
     </Panel>
   );
 }
 
-function DirChildren({ dirPath, depth }: { dirPath: string; depth: number }): JSX.Element {
+function DirChildren({
+  dirPath,
+  depth,
+  worktreePath,
+}: {
+  dirPath: string;
+  depth: number;
+  worktreePath?: string;
+}): JSX.Element {
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
 
   useEffect(() => {
     let active = true;
     void agentCockpit.provider
-      .listDir(dirPath)
+      .listDir(dirPath, worktreePath)
       .then((es) => {
         if (active) setEntries(es.filter((e) => !IGNORED.has(e.name)));
       })
@@ -56,7 +90,7 @@ function DirChildren({ dirPath, depth }: { dirPath: string; depth: number }): JS
     return () => {
       active = false;
     };
-  }, [dirPath]);
+  }, [dirPath, worktreePath]);
 
   if (entries === null) {
     return (
@@ -69,16 +103,24 @@ function DirChildren({ dirPath, depth }: { dirPath: string; depth: number }): JS
     <>
       {entries.map((e) =>
         e.isDir ? (
-          <DirNode key={e.path} entry={e} depth={depth} />
+          <DirNode key={e.path} entry={e} depth={depth} worktreePath={worktreePath} />
         ) : (
-          <FileNode key={e.path} entry={e} depth={depth} />
+          <FileNode key={e.path} entry={e} depth={depth} worktreePath={worktreePath} />
         ),
       )}
     </>
   );
 }
 
-function DirNode({ entry, depth }: { entry: DirEntry; depth: number }): JSX.Element {
+function DirNode({
+  entry,
+  depth,
+  worktreePath,
+}: {
+  entry: DirEntry;
+  depth: number;
+  worktreePath?: string;
+}): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
   // Expansion lives in the store so a programmatic reveal (from a clicked link)
   // can expand ancestor directories of a target file.
@@ -99,12 +141,20 @@ function DirNode({ entry, depth }: { entry: DirEntry; depth: number }): JSX.Elem
       >
         {entry.name}
       </Row>
-      {open && <DirChildren dirPath={entry.path} depth={depth + 1} />}
+      {open && <DirChildren dirPath={entry.path} depth={depth + 1} worktreePath={worktreePath} />}
     </>
   );
 }
 
-function FileNode({ entry, depth }: { entry: DirEntry; depth: number }): JSX.Element {
+function FileNode({
+  entry,
+  depth,
+  worktreePath,
+}: {
+  entry: DirEntry;
+  depth: number;
+  worktreePath?: string;
+}): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
   const select = useContentSelection((s) => s.select);
   // Subscribe to the active project's selection slice (not the stable
@@ -130,7 +180,12 @@ function FileNode({ entry, depth }: { entry: DirEntry; depth: number }): JSX.Ele
         active={active}
         onClick={() => {
           if (activeId) {
-            select(activeId, { path: entry.path, worktreePath: '', baseline: 'HEAD', kind: 'file' });
+            select(activeId, {
+              path: entry.path,
+              worktreePath: worktreePath ?? '',
+              baseline: 'HEAD',
+              kind: 'file',
+            });
           }
         }}
         prefix={

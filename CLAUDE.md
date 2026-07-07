@@ -355,7 +355,13 @@ not `tabWindows[0]`), then fires `subscribeReinit` so `ControlTerminalPanel`
 mirrors the toolbar HARD refresh (`hardRecoverTab` capture-pane re-seed of
 normal-screen panes — alt-screen gated to repaint-only, no runaway scroll — plus a
 `nudgeClientSize` resize round-trip). Re-init single-flights with a pending
-re-drain (catch a mid-sync epoch) and never spins on a bare empty-list bail.
+re-drain (catch a mid-sync epoch). It marks the epoch initialized **only when
+`syncFromTmux` actually read a non-empty window list** — a just-attached `-CC`
+session is briefly not queryable (empty/errored `list-windows`), and marking it
+then stranded the window list until a manual switch (the "wrong until I switch
+windows" bug on fresh connect AND reconnect); an empty read instead schedules a
+**bounded** retry (~200 ms × 15) that converges with no user action and cannot
+spin on a dead session.
 `resetControlSession(projectId)` is **per-project** (keeps the shared subscription
 + that project's `channelEpoch`, so a backend switch with tmux still open still
 re-inits and one project's disconnect never clobbers another). The
@@ -738,6 +744,54 @@ line scrolls horizontally. Toggle Wrap on: the long line soft-wraps within the
 panel, line numbers stay in the same column anchored at each line's first visual
 row, and the choice persists across files and restarts.
 
+## Worktree awareness: one selection owner + worktree-parametrized reads
+
+**Invariant (shared selection):** Per-project `(worktrees, activeWorktree)` has
+exactly **one** authoritative owner — `worktreeStore`
+(`src/renderer/worktree/worktreeStore.ts`, `useWorktreeStore`/`useActiveWorktree`).
+The Changes panel and the Explorer are **pure consumers**; neither owns the other's
+worktree state. `changesStore` no longer holds `worktrees`/`activeWorktree` — its
+`refresh()` reads the active worktree from `worktreeStore`. Orchestration is
+centralized in `panelDataSync` (load/clear/evict off per-session status; a
+`worktreeStore.subscribe` seam fires `changesStore.refresh` on an `activeWorktree`
+transition — the initial connect is a `null→path` transition, so `loadProject` does
+NOT also refresh, avoiding a double refresh). A worktree **switch** is detected via
+`changeset.worktree !== activeWorktree` (the provider stamps `changeset.worktree`
+with the exact path passed in), which clears stale files before reload; a
+same-worktree watch refresh keeps last-good (no flicker). Do NOT reintroduce a
+per-panel worktree, route cross-store orchestration through a component/store action,
+or add a second worktree "truth".
+
+**Invariant (reads):** The file-read surface is uniformly worktree-parametrized,
+base = `worktreePath || projectRoot`, across BOTH transports. `FileReadOptions`
+carries `worktreePath?`; `listDir(dirPath, worktreePath?)` takes it positionally
+(`src/shared/providers/types.ts`), threaded through `api`, the IPC handlers, and the
+**preload bridge**. It is **additive/optional** — an absent worktree behaves exactly
+as before, so a version-skewed helper/renderer degrades to root-relative reads rather
+than erroring. Local (`localReadFile`/`localListDir`) resolves against
+`worktreePath || rootPath`, and `getDiffBundle` reads **both** content sides from the
+worktree `cwd` (previously local read them from the fixed root — a local/remote
+asymmetry now erased). Remote forwards `worktreePath`; the Go helper
+(`remote-helper/commands.go`) resolves relative targets against it (falling back to
+`remotePath`), and ref reads run in `cwd: base` so a linked worktree on another branch
+reads that branch's HEAD. The renderer read call-sites MUST pass the selection's
+`worktreePath`: `ContentViewer` (rendered), `RawFile`, `ImageCompare`, and
+`ExplorerPanel` (`listDir` + the file-open selection, which was previously a hardcoded
+`''`). Do NOT re-anchor any read to the fixed project root.
+
+**Known follow-up:** link resolution (`openLinkTarget`/`resolvePath`) is NOT yet
+worktree-aware (still resolves in-project links against the project root); tracked as
+a deferred bead. Full design + regression check:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) "Worktree-Aware Reads & Shared Selection".
+
+**Regression check:** add a linked worktree on a branch that adds a file absent from
+the primary worktree, select it in Changes → the Explorer must list that worktree and
+follow the shared selection, and opening the branch-only file must show its content
+(no "File not found") with diff-highlight content matching the worktree — on BOTH
+local and remote. The primary worktree (or none) must read from the project root
+exactly as before. Covered by the linked-worktree case in `local.test.ts`, the
+`remote-helper` `*WorktreePath` Go tests, and `worktreeStore.test.ts`.
+
 ## Native modules on Electron 42: `cpu-features` is stripped post-install
 
 **Invariant:** A `postinstall` (`scripts/strip-cpu-features.mjs`) deletes
@@ -755,11 +809,16 @@ cpu-features until it (or `nan`) ships V8-13.6 support.
 **Do NOT** "fix" this with `.npmrc omit=optional` — that would also drop
 `fsevents` (the macOS file-watch backend). The strip must be cpu-features-specific.
 
-**Known dev-tooling gap (not an app problem):** Playwright's `_electron.launch`
-(1.60/1.61) cannot DRIVE Electron 42, so the screenshot/verify harnesses
-(`scripts/screenshots/*`) fail at `firstWindow` even though the app itself
-launches, runs, and packages fine under Electron 42 (verified standalone). Re-test
-the harnesses when Playwright adds Electron 42 support.
+**Playwright CAN drive Electron 42 as of Playwright 1.61.1** (was broken on
+1.60/early-1.61: `_electron.launch` reached `firstWindow` but timed out). Verified
+2026-07-07: `electron.launch` + `firstWindow` succeed against `out/main/index.js`
+under Electron 42.5.1, and a full renderer smoke test drives the real UI (add a
+local project via `window.api`, click `.dv-tab`s, read/interact with panels). The
+`scripts/screenshots/*` harnesses and ad-hoc Playwright smoke scripts work again —
+use them to verify renderer changes end-to-end. (Dockview tabs are `.dv-tab`
+elements with **no ARIA role**, so target them by text via
+`locator('.dv-tab', { hasText: '<Title>' })`, not `getByRole('tab')`.) If a future
+Playwright/Electron bump regresses this, it resurfaces as a `firstWindow` hang.
 
 **Regression check:** after `npm install`, `node_modules/cpu-features` must be
 absent; `npm run package:dir` must rebuild `better-sqlite3` + `node-pty` and

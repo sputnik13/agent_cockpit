@@ -82,13 +82,13 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     if (mode !== 'rendered') return;
     let active = true;
     setSource({ kind: 'loading' });
-    void agentCockpit.provider.readFile(path).then((r) => {
+    void agentCockpit.provider.readFile(path, { worktreePath }).then((r) => {
       if (active) setSource({ kind: 'ready', text: r.content ?? '' });
     });
     return () => {
       active = false;
     };
-  }, [mode, path]);
+  }, [mode, path, worktreePath]);
 
   // Find-in-file: Cmd/Ctrl+F opens a find bar over the rendered content. Image
   // mode has no searchable text, so find is unavailable there. The search root

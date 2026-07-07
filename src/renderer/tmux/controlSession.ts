@@ -208,11 +208,17 @@ export async function createTerminalWindow(): Promise<string | null> {
  * `#{window_layout}`. Commands target the active provider, which matches the
  * active project.
  */
-export async function syncFromTmux(projectId: string): Promise<void> {
+export async function syncFromTmux(projectId: string): Promise<boolean> {
   try {
     const apply = (wire: Parameters<ReturnType<typeof store>['applyNotification']>[1]): void =>
       store().applyNotification(projectId, wire);
     const nameRows = await listWindows('#{window_id} #{window_name}');
+    // A live tmux session ALWAYS has >=1 window, so an empty read is an
+    // attach-race / not-ready signal (the -CC channel just attached but the
+    // session isn't queryable yet), never a real state. Report it as "not
+    // synced" so the caller retries instead of marking the channel initialized
+    // against nothing (the "window list wrong until a manual switch" bug).
+    if (nameRows.length === 0) return false;
     const liveIds = new Set(nameRows.map((w) => w.id));
     // Authoritative prune: a window closed while the channel was down (a silent
     // reattach re-syncs from `list-windows`, but tmux replays no `%window-close`
@@ -233,8 +239,9 @@ export async function syncFromTmux(projectId: string): Promise<void> {
       const wl = tryParseLayout(w.rest);
       if (wl) apply({ type: 'layout-change', windowId: w.id, layout: wl, visibleLayout: wl, flags: null });
     }
+    return true;
   } catch {
-    /* best effort */
+    return false; // channel error mid-sync — treat as not-ready so the caller retries
   }
 }
 
@@ -281,12 +288,17 @@ export async function restoreActiveWindow(projectId: string): Promise<void> {
  * function bails without issuing any command and returns `{ bailed: true }` so
  * the caller leaves the project uninitialized and a later acquire/sync retries.
  *
+ * `synced` reports whether the trailing {@link syncFromTmux} actually read a live
+ * (non-empty) window list. A transient channel error during the initial attach
+ * makes the reconcile read throw (swallowed here) AND `syncFromTmux` fail — in
+ * that case `synced` is false, so the caller must NOT mark the channel
+ * initialized (doing so stranded the window list until a manual switch).
+ *
  * Reaped windows leave the renderer model when tmux emits `%window-close` over
  * the live `-CC` stream after `kill-window`; reconcile does not prune the store
  * directly.
  */
-export async function ensureWindows(projectId: string): Promise<{ bailed: boolean }> {
-  let bailed = false;
+export async function ensureWindows(projectId: string): Promise<{ bailed: boolean; synced: boolean }> {
   try {
     const wins = await listWindows('#{window_id} #{window_name}');
     const createRun = useSettingsStore.getState().settings.showRunPanel;
@@ -294,7 +306,7 @@ export async function ensureWindows(projectId: string): Promise<{ bailed: boolea
     if (plan.bail) {
       // Attach race: do not create reserved windows from an empty list, and do
       // not mark the project initialized — a later acquire/sync retries.
-      return { bailed: true };
+      return { bailed: true, synced: false };
     }
     for (const id of plan.toKill) await store().command(`kill-window -t ${id}`);
     for (const r of plan.toRename) await store().command(`rename-window -t ${r.id} ${r.to}`);
@@ -310,8 +322,8 @@ export async function ensureWindows(projectId: string): Promise<{ bailed: boolea
   } catch {
     /* best effort */
   }
-  await syncFromTmux(projectId);
-  return { bailed };
+  const synced = await syncFromTmux(projectId);
+  return { bailed: false, synced };
 }
 
 /** Overall client size in tmux cells from a panel's pixel size. Uses the cell
@@ -441,6 +453,42 @@ const reinitInFlight = new Map<string, Promise<void>>();
  *  a newer channel epoch that arrives mid-sync is re-drained on settle (rather
  *  than dropped) — WITHOUT re-running a bare empty-list bail on a loop. */
 const reinitPending = new Set<string>();
+/** Bounded retry for a reinit that could not read the window list yet (the -CC
+ *  channel attached but the session isn't queryable — `list-windows` came back
+ *  empty/errored). A live session becomes listable within a few hundred ms, so a
+ *  short capped retry converges without a user action; the cap prevents spinning
+ *  on a genuinely dead session. */
+const reinitRetry = new Map<string, ReturnType<typeof setTimeout>>();
+const reinitRetryAttempts = new Map<string, number>();
+const REINIT_RETRY_DELAY_MS = 200;
+const REINIT_RETRY_MAX = 15; // ~3s of retries; well past a normal attach-to-listable gap
+
+function clearReinitRetry(projectId: string): void {
+  const t = reinitRetry.get(projectId);
+  if (t !== undefined) clearTimeout(t);
+  reinitRetry.delete(projectId);
+  reinitRetryAttempts.delete(projectId);
+}
+
+function scheduleReinitRetry(projectId: string): void {
+  const attempts = (reinitRetryAttempts.get(projectId) ?? 0) + 1;
+  const existing = reinitRetry.get(projectId);
+  if (existing !== undefined) clearTimeout(existing);
+  if (attempts > REINIT_RETRY_MAX) {
+    console.warn(`[control-session] reinit gave up after ${REINIT_RETRY_MAX} retries for ${projectId}`);
+    clearReinitRetry(projectId);
+    return;
+  }
+  reinitRetryAttempts.set(projectId, attempts);
+  reinitRetry.set(
+    projectId,
+    setTimeout(() => {
+      reinitRetry.delete(projectId);
+      if (store().activeProjectId !== projectId) return; // deactivated; a re-acquire will retry
+      maybeReinit(projectId);
+    }, REINIT_RETRY_DELAY_MS),
+  );
+}
 /** Listeners fired after a successful reinit for a project, so panel-owned
  *  concerns (pane re-seed + resize round-trip) can restore live displays. The
  *  window-list rebuild is done here; pane display is the subscriber's job. */
@@ -496,12 +544,17 @@ function maybeReinit(projectId: string): void {
     return;
   }
   const run = async (): Promise<void> => {
-    const { bailed } = await ensureWindows(projectId); // reconcile + authoritative sync
-    // An empty `list-windows` is an attach race (not a real state): leave the
-    // project uninitialized so a later acquire/attached retries against a
-    // populated list. Do NOT mark this epoch done, and (below) do NOT re-drain
-    // on a bare bail — that would spin on a persistently-empty/dead session.
-    if (bailed) return;
+    const { synced } = await ensureWindows(projectId); // reconcile + authoritative sync
+    // `synced` is false when `list-windows` came back empty or errored — the
+    // -CC channel attached but the session isn't queryable yet (attach race), a
+    // state a live session leaves within a few hundred ms. Do NOT mark this
+    // epoch initialized (that stranded the window list until a manual switch);
+    // schedule a bounded retry so it converges on its own.
+    if (!synced) {
+      scheduleReinitRetry(projectId);
+      return;
+    }
+    clearReinitRetry(projectId);
     await restoreActiveWindow(projectId); // focus the window the user last worked in
     initializedEpoch.set(projectId, target);
     notifyReinit(projectId); // panel re-seeds panes + resize round-trip
@@ -639,6 +692,7 @@ export function resetControlSession(projectId?: string): void {
     initializedEpoch.delete(projectId);
     reinitInFlight.delete(projectId);
     reinitPending.delete(projectId);
+    clearReinitRetry(projectId);
     inFlight.delete(projectId);
     ready.delete(projectId);
     return;
@@ -649,6 +703,9 @@ export function resetControlSession(projectId?: string): void {
   initializedEpoch.clear();
   reinitInFlight.clear();
   reinitPending.clear();
+  for (const t of reinitRetry.values()) clearTimeout(t);
+  reinitRetry.clear();
+  reinitRetryAttempts.clear();
   inFlight.clear();
   ready.clear();
 }

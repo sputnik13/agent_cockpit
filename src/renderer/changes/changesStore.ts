@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import type { BranchPoint, Changeset, WorktreeRecord } from '@shared/ipc/channels';
+import type { BranchPoint, Changeset } from '@shared/ipc/channels';
 import { agentCockpit, useProjectsStore } from '@renderer/providerClient';
+import { useWorktreeStore } from '@renderer/worktree/worktreeStore';
 import { readFocus, writeFocus } from '@renderer/workspace/focusMemory';
 
 /** Diff target for the Changes view. `head` = working tree vs HEAD (default);
@@ -15,15 +16,15 @@ export type DiffTarget = 'head' | 'branchPoint';
  * actions; load/refresh/clear are orchestrated externally by `panelDataSync`
  * off per-session connection status + watch events — never panel mount.
  *
- * `activeWorktree` is the worktree path currently being inspected; `baseline`
- * is an optional ref/commit passed to `getChangeset` (undefined == provider
- * default, typically HEAD). `selectedPath` tracks the focused file row so the
- * detail/diff streams can react to selection. Every read is addressed by the
- * slice's `projectId`, so a backgrounded project's refresh hits its own session.
+ * The worktree currently being inspected is owned by `worktreeStore` (the single
+ * authoritative owner of `(worktrees, activeWorktree)`); `refresh` reads the
+ * active worktree from there. `baseline` is an optional ref/commit passed to
+ * `getChangeset` (undefined == provider default, typically HEAD). `selectedPath`
+ * tracks the focused file row so the detail/diff streams can react to selection.
+ * Every read is addressed by the slice's `projectId`, so a backgrounded project's
+ * refresh hits its own session.
  */
 export interface ChangesSlice {
-  worktrees: WorktreeRecord[];
-  activeWorktree: string | null;
   baseline: string | undefined;
   changeset: Changeset | null;
   loading: boolean;
@@ -40,8 +41,6 @@ export interface ChangesSlice {
 
 function emptySlice(): ChangesSlice {
   return {
-    worktrees: [],
-    activeWorktree: null,
     baseline: undefined,
     changeset: null,
     loading: false,
@@ -54,8 +53,6 @@ function emptySlice(): ChangesSlice {
 interface ChangesState {
   byProject: Record<string, ChangesSlice>;
 
-  loadWorktrees: (projectId: string) => Promise<void>;
-  setWorktree: (projectId: string, path: string) => Promise<void>;
   refresh: (projectId: string) => Promise<void>;
   select: (projectId: string, path: string) => void;
   /** Set the diff target and trigger a refresh. */
@@ -80,57 +77,29 @@ export const useChangesStore = create<ChangesState>((set, get) => {
   return {
     byProject: {},
 
-    loadWorktrees: async (projectId) => {
-      patch(projectId, { loading: true });
-      try {
-        const worktrees = await agentCockpit.provider.listWorktrees(projectId);
-        // Stale-resolution guard: discard if the slice was evicted mid-flight.
-        const slice = get().byProject[projectId];
-        if (!slice) return;
-        const { activeWorktree } = slice;
-        // Keep the active worktree only if it still exists in this project's
-        // list; otherwise fall back to the first worktree.
-        const stillValid = activeWorktree != null && worktrees.some((w) => w.path === activeWorktree);
-        const next = stillValid ? activeWorktree : (worktrees[0]?.path ?? null);
-        patch(projectId, {
-          worktrees,
-          activeWorktree: next,
-          loading: false,
-          // Drop a selection that belonged to the previous worktree.
-          ...(next !== activeWorktree ? { selectedPath: null } : {}),
-        });
-        if (next !== null) await get().refresh(projectId);
-      } catch {
-        // Discard if evicted mid-flight; otherwise clear to empty so the panel
-        // does not show a stale list with loading stuck on.
-        if (!get().byProject[projectId]) return;
-        patch(projectId, {
-          worktrees: [],
-          activeWorktree: null,
-          changeset: null,
-          loading: false,
-        });
-      }
-    },
-
-    setWorktree: async (projectId, path) => {
-      patch(projectId, { activeWorktree: path, changeset: null, selectedPath: null });
-      await get().refresh(projectId);
-    },
-
     refresh: async (projectId) => {
+      // The active worktree is owned by `worktreeStore` (single owner of
+      // `(worktrees, activeWorktree)`); read the current selection from there.
+      const activeWorktree =
+        useWorktreeStore.getState().byProject[projectId]?.activeWorktree ?? null;
       const slice = get().byProject[projectId];
-      if (!slice) return;
-      const { activeWorktree, target } = slice;
       if (activeWorktree === null) {
         patch(projectId, { changeset: null });
         return;
       }
+      // If the last changeset belonged to a DIFFERENT worktree, the selection
+      // just changed (picker / cwd-follow): drop the stale changeset + selection
+      // so the panel shows a spinner instead of another worktree's files. A
+      // same-worktree refresh (a watch event) keeps last-good — no flicker.
+      if (slice?.changeset && slice.changeset.worktree !== activeWorktree) {
+        patch(projectId, { changeset: null, selectedPath: null });
+      }
+      const target: DiffTarget = get().byProject[projectId]?.target ?? 'head';
       patch(projectId, { loading: true });
       try {
         // Re-resolve the branch-point on every refresh so it tracks new commits.
         let baseline: string | undefined;
-        let branchPoint: BranchPoint | null | undefined = slice.branchPoint;
+        let branchPoint: BranchPoint | null | undefined = get().byProject[projectId]?.branchPoint;
         if (target === 'branchPoint') {
           const resolved = await agentCockpit.provider.resolveBranchPoint(activeWorktree, projectId);
           // Stale guard: slice may have been evicted while awaiting the RPC.

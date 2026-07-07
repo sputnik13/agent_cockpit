@@ -446,7 +446,14 @@ export class RemoteProvider implements WorkspaceProvider {
 
   /** Resolve a path against the remote repository root (POSIX semantics). */
   private resolve(path: string): string {
-    return posix.isAbsolute(path) ? path : posix.join(this.spec.remotePath, path);
+    return this.resolveIn(this.spec.remotePath, path);
+  }
+
+  /** Resolve `path` against `base` (POSIX). An absolute path is returned as-is;
+   *  a relative path is joined onto `base`. Callers pass `worktreePath ||
+   *  remotePath` as the base to make a read worktree-aware. */
+  private resolveIn(base: string, path: string): string {
+    return posix.isAbsolute(path) ? path : posix.join(base, path);
   }
 
   /** Path relative to the remote repository root — the pathspec form `git show
@@ -504,12 +511,16 @@ export class RemoteProvider implements WorkspaceProvider {
 
   // Filesystem (read-only) — helper RPC reads (br h7a.7.3).
   async readFile(path: string, opts?: FileReadOptions): Promise<FileReadResult> {
+    // Resolve against the worktree root when supplied; empty/absent = project
+    // root. Additive/optional — no worktree behaves exactly as before.
+    const base = opts?.worktreePath || this.spec.remotePath;
     // Honor opts.ref: read the file AT the git ref (diff old side / raw at
-    // baseline) via the helper's `git show <ref>:<repo-relative-path>` instead of
-    // the working tree. Without a ref, read the working-tree file as before.
+    // baseline) via the helper's `git show <ref>:<repo-relative-path>` run in the
+    // worktree (`cwd = base`). Without a ref, read the working-tree file resolved
+    // against the worktree base, forwarding worktreePath so the helper honors it.
     const res = opts?.ref
-      ? await this.rpc().readFile(this.repoRelative(path), { ref: opts.ref, cwd: this.spec.remotePath })
-      : await this.rpc().readFile(this.resolve(path));
+      ? await this.rpc().readFile(this.repoRelative(path), { ref: opts.ref, cwd: base })
+      : await this.rpc().readFile(this.resolveIn(base, path), { worktreePath: opts?.worktreePath });
     return {
       content: res.content,
       truncated: res.truncated,
@@ -526,10 +537,13 @@ export class RemoteProvider implements WorkspaceProvider {
       mtime: res.exists ? res.mtime : null,
     };
   }
-  async listDir(dirPath: string): Promise<DirEntry[]> {
-    // Resolve the dir path against the project root (POSIX semantics).
-    const absDir = this.resolve(dirPath);
-    const entries = await this.rpc().listDir(absDir, this.spec.remotePath);
+  async listDir(dirPath: string, worktreePath?: string): Promise<DirEntry[]> {
+    // Resolve the dir path against the worktree root when supplied; empty/absent
+    // = project root (POSIX semantics). Root is the same base so the returned
+    // entry paths stay base-relative (clean 'src/a.ts', not '../wt/src/a.ts').
+    const base = worktreePath || this.spec.remotePath;
+    const absDir = this.resolveIn(base, dirPath);
+    const entries = await this.rpc().listDir(absDir, base, worktreePath);
     return entries.map((e) => ({
       name: e.name,
       path: e.path,

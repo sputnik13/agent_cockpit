@@ -370,9 +370,12 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   ipcMain.handle(Channels.providerStat, async (_e, req: { path: string; projectId?: string }) => ({
     stat: await providerFor(req?.projectId).stat(requireString(req?.path, 'path')),
   }));
-  ipcMain.handle(Channels.providerListDir, async (_e, req: { dirPath: string; projectId?: string }) => ({
-    entries: await providerFor(req?.projectId).listDir(req?.dirPath ?? ''),
-  }));
+  ipcMain.handle(
+    Channels.providerListDir,
+    async (_e, req: { dirPath: string; worktreePath?: string; projectId?: string }) => ({
+      entries: await providerFor(req?.projectId).listDir(req?.dirPath ?? '', req?.worktreePath),
+    }),
+  );
   ipcMain.handle(
     Channels.providerResolvePath,
     async (_e, req: { input: string; base?: string; projectId?: string }) => ({

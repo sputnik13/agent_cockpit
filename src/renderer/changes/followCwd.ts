@@ -10,7 +10,7 @@
  * 2. `useFollowTerminalCwd()` — React hook. When `followTerminalCwd` is enabled
  *    and the active project has a live control session, polls the active control
  *    pane's `#{pane_current_path}` every ~1.5 s via the existing tmux command
- *    path, maps cwd → worktree, and calls `changesStore.setWorktree` only when
+ *    path, maps cwd → worktree, and calls `worktreeStore.setWorktree` only when
  *    the mapped worktree differs from the current `activeWorktree`. Stops polling
  *    when disabled or when no live session is present.
  *
@@ -22,7 +22,7 @@ import type { WorktreeRecord } from '@shared/ipc/channels';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
 import { useProjectsStore, useSessionStore, isConnected } from '@renderer/providerClient';
 import { useTmuxStore } from '@renderer/tmux/tmuxStore';
-import { useChangesStore } from './changesStore';
+import { useWorktreeStore } from '@renderer/worktree/worktreeStore';
 
 const POLL_INTERVAL_MS = 1500;
 
@@ -64,7 +64,7 @@ export function worktreeForCwd(worktrees: WorktreeRecord[], cwd: string): string
  * Hook: poll the active terminal pane's `#{pane_current_path}` while
  * `followTerminalCwd` is enabled and the active project has a live control
  * session with a known active pane. On each poll, map the cwd to a worktree and
- * call `changesStore.setWorktree` when it differs from the current selection.
+ * call `worktreeStore.setWorktree` when it differs from the current selection.
  *
  * Wire this into ChangesPanel (or its host), not ControlTerminalPanel.
  */
@@ -106,14 +106,14 @@ export function useFollowTerminalCwd(): void {
           const cwd = r.lines[0]?.trim() ?? '';
           if (!cwd) return;
 
-          const changesState = useChangesStore.getState();
-          const slice = changesState.byProject[pid];
+          const worktreeState = useWorktreeStore.getState();
+          const slice = worktreeState.byProject[pid];
           if (!slice) return;
 
           const { worktrees, activeWorktree } = slice;
           const matched = worktreeForCwd(worktrees, cwd);
           if (matched !== null && matched !== activeWorktree) {
-            void changesState.setWorktree(pid, matched);
+            worktreeState.setWorktree(pid, matched);
           }
         })
         .catch(() => {

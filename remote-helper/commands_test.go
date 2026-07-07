@@ -84,6 +84,23 @@ func TestReadFileEmptyPath(t *testing.T) {
 	}
 }
 
+// A relative path is resolved against worktreePath when supplied; absent
+// worktreePath keeps the (absolute) path as-given.
+func TestReadFileWorktreePath(t *testing.T) {
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, "data.txt"), []byte("wt-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	params := `{"path":"data.txt","worktreePath":` + jstr(worktree) + `}`
+	res, err := handleReadFile(json.RawMessage(params))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	if r := res.(readFileResult); r.Content != "wt-content" {
+		t.Fatalf("content = %q, want wt-content", r.Content)
+	}
+}
+
 func TestStat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
@@ -290,6 +307,30 @@ func TestListDirErrors(t *testing.T) {
 	// Non-existent dir.
 	if _, err := handleListDir(json.RawMessage(`{"dir":"/nonexistent/path/xyz","root":"/nonexistent/path"}`)); err == nil {
 		t.Fatal("expected error for non-existent dir")
+	}
+}
+
+// A relative dir is resolved against worktreePath when supplied, and entry paths
+// stay base-relative (root == the worktree base).
+func TestListDirWorktreePath(t *testing.T) {
+	worktree := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(worktree, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "src", "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	params := `{"dir":"src","root":` + jstr(worktree) + `,"worktreePath":` + jstr(worktree) + `}`
+	raw, err := handleListDir(json.RawMessage(params))
+	if err != nil {
+		t.Fatalf("listDir: %v", err)
+	}
+	entries := raw.([]dirEntry)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Name != "a.txt" || entries[0].Path != "src/a.txt" {
+		t.Fatalf("expected src/a.txt, got %+v", entries[0])
 	}
 }
 

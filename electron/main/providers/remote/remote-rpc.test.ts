@@ -122,6 +122,24 @@ describe('HelperRpcClient correlation', () => {
     // Working-tree read: ref/cwd are undefined, so JSON framing drops them.
     expect(seen[1]!.ref).toBeUndefined();
     expect(seen[1]!.cwd).toBeUndefined();
+    expect(seen[1]!.worktreePath).toBeUndefined();
+  });
+
+  it('readFile forwards worktreePath for a worktree-scoped working-tree read', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const { stream } = fakeHelper((req) => {
+      if (req.method === 'readFile') {
+        seen.push(req.params);
+        return { content: 'wt', truncated: false };
+      }
+      return null;
+    });
+    const client = new HelperRpcClient(stream);
+    await client.readFile('/wt/src/a.ts', { worktreePath: '/wt' });
+    expect(seen[0]).toMatchObject({ path: '/wt/src/a.ts', worktreePath: '/wt' });
+    // No ref: the git-ref fields stay omitted.
+    expect(seen[0]!.ref).toBeUndefined();
+    expect(seen[0]!.cwd).toBeUndefined();
   });
 
   it('getDiffBundle issues ONE call carrying cwd/path/baseline and returns the bundle', async () => {
@@ -203,6 +221,23 @@ describe('HelperRpcClient.listDir', () => {
     const client = new HelperRpcClient(stream);
     const entries = await client.listDir('/repo/src', '/repo');
     expect(entries).toEqual(fakeEntries);
+  });
+
+  it('forwards worktreePath when supplied and omits it otherwise', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const { stream } = fakeHelper((req) => {
+      if (req.method === 'listDir') {
+        seen.push(req.params);
+        return [];
+      }
+      return null;
+    });
+    const client = new HelperRpcClient(stream);
+    await client.listDir('/wt/src', '/wt', '/wt');
+    await client.listDir('/repo/src', '/repo');
+    expect(seen[0]).toMatchObject({ dir: '/wt/src', root: '/wt', worktreePath: '/wt' });
+    // Absent worktreePath is dropped by JSON framing (no regression).
+    expect(seen[1]!.worktreePath).toBeUndefined();
   });
 });
 

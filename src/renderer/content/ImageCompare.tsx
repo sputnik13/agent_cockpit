@@ -14,11 +14,11 @@ export function ImageCompare({ worktreePath, baseline, filePath, oldPath }: Imag
   useEffect(() => {
     let active = true;
     const previousPath = oldPath ?? filePath;
-    void window.api.provider.readFile(previousPath, { ref: baseline }).then((r) => {
+    void window.api.provider.readFile(previousPath, { ref: baseline, worktreePath }).then((r) => {
       if (!active) return;
       setBefore(r.isBinary ? makeDataUrl(r) : null);
     });
-    void window.api.provider.readFile(filePath).then((r) => {
+    void window.api.provider.readFile(filePath, { worktreePath }).then((r) => {
       if (!active) return;
       setAfter(r.isBinary ? makeDataUrl(r) : null);
     });

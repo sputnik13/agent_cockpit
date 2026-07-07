@@ -54,8 +54,10 @@ const api: RendererApi = {
       invoke<{ file: never }>(Channels.providerReadFile, { path, opts, projectId }).then((r) => r.file),
     stat: (path, projectId) =>
       invoke<{ stat: never }>(Channels.providerStat, { path, projectId }).then((r) => r.stat),
-    listDir: (dirPath, projectId) =>
-      invoke<{ entries: never }>(Channels.providerListDir, { dirPath, projectId }).then((r) => r.entries),
+    listDir: (dirPath, worktreePath, projectId) =>
+      invoke<{ entries: never }>(Channels.providerListDir, { dirPath, worktreePath, projectId }).then(
+        (r) => r.entries,
+      ),
     resolvePath: (input, opts, projectId) =>
       invoke<{ resolved: never }>(Channels.providerResolvePath, {
         input,

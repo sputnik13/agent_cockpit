@@ -52,9 +52,14 @@ type readFileParams struct {
 	Path string `json:"path"`
 	// Ref, when non-empty, reads the file AT a git ref via `git show <ref>:<path>`
 	// (e.g. the diff old side or the "raw at baseline" view) instead of the
-	// working tree. Path is then repo-relative and Cwd is the repo root.
+	// working tree. Path is then repo-relative and Cwd is the repo (or worktree)
+	// root the `git show` runs in.
 	Ref string `json:"ref,omitempty"`
 	Cwd string `json:"cwd,omitempty"`
+	// WorktreePath, when non-empty, resolves a relative working-tree Path against
+	// that worktree root (falling back to the Path as-given when empty). Absolute
+	// paths are honored verbatim, so the project-root default is unchanged.
+	WorktreePath string `json:"worktreePath,omitempty"`
 }
 
 type readFileResult struct {
@@ -86,9 +91,16 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 		}
 		return readFileResult{Content: out, Truncated: truncated}, nil
 	}
-	f, err := os.Open(p.Path)
+	// Working-tree read: resolve a relative path against the worktree root when
+	// supplied; empty/absent falls back to the path as-given (already absolute
+	// for the project-root default).
+	target := p.Path
+	if p.WorktreePath != "" && !filepath.IsAbs(target) {
+		target = filepath.Join(p.WorktreePath, target)
+	}
+	f, err := os.Open(target)
 	if err != nil {
-		return nil, fmt.Errorf("readFile: open %q: %w", p.Path, err)
+		return nil, fmt.Errorf("readFile: open %q: %w", target, err)
 	}
 	defer f.Close()
 
@@ -96,7 +108,7 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 	buf := make([]byte, maxReadFileBytes+1)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, fmt.Errorf("readFile: read %q: %w", p.Path, err)
+		return nil, fmt.Errorf("readFile: read %q: %w", target, err)
 	}
 	truncated := n > maxReadFileBytes
 	if truncated {
@@ -446,6 +458,10 @@ type listDirParams struct {
 	// Root is the project root, used to compute root-relative paths in the
 	// result (matching the shape local.listDir returns to the renderer).
 	Root string `json:"root"`
+	// WorktreePath, when non-empty, resolves a relative Dir against that worktree
+	// root (falling back to Dir as-given when empty). Absolute dirs are honored
+	// verbatim, so the project-root default is unchanged.
+	WorktreePath string `json:"worktreePath,omitempty"`
 }
 
 // dirEntry matches the DirEntry shape the renderer expects:
@@ -467,19 +483,25 @@ func handleListDir(raw json.RawMessage) (interface{}, error) {
 	if p.Dir == "" {
 		return nil, fmt.Errorf("listDir: dir must not be empty")
 	}
+	// Resolve a relative Dir against the worktree root when supplied; empty/absent
+	// falls back to Dir as-given (already absolute for the project-root default).
+	dir := p.Dir
+	if p.WorktreePath != "" && !filepath.IsAbs(dir) {
+		dir = filepath.Join(p.WorktreePath, dir)
+	}
 	if p.Root == "" {
 		// Default root to dir so relative paths still work when root is omitted.
-		p.Root = p.Dir
+		p.Root = dir
 	}
 
-	entries, err := os.ReadDir(p.Dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("listDir: read %q: %w", p.Dir, err)
+		return nil, fmt.Errorf("listDir: read %q: %w", dir, err)
 	}
 
 	result := make([]dirEntry, 0, len(entries))
 	for _, e := range entries {
-		absPath := filepath.Join(p.Dir, e.Name())
+		absPath := filepath.Join(dir, e.Name())
 		rel, err := filepath.Rel(p.Root, absPath)
 		if err != nil {
 			rel = e.Name()

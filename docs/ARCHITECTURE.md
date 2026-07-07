@@ -333,10 +333,15 @@ connection status; it is driven off a **channel-attach epoch**.
   `%window-close`), reserved-window reconcile, and `restoreActiveWindow` (adopts
   tmux's session-active window via a synthetic `session-window-changed` so a
   reconnect focuses the **last-worked** window, not the first tab). A single-flight
-  with a pending re-drain catches an epoch that lands mid-sync without spinning on
-  a bare empty-list attach race. The boolean "initialized once" guard this
-  replaced was the root cause of the stale-window-list / stale-display class:
-  it skipped re-init entirely on a reattach.
+  with a pending re-drain catches an epoch that lands mid-sync. The epoch is
+  marked initialized **only when `syncFromTmux` actually read a live (non-empty)
+  window list**: a just-attached `-CC` session is briefly not queryable (an
+  empty/errored `list-windows`), and marking it initialized then stranded the
+  window list until a manual switch. An empty read instead schedules a **bounded**
+  retry (~200 ms × 15) so the list converges on its own with no user action, while
+  the cap prevents spinning on a genuinely dead session. The boolean "initialized
+  once" guard this replaced was the root cause of the stale-window-list /
+  stale-display class: it skipped re-init entirely on a reattach.
 - **Display restore.** After the window sync, `controlSession` fires
   `subscribeReinit`; `ControlTerminalPanel` mirrors the toolbar **hard refresh**
   for the active project — `hardRecoverTab` (capture-pane re-seed of normal-screen
@@ -735,6 +740,65 @@ exactly the changes since the branch diverged — not uncommitted-only (HEAD mod
 the entire repo history. Making a new commit while in branch-point mode and triggering
 a watch-refresh must update the diff without requiring the user to reselect the target.
 `resolveBranchPoint` should not be called at all when target is `head`.
+
+## Worktree-Aware Reads & Shared Selection (invariant)
+
+Git-worktree awareness spans two layers that must both hold, or opening a file in a
+linked worktree fails ("File not found") or shows the main tree's content.
+
+### Shared selection — one authoritative owner
+
+Per-project `(worktrees, activeWorktree)` has exactly **one** owner:
+[`src/renderer/worktree/worktreeStore.ts`](src/renderer/worktree/worktreeStore.ts)
+(`useWorktreeStore` / `useActiveWorktree`), mirroring the "one authoritative owner"
+pattern used for connection state. **Both** the Changes panel and the Explorer are
+pure consumers — neither owns the other's worktree state:
+
+- `ChangesPanel` and `followCwd` read/write the selection through `worktreeStore`;
+  `changesStore` no longer holds `worktrees`/`activeWorktree` and its `refresh()`
+  reads the active worktree from `worktreeStore`.
+- `ExplorerPanel` reads `useActiveWorktree()`, lists/opens from that worktree, and
+  remounts its tree (key includes the worktree) on a switch.
+- **Orchestration is centralized in `panelDataSync`**, not in a panel or a store
+  action: it loads/clears/evicts `worktreeStore` off per-session connection status,
+  and subscribes to `activeWorktree` transitions to trigger `changesStore.refresh`.
+  A same-worktree refresh keeps last-good (no flicker); a switch is detected via
+  `changeset.worktree !== activeWorktree` (the provider stamps `changeset.worktree`),
+  which clears stale files first. Do not reintroduce a per-panel worktree or route
+  cross-store orchestration through a component.
+
+### Worktree-parametrized read surface
+
+The read surface is uniformly parametrized by worktree, base =
+`worktreePath || projectRoot`, across **both** transports:
+
+- `FileReadOptions.worktreePath?` and `WorkspaceProvider.listDir(dirPath, worktreePath?)`
+  ([`src/shared/providers/types.ts`](src/shared/providers/types.ts)) — threaded through
+  `api`, the IPC handlers, and the preload bridge. Additive/optional: an absent
+  worktree behaves exactly as before, so a version-skewed helper/renderer degrades to
+  root-relative reads instead of erroring.
+- **Local**: `localReadFile`/`localListDir` resolve against `worktreePath || rootPath`;
+  `getDiffBundle` reads **both** content sides from the worktree `cwd` (previously the
+  local path read them from the fixed root — a local/remote asymmetry now erased).
+- **Remote**: `RemoteProvider.readFile`/`listDir` forward `worktreePath`; the Go helper
+  (`remote-helper/commands.go`) resolves relative targets against it, falling back to
+  `remotePath`. Ref reads run in `cwd: base` so a linked worktree on another branch
+  reads that branch's HEAD.
+- **Renderer call-sites** pass the selection's `worktreePath`: `ContentViewer`
+  (rendered), `RawFile`, `ImageCompare`, and `ExplorerPanel` (`listDir` + file-open
+  selection). Link resolution (`openLinkTarget`/`resolvePath`) is **not yet**
+  worktree-aware — a tracked follow-up.
+
+### Regression Check
+
+Add a linked worktree on a branch that adds a file absent from the primary worktree;
+select it in Changes. The Explorer must list that worktree and follow the shared
+selection, and opening the branch-only file must show its content (no "File not
+found") with diff-highlight content matching the worktree — on **both** local and
+remote projects. Selecting the primary worktree (or none) must behave exactly as
+before (project-root reads). Covered by the linked-worktree case in
+`electron/main/providers/local/local.test.ts`, the `remote-helper` `*WorktreePath`
+Go tests, and `worktreeStore.test.ts`.
 
 ## Content Panel Highlighting
 

@@ -107,6 +107,9 @@ export interface FileReadOptions {
   maxBytes?: number;
   /** Read the file content at a git ref instead of the working tree. */
   ref?: string;
+  /** Resolve the path against this worktree root instead of the project root;
+   *  empty/absent = project root. */
+  worktreePath?: string;
 }
 
 /** One-round-trip diff bundle (see WorkspaceProvider.getDiffBundle). `newContent`
@@ -222,8 +225,10 @@ export interface WorkspaceProvider {
   // Filesystem (read-only)
   readFile(path: string, opts?: FileReadOptions): Promise<FileReadResult>;
   stat(path: string): Promise<StatResult>;
-  /** List a directory (path relative to project root; '' = root). */
-  listDir(dirPath: string): Promise<DirEntry[]>;
+  /** List a directory (path relative to the base root; '' = root). `worktreePath`
+   *  resolves the base against that worktree instead of the project root;
+   *  empty/absent = project root. */
+  listDir(dirPath: string, worktreePath?: string): Promise<DirEntry[]>;
   /** Resolve a link target (absolute, `file://`, or relative) to its canonical
    *  path, existence, and project membership. */
   resolvePath(input: string, opts?: ResolvePathOptions): Promise<ResolvedPath>;

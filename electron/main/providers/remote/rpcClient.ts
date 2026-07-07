@@ -287,11 +287,21 @@ export class HelperRpcClient {
     return this.call<HandshakeResult>('handshake', { protocolVersion: PROTOCOL_VERSION });
   }
 
-  readFile(path: string, opts?: { ref?: string; cwd?: string }): Promise<ReadFileResult> {
-    // ref/cwd are omitted from the JSON when undefined, so the helper sees an
-    // empty Ref and reads the working tree (unchanged behavior). When set, the
-    // helper reads at the git ref via `git show`.
-    return this.call<ReadFileResult>('readFile', { path, ref: opts?.ref, cwd: opts?.cwd });
+  readFile(
+    path: string,
+    opts?: { ref?: string; cwd?: string; worktreePath?: string },
+  ): Promise<ReadFileResult> {
+    // ref/cwd/worktreePath are omitted from the JSON when undefined, so the
+    // helper sees empty fields and reads the working tree at the project root
+    // (unchanged behavior). When set, `ref` reads at a git ref via `git show`
+    // (run in `cwd`), and `worktreePath` resolves a working-tree read against
+    // that worktree root instead of the project root.
+    return this.call<ReadFileResult>('readFile', {
+      path,
+      ref: opts?.ref,
+      cwd: opts?.cwd,
+      worktreePath: opts?.worktreePath,
+    });
   }
 
   stat(path: string): Promise<StatResult> {
@@ -334,8 +344,11 @@ export class HelperRpcClient {
     return this.call<BeadsExecResult>('beadsExec', { cwd, args });
   }
 
-  listDir(dir: string, root: string): Promise<ListDirEntry[]> {
-    return this.call<ListDirEntry[]>('listDir', { dir, root });
+  listDir(dir: string, root: string, worktreePath?: string): Promise<ListDirEntry[]> {
+    // worktreePath is omitted from the JSON when undefined; when set, the helper
+    // resolves a relative `dir` against that worktree root instead of the
+    // project root (working-tree read parity with readFile).
+    return this.call<ListDirEntry[]>('listDir', { dir, root, worktreePath });
   }
 
   /**

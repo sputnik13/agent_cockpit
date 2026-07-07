@@ -81,11 +81,14 @@ async function loadModules() {
 }
 
 /** panelDataSync drives loads from connection status; tests drive the addressed
- *  slice load directly. */
+ *  slice load directly: worktreeStore lists worktrees (single owner of the
+ *  selection), then changesStore refreshes the changeset for it. */
 async function loadSlice(): Promise<void> {
   const { useChangesStore } = await import('./changesStore');
+  const { useWorktreeStore } = await import('@renderer/worktree/worktreeStore');
   await act(async () => {
-    await useChangesStore.getState().loadWorktrees(PROJECT);
+    await useWorktreeStore.getState().loadWorktrees(PROJECT);
+    await useChangesStore.getState().refresh(PROJECT);
   });
 }
 
@@ -199,8 +202,11 @@ describe('ChangesPanel', () => {
   });
 });
 
-describe('changesStore.loadWorktrees worktree resolution', () => {
-  it('drops a stale activeWorktree and reloads the new first worktree on reload', async () => {
+describe('worktree selection drives the changeset reload', () => {
+  it('drops the selection and reloads the new first worktree when the selection disappears', async () => {
+    // makeChangeset stamps worktree '/repo/main'; the selected worktree here is
+    // '/repo/A' then '/repo/B', so the changeset.worktree mismatch on the second
+    // refresh clears the stale selection (worktree switch), matching the picker.
     const getChangeset = vi.fn().mockResolvedValue(makeChangeset([]));
     const listWorktrees = vi
       .fn()
@@ -208,27 +214,30 @@ describe('changesStore.loadWorktrees worktree resolution', () => {
       .mockResolvedValueOnce([makeWorktree({ path: '/repo/B' })]); // A no longer present
     installApi({ listWorktrees, getChangeset });
     const { useChangesStore } = await loadModules();
+    const { useWorktreeStore } = await import('@renderer/worktree/worktreeStore');
 
-    await useChangesStore.getState().loadWorktrees(PROJECT);
-    expect(useChangesStore.getState().byProject[PROJECT]!.activeWorktree).toBe('/repo/A');
+    await useWorktreeStore.getState().loadWorktrees(PROJECT);
+    await useChangesStore.getState().refresh(PROJECT);
+    expect(useWorktreeStore.getState().byProject[PROJECT]!.activeWorktree).toBe('/repo/A');
     useChangesStore.getState().select(PROJECT, 'src/old.ts');
 
-    await useChangesStore.getState().loadWorktrees(PROJECT); // reload; A gone
-    const slice = useChangesStore.getState().byProject[PROJECT]!;
-    expect(slice.activeWorktree).toBe('/repo/B');
-    expect(slice.selectedPath).toBeNull();
+    await useWorktreeStore.getState().loadWorktrees(PROJECT); // reload; A gone → B
+    await useChangesStore.getState().refresh(PROJECT);
+    expect(useWorktreeStore.getState().byProject[PROJECT]!.activeWorktree).toBe('/repo/B');
+    expect(useChangesStore.getState().byProject[PROJECT]!.selectedPath).toBeNull();
     expect(getChangeset).toHaveBeenLastCalledWith('/repo/B', undefined, PROJECT);
   });
 
-  it('keeps a still-valid activeWorktree across reloads', async () => {
+  it('keeps a still-valid selection across reloads', async () => {
     const listWorktrees = vi
       .fn()
       .mockResolvedValue([makeWorktree({ path: '/repo/A' }), makeWorktree({ path: '/repo/B' })]);
     installApi({ listWorktrees, getChangeset: vi.fn().mockResolvedValue(makeChangeset([])) });
-    const { useChangesStore } = await loadModules();
+    await loadModules();
+    const { useWorktreeStore } = await import('@renderer/worktree/worktreeStore');
 
-    await useChangesStore.getState().setWorktree(PROJECT, '/repo/B');
-    await useChangesStore.getState().loadWorktrees(PROJECT);
-    expect(useChangesStore.getState().byProject[PROJECT]!.activeWorktree).toBe('/repo/B');
+    useWorktreeStore.getState().setWorktree(PROJECT, '/repo/B');
+    await useWorktreeStore.getState().loadWorktrees(PROJECT);
+    expect(useWorktreeStore.getState().byProject[PROJECT]!.activeWorktree).toBe('/repo/B');
   });
 });

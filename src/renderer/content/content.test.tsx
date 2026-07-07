@@ -121,8 +121,11 @@ describe('ContentViewer', () => {
 
   it('defaults to rendered mode for a .md change', async () => {
     render(<ContentViewer selection={sel('docs/readme.md')} />);
-    // Rendered mode reads the working-tree source for markdown.
-    await waitFor(() => expect(readFile).toHaveBeenCalledWith('docs/readme.md'));
+    // Rendered mode reads the working-tree source for markdown, scoped to the
+    // selection's worktree.
+    await waitFor(() =>
+      expect(readFile).toHaveBeenCalledWith('docs/readme.md', { worktreePath: '/wt' }),
+    );
     const rendered = screen.getByRole('tab', { name: 'Rendered' });
     expect(rendered).toHaveAttribute('aria-selected', 'true');
     await screen.findByText('Title');
@@ -146,7 +149,7 @@ describe('ContentViewer', () => {
     readFile.mockResolvedValue({ content: 'raw text body', truncated: false, isBinary: false, sizeBytes: 13 });
     fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
     await waitFor(() =>
-      expect(readFile).toHaveBeenCalledWith('src/file.ts', { ref: 'HEAD' }),
+      expect(readFile).toHaveBeenCalledWith('src/file.ts', { ref: 'HEAD', worktreePath: '/wt' }),
     );
     // RawFile renders per-line rows (line-number gutter + code) and may split the
     // line into token spans; assert the concatenated line text is present.

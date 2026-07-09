@@ -1,5 +1,6 @@
 import { BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
+import { logger } from './logger';
 
 const DEV_SERVER_URL = process.env['ELECTRON_RENDERER_URL'];
 
@@ -31,6 +32,12 @@ export function createDiagnosticsWindow(): BrowserWindow {
     console.log(`[diagnostics-renderer:${tag}] ${message} (${sourceId}:${line})`);
   });
   window.webContents.on('render-process-gone', (_e, details) => {
+    // Route through the logger so a diagnostics-renderer crash lands in the
+    // persisted on-disk log, not just the (Dock-launch-invisible) unified log.
+    logger.error(
+      `diagnostics renderer gone: reason=${details.reason} exitCode=${details.exitCode}`,
+      'renderer',
+    );
     console.error('[diagnostics-renderer:crash]', details);
   });
 
@@ -120,7 +127,12 @@ export function createMainWindow(): BrowserWindow {
     console.log(`[renderer:${tag}] ${message} (${sourceId}:${line})`);
   });
   window.webContents.on('render-process-gone', (_e, details) => {
-     
+    // Route through the logger so a main-renderer crash lands in the persisted
+    // on-disk log, not just the (Dock-launch-invisible) unified log.
+    logger.error(
+      `main renderer gone: reason=${details.reason} exitCode=${details.exitCode}`,
+      'renderer',
+    );
     console.error('[renderer:crash]', details);
   });
   // Don't auto-open DevTools in dev — the app should start like a normal app.

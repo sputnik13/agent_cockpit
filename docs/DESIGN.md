@@ -830,6 +830,42 @@ failures render inline rather than blanking the shell. Secrets and full key path
 are never logged. A remote session that ages out (idle reaper) sets a distinct
 `ConnectionStatus.detail` cue so it is not mistaken for a network drop.
 
+### Main-process diagnostics: persistence and crash capture
+
+The central main-process logger ([electron/main/logger.ts](../electron/main/logger.ts))
+holds a 1000-entry in-memory ring buffer, mirrors every entry to `console.*`, and
+exposes a `subscribe()`/`getBuffer()` seam that the IPC layer forwards to the
+renderer diagnostics window (`evt:log`). That buffer alone dies with the process,
+and on a Dock/Finder launch (launchd's minimal environment) `console.*` output
+goes to the macOS unified log and is effectively unrecoverable — so a
+main-process crash historically left **no** usable trace. Three additions close
+that gap without changing the logger core:
+
+- **On-disk persistence.** `initLogFileSink()`
+  ([electron/main/logFileSink.ts](../electron/main/logFileSink.ts)) registers as a
+  logger subscriber and appends every entry as one JSON line to a rotating file
+  under `app.getPath('logs')` (falling back to `userData/logs`). On init it flushes
+  the current `getBuffer()` snapshot first so pre-init entries are captured, then
+  streams live entries. It rotates at ~5 MB keeping the last 3 backups, and is
+  best-effort throughout: any filesystem error is swallowed so a failing disk can
+  never throw into a `logger.*` call. It introduces no new log source — it writes
+  `LogEntry.message` verbatim, so the "never log raw pane `%output`" rule is
+  preserved upstream. Wired once in `whenReady`, right after `bootstrapPath()`.
+- **Native crash capture.** `crashReporter.start({ uploadToServer: false,
+  compress: true })` runs at main module load (before `app.whenReady`) so a native
+  fault — e.g. a V8/cppgc fatal abort (`EXC_BREAKPOINT` / `brk 0`) that no JS
+  handler can catch — is written as a minidump under `app.getPath('crashDumps')`.
+  Dumps stay local (never uploaded); the resolved dump directory is logged once at
+  startup so the next crash is findable.
+- **Process-death and power breadcrumbs.** `uncaughtException`,
+  `unhandledRejection`, `app` `child-process-gone` (GPU/utility/pty/network-service
+  deaths), both `webContents` `render-process-gone` handlers, and `powerMonitor`
+  suspend/resume all route through `logger.*` (in addition to `console.*` for dev),
+  so they land in the persisted file instead of the invisible unified log. The
+  suspend/resume markers exist to correlate a future crash timeline against the
+  sleep/wake control-mode reattach path. `uncaughtException` still cannot catch a
+  native `brk 0` — that is what `crashReporter` covers.
+
 ## Implementation Phases
 
 The system was delivered in nine sequenced phases, each with a runnable

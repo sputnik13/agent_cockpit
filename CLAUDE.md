@@ -825,6 +825,33 @@ absent; `npm run package:dir` must rebuild `better-sqlite3` + `node-pty` and
 produce an app bundle without a cpu-features compile error; the app must launch
 under Electron 42 (`electron out/main/index.js`) without a native-load crash.
 
+## `package:*` scripts rewrite (clobber) the source `package.json`
+
+**Invariant:** The packaging scripts (`package`, `package:mac`, `package:linux`,
+`package:dir`) invoke electron-builder with
+`-c.extraMetadata.version="$(node scripts/release-version.mjs)"`. Because the app
+directory is the repo root, electron-builder writes the **effective, minified**
+production `package.json` back over the **source** working-tree file: it injects
+the release version (e.g. `0.1.0` → `0.1.15`) AND **strips `scripts` and
+`devDependencies`** (and drops the trailing newline). This is a real,
+reproducible mutation of a tracked file — not a code change — so it shows up as
+`M package.json` after any `npm run package*` and, if committed unnoticed, deletes
+every npm script and dev dependency from the repo.
+
+**Required:** treat the packaging scripts as tree-dirtying. After running any
+`package*` script, **restore the file**: `git checkout -- package.json` (the
+version bump belongs only in the built artifact via `extraMetadata`, never in
+source). Never `git add -A` / `git commit -a` blindly after a package build —
+stage intended paths explicitly. The same builds can also leave stray
+asar-extract output (e.g. a root-level `index.js`) if you extracted from
+`app.asar` during verification; delete those too.
+
+**Regression check:** run `npm run package:dir`, then `git status --short` — it
+lists `M package.json` with `scripts`/`devDependencies` removed; `git checkout --
+package.json` returns the tree to clean (`node -e "const p=require('./package.json');
+p.scripts && p.devDependencies"` truthy again). No packaging run should ever be
+committed with a modified `package.json`.
+
 ## Known upstream noise
 
 Radix Select (`@radix-ui/react-select` 2.2.6, latest as of writing) logs

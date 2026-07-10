@@ -19,6 +19,11 @@ export function createDiagnosticsWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // Electron defaults spellcheck ON; on Windows/Linux Chromium then
+      // downloads hunspell dictionaries from a Google CDN. A code cockpit has
+      // no prose fields worth spellchecking — disable it so the app makes no
+      // default-on external requests at all.
+      spellcheck: false,
     },
   });
 
@@ -113,6 +118,9 @@ export function createMainWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // See createDiagnosticsWindow: disable the default-on spellchecker so no
+      // dictionary download (Win/Linux Google CDN) can ever fire.
+      spellcheck: false,
     },
   });
 

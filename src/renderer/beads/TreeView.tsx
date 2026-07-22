@@ -6,6 +6,7 @@ import {
   buildTree,
   deriveState,
   findTreeNode,
+  issueMatchesNeedle,
   openBlockerCount,
   openChildCount,
   priorityLabel,
@@ -15,20 +16,10 @@ import {
 } from './graphSelectors';
 import type { BeadsTaskGraph } from '@shared/ipc/channels';
 
-/** True when a node's id (or short suffix) or title matches the needle. */
-function nodeMatchesNeedle(id: string, title: string, needle: string): boolean {
-  const shortId = id.split('-').pop() ?? id;
-  return (
-    id.toLowerCase().includes(needle) ||
-    shortId.toLowerCase().includes(needle) ||
-    title.toLowerCase().includes(needle)
-  );
-}
-
 /** True when the node or any descendant matches the needle (ancestor-context
  *  pruning: keep parent if a child matches so the tree stays legible). */
 function subtreeMatchesNeedle(node: TreeNode, needle: string): boolean {
-  if (nodeMatchesNeedle(node.issue.id, node.issue.title, needle)) return true;
+  if (issueMatchesNeedle(node.issue, needle)) return true;
   return node.children.some((c) => subtreeMatchesNeedle(c, needle));
 }
 

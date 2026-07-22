@@ -331,6 +331,20 @@ describe('BeadsPanel filter', () => {
     expect(screen.getByText('Blocked issue')).toBeInTheDocument();
   });
 
+  it('text search filters by body (case-insensitive)', async () => {
+    installApi(FIXTURE);
+    render(<BeadsPanel />);
+
+    await loadSlice();
+
+    const input = screen.getByPlaceholderText('Search…');
+    // 'Waiting' appears only in bd-2's body, not its title or id.
+    fireEvent.change(input, { target: { value: 'waiting' } });
+
+    expect(screen.getByText('Blocked issue')).toBeInTheDocument();
+    expect(screen.queryByText('Ready issue')).not.toBeInTheDocument();
+  });
+
   it('shows empty state when all groups are filtered out', async () => {
     installApi(FIXTURE);
     render(<BeadsPanel />);
@@ -711,12 +725,13 @@ describe('search filter in tree view (gxfq)', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
 
     const input = screen.getByPlaceholderText('Search…');
-    // short suffix '1' matches 'bd-1' (Ready issue)
-    fireEvent.change(input, { target: { value: '1' } });
+    // short suffix '2' matches 'bd-2' (Blocked issue); '2' appears in no other
+    // id, title, or body (bd-1's body references 'bd-1', not 'bd-2').
+    fireEvent.change(input, { target: { value: '2' } });
 
-    expect(screen.getByText('Ready issue')).toBeInTheDocument();
-    // bd-2 (Blocked issue) short suffix is '2', doesn't match '1'
-    expect(screen.queryByText('Blocked issue')).not.toBeInTheDocument();
+    expect(screen.getByText('Blocked issue')).toBeInTheDocument();
+    // bd-1 (Ready issue) short suffix is '1', doesn't match '2'
+    expect(screen.queryByText('Ready issue')).not.toBeInTheDocument();
   });
 });
 

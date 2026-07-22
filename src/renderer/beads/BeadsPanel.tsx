@@ -25,6 +25,7 @@ import {
   WG_STATE_LABEL,
   STATE_TONE,
   groupByState,
+  issueMatchesNeedle,
   openBlockerCount,
   openChildCount,
   priorityLabel,
@@ -388,16 +389,7 @@ function renderBody({
     .filter((g) => visibleStates.has(g.state))
     .map(({ state, issues }) => ({
       state,
-      issues: needle
-        ? issues.filter((i) => {
-            const shortId = i.id.split('-').pop() ?? i.id;
-            return (
-              i.id.toLowerCase().includes(needle) ||
-              shortId.toLowerCase().includes(needle) ||
-              i.title.toLowerCase().includes(needle)
-            );
-          })
-        : issues,
+      issues: needle ? issues.filter((i) => issueMatchesNeedle(i, needle)) : issues,
     }))
     .filter((g) => g.issues.length > 0);
 

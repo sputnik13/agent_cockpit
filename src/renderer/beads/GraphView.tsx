@@ -7,7 +7,13 @@ import {
   type GraphEdgeKind,
   type LaidOutNode,
 } from './graphLayout';
-import { priorityLabel, resolveAnchorId, STATE_COLOR, type WorkgraphState } from './graphSelectors';
+import {
+  issueMatchesNeedle,
+  priorityLabel,
+  resolveAnchorId,
+  STATE_COLOR,
+  type WorkgraphState,
+} from './graphSelectors';
 import { PinButton } from './PinButton';
 
 const { NODE_W, NODE_H } = layoutConsts;
@@ -91,15 +97,10 @@ export function GraphView({
 
   const needle = searchNeedle?.trim().toLowerCase() ?? '';
 
-  /** Returns true when the node matches the search needle (id, short suffix, or title). */
+  /** Returns true when the node matches the search needle (id, short suffix, title, or body). */
   function matchesNeedle(n: LaidOutNode): boolean {
     if (!needle) return true;
-    const shortId = n.id.split('-').pop() ?? n.id;
-    return (
-      n.id.toLowerCase().includes(needle) ||
-      shortId.toLowerCase().includes(needle) ||
-      n.issue.title.toLowerCase().includes(needle)
-    );
+    return issueMatchesNeedle(n.issue, needle);
   }
 
   // Honor the shared state filter: drop nodes whose derived state is hidden;

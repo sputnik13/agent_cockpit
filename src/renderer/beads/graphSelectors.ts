@@ -19,6 +19,22 @@ export const GROUP_LABEL: Record<StatusGroup, string> = {
   closed: 'Closed',
 };
 
+/**
+ * Single source for search matching across all workgraph views (Flat, Tree,
+ * Graph, Columns). Matches an issue's id, its short id suffix, its title, or its
+ * body against an already-lowercased needle. Body is included so search reaches
+ * the bead's contents, not just the title.
+ */
+export function issueMatchesNeedle(issue: BeadsIssue, needle: string): boolean {
+  const shortId = issue.id.split('-').pop() ?? issue.id;
+  return (
+    issue.id.toLowerCase().includes(needle) ||
+    shortId.toLowerCase().includes(needle) ||
+    issue.title.toLowerCase().includes(needle) ||
+    issue.body.toLowerCase().includes(needle)
+  );
+}
+
 const TERMINAL_STATUSES = new Set(['closed', 'tombstone', 'deleted']);
 
 /**

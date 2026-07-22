@@ -24,8 +24,8 @@ import {
   subscribeReinit,
   syncFromTmux,
 } from './controlSession';
-import { renameWindow as renameWindowCmd } from '@shared/tmux';
-import { EmptyState, IconButton, TabbedPanelHeader, cn } from '../ui';
+import { killWindow as killWindowCmd, renameWindow as renameWindowCmd } from '@shared/tmux';
+import { Button, Dialog, EmptyState, IconButton, TabbedPanelHeader, cn } from '../ui';
 
 /**
  * Control-mode terminal surface (flag-gated alternative to the session-per-tab
@@ -57,6 +57,7 @@ export function ControlTerminalPanel(): JSX.Element {
   // Inline tab rename: the window id being edited (null = none) + its draft text.
   const [editingWindow, setEditingWindow] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
+  const [closingWindow, setClosingWindow] = useState<{ id: string; label: string } | null>(null);
   const [bridgeMissing, setBridgeMissing] = useState(false);
   // The pane id created by the most recent split, captured deterministically
   // from the `split-window -P -F '#{pane_id}'` reply. The active-pane
@@ -668,13 +669,30 @@ export function ControlTerminalPanel(): JSX.Element {
                     setEditingWindow(id);
                   }}
                   className={cn(
-                    'cursor-pointer border-t-2 px-2.5 py-1 text-xs',
+                    'group flex cursor-pointer items-center gap-1 border-t-2 py-1 pl-2.5 pr-1 text-xs',
                     id === currentWindow
                       ? 'border-accent bg-bg text-fg'
                       : 'border-transparent text-dim hover:bg-elev hover:text-fg',
                   )}
                 >
                   {label}
+                  <button
+                    type="button"
+                    aria-label={`Force close tab ${label}`}
+                    title="Force close (kills every pane in this tab)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setClosingWindow({ id, label });
+                    }}
+                    className={cn(
+                      'flex h-4 w-4 items-center justify-center rounded-sm leading-none outline-none',
+                      'hover:bg-elev hover:text-removed focus-visible:ring-2 focus-visible:ring-accent/60',
+                      id === currentWindow ? 'opacity-60' : 'opacity-0',
+                      'group-hover:opacity-100',
+                    )}
+                  >
+                    ×
+                  </button>
                 </div>
               );
             })}
@@ -723,6 +741,37 @@ export function ControlTerminalPanel(): JSX.Element {
           />
         )}
       </div>
+      <Dialog
+        open={closingWindow != null}
+        onOpenChange={(open) => {
+          if (!open) setClosingWindow(null);
+        }}
+        title="Force close tab"
+        description={
+          <>
+            This immediately kills every pane and process running in{' '}
+            <strong className="text-fg">{closingWindow?.label}</strong>, with no chance to save
+            unsaved work. This cannot be undone.
+            {tabWindows.length <= 1 && ' A new tab will open automatically since this is the last one.'}
+          </>
+        }
+        footer={
+          <>
+            <Button variant="default" onClick={() => setClosingWindow(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (closingWindow) cmd(killWindowCmd(closingWindow.id));
+                setClosingWindow(null);
+              }}
+            >
+              Force Close
+            </Button>
+          </>
+        }
+      />
     </div>
   );
 }

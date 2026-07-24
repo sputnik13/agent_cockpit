@@ -652,7 +652,23 @@ The provider seam realizes the primary flows as follows:
   painted as `::highlight(find-match)` / `::highlight(find-active)` ranges WITHOUT
   mutating the DOM (so it is safe over React-rendered content). A `MutationObserver`
   re-collects when async Markdown finishes rendering; next/previous scroll the
-  active match into view. Image mode has no text search.
+  active match into view. Image mode has no text search. `.html`/`.htm` files add
+  an **HTML preview** mode (`HtmlPreview.tsx`, default for HTML; Diff/Raw stay
+  available) that renders the file's working-tree content visually inside a
+  **sandboxed `blob:` iframe**: the file text gets a restrictive CSP `<meta>`
+  injected as its first `<head>` child (`injectPreviewCsp` →
+  `default-src 'none'; img-src data:; style-src 'unsafe-inline' data:; font-src
+  data:; script-src 'unsafe-inline'`), is wrapped in a `Blob` →
+  `URL.createObjectURL` (revoked on unmount/source change), and loaded into an
+  `iframe sandbox=""` (deny-all, opaque origin, **never** `allow-same-origin`).
+  v1 is **static-only** — scripts do not run: `sandbox=""` denies them, and even
+  a widened `allow-scripts` sandbox would be blocked by the app's global CSP
+  response header (`security.ts` `onHeadersReceived` stamps `script-src 'self'
+  'wasm-unsafe-eval'` on the blob document, and the browser enforces the
+  header∩meta intersection). Interactive scripts are a scoped v2 follow-up (see
+  ARCHITECTURE "Untrusted repository content"). Binary/too-large/missing files
+  degrade to a notice; find-in-file is disabled (content lives in the sandboxed
+  frame).
 - **Visual system.** `src/renderer/ui/` provides app-owned primitives (Button,
   Badge, Panel, Row, Toolbar, feedback) over Radix (Dialog, Menu, Select, Tabs,
   Tooltip); Dockview is themed via `dockview-theme.css` + token overrides.

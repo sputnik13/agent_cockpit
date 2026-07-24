@@ -46,6 +46,24 @@ The durable architectural boundaries are:
   → `shell.openExternal`, and large/binary files degrade to notices.
   `rehype-highlight` (with the bundled base16 Solarized hljs theme) is the
   only Markdown-pipeline dependency added beyond the `unified` stack.
+  A repo `.html`/`.htm` file renders through the **same sandboxed-preview
+  pattern** the app uses for untrusted rich content, complementing the
+  DOMPurify-SVG diagram path: `HtmlPreview` builds a `blob:` document from the
+  file text with a restrictive CSP `<meta>` injected as its first `<head>`
+  child (`default-src 'none'`; only inline styles, `data:` images/fonts) and
+  loads it into an `iframe sandbox=""` — deny-all, opaque origin, **never**
+  `allow-same-origin`, so the frame cannot reach the app, its storage, or the
+  parent, and cannot beacon out. It requires **no CSP change and no
+  `<webview>`** (`frame-src 'self' data: blob:` already permits the blob frame;
+  webview stays disabled). v1 is **static-only**: scripts never run, because
+  `sandbox=""` denies them AND the app's global CSP response header
+  (`security.ts` `onHeadersReceived`) intersects with the iframe `<meta>` CSP —
+  the header's `script-src 'self' 'wasm-unsafe-eval'` (no `'unsafe-inline'`)
+  blocks inline scripts even under a widened `allow-scripts` sandbox. An opt-in
+  interactive-scripts mode is a deferred v2: it needs a **scoped** exemption
+  giving `blob:` sub-frames the preview CSP instead of the app CSP in
+  `onHeadersReceived` (safe because `HtmlPreview` is the only `blob:`-iframe
+  surface and the frame stays opaque-origin, non-same-origin, network-blocked).
 
 ## Major Components and Responsibilities
 

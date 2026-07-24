@@ -1,9 +1,10 @@
 import type { ContentKind } from './selectionStore';
 
-export type ContentMode = 'diff' | 'rendered' | 'raw' | 'image';
+export type ContentMode = 'diff' | 'rendered' | 'raw' | 'image' | 'html-preview';
 
 const MARKDOWN_EXT = new Set(['.md', '.markdown', '.mdx']);
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
+const HTML_EXT = new Set(['.html', '.htm']);
 
 function extOf(path: string): string {
   const dot = path.lastIndexOf('.');
@@ -18,19 +19,26 @@ export function isMarkdownPath(path: string): boolean {
   return MARKDOWN_EXT.has(extOf(path));
 }
 
+export function isHtmlPath(path: string): boolean {
+  return HTML_EXT.has(extOf(path));
+}
+
 /** Pick the default content mode by file extension. Explorer files ('file')
  *  default to raw rather than an empty diff. */
 export function defaultModeFor(path: string, kind: ContentKind): ContentMode {
   if (isMarkdownPath(path)) return 'rendered';
+  if (isHtmlPath(path)) return 'html-preview';
   if (isImagePath(path)) return 'image';
   return kind === 'change' ? 'diff' : 'raw';
 }
 
 /** The modes valid for a file: image files expose image+raw, markdown adds
- *  rendered, everything textual exposes diff+raw (+rendered where relevant). */
+ *  rendered, HTML adds a sandboxed preview, everything textual exposes diff+raw
+ *  (+rendered where relevant). */
 export function modesFor(path: string): ContentMode[] {
   if (isImagePath(path)) return ['image', 'raw'];
   if (isMarkdownPath(path)) return ['rendered', 'diff', 'raw'];
+  if (isHtmlPath(path)) return ['html-preview', 'diff', 'raw'];
   return ['diff', 'raw'];
 }
 
@@ -45,6 +53,7 @@ const LABELS: Record<ContentMode, string> = {
   rendered: 'Rendered',
   raw: 'Raw',
   image: 'Image',
+  'html-preview': 'Preview',
 };
 
 /** Compact segmented control for switching content render modes. */

@@ -9,8 +9,16 @@ import { changedLinesFromPatch } from './hunkMap';
 import { DiffView } from './DiffView';
 import { RawFile } from './RawFile';
 import { ImageCompare } from './ImageCompare';
+import { HtmlPreview } from './HtmlPreview';
 import { RenderedMarkdown } from './markdown';
-import { ModeSwitcher, defaultModeFor, isMarkdownPath, modesFor, type ContentMode } from './modeSwitcher';
+import {
+  ModeSwitcher,
+  defaultModeFor,
+  isHtmlPath,
+  isMarkdownPath,
+  modesFor,
+  type ContentMode,
+} from './modeSwitcher';
 import type { ContentSelection } from './selectionStore';
 
 export function ContentViewer({ selection }: { selection: ContentSelection | null }): JSX.Element {
@@ -39,11 +47,20 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     return slash >= 0 ? path.slice(0, slash) : '';
   }, [path]);
   const available = useMemo(
-    () => (external ? modesFor(path).filter((m) => m === 'rendered' || m === 'raw') : modesFor(path)),
+    () =>
+      external
+        ? modesFor(path).filter((m) => m === 'rendered' || m === 'raw' || m === 'html-preview')
+        : modesFor(path),
     [external, path],
   );
   const [mode, setMode] = useState<ContentMode>(() =>
-    external ? (isMarkdownPath(path) ? 'rendered' : 'raw') : defaultModeFor(path, kind),
+    external
+      ? isHtmlPath(path)
+        ? 'html-preview'
+        : isMarkdownPath(path)
+          ? 'rendered'
+          : 'raw'
+      : defaultModeFor(path, kind),
   );
   const [diff, setDiff] = useState<
     | { kind: 'loading' }
@@ -102,7 +119,9 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   const wrapLines = useSettingsStore((s) => s.settings.wrapLines);
   const setSettings = useSettingsStore((s) => s.set);
   const wrappable = mode === 'diff' || mode === 'raw';
-  const findable = mode !== 'image';
+  // Image has no searchable text; the HTML preview lives inside a sandboxed
+  // iframe the find search cannot reach — neither supports find-in-file.
+  const findable = mode !== 'image' && mode !== 'html-preview';
   const revision = `${mode}|${path}|${diff.kind}|${source.kind}`;
   const find = useFindInContent(contentRef, findOpen && findable ? findQuery : '', revision);
 
@@ -220,6 +239,8 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                 oldPath={selection.oldPath ?? null}
               />
             )}
+
+            {mode === 'html-preview' && <HtmlPreview worktreePath={worktreePath} filePath={path} />}
           </div>
         </div>
       </PanelBody>

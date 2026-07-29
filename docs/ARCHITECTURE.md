@@ -807,6 +807,29 @@ The read surface is uniformly parametrized by worktree, base =
   selection). Link resolution (`openLinkTarget`/`resolvePath`) is **not yet**
   worktree-aware — a tracked follow-up.
 
+### Worktree dropdown labels (shared builder)
+
+The worktree picker shown by both panels is built by one shared function,
+[`worktreeSelectOptions`](src/renderer/worktree/worktreeOptions.ts): each entry is
+`"<workspace> - <branch>"` (workspace = the worktree directory basename; detached
+worktrees show a short HEAD), value = the worktree path. `git worktree list
+--porcelain` emits the main worktree first, so index 0 is the **primary** workspace:
+it is pinned at the top and the rest are sorted by workspace name. Both `ExplorerPanel`
+and `ChangesPanel` consume it — do not reintroduce a per-panel `w.branch ?? w.path`
+label map.
+
+### Explorer root browsing (Explorer-local override)
+
+The Explorer's dropdown carries one extra, **Explorer-only** entry — `Root (/)` — that
+lists the filesystem root so files outside the project can be browsed. This is held in
+`explorerStore.rootBrowse` (per project), **not** the shared `activeWorktree`, so it is
+NOT a second worktree truth: selecting root never moves the Changes panel, and returning
+to the project is just picking a workspace from the same dropdown. When root browsing,
+the Explorer reads with base `'/'` (the same worktree-parametrized `listDir` path — no new
+read surface) and opens files as absolute `external-file` selections (no git diff). The
+Changes panel does **not** offer root. Do not route root browsing through
+`worktreeStore.setWorktree` or add root to Changes.
+
 ### Regression Check
 
 Add a linked worktree on a branch that adds a file absent from the primary worktree;

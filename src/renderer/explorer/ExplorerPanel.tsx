@@ -2,17 +2,38 @@ import { useEffect, useRef, useState } from 'react';
 import type { DirEntry } from '@shared/providers/types';
 import { agentCockpit, useProjectsStore, useSessionStore, isDisconnected } from '../providerClient';
 import { useActiveWorktree, useWorktreeStore } from '@renderer/worktree/worktreeStore';
+import { worktreeSelectOptions } from '@renderer/worktree/worktreeOptions';
 import { useContentSelection } from '../content';
 import { useExplorerStore } from './explorerStore';
 import { FileTypeIcon } from './icons/FileTypeIcon';
 import { FolderIcon } from './icons/FolderIcon';
-import { EmptyState, Panel, PanelBody, PanelHeader, Row, Select, Spinner, Toolbar } from '../ui';
+import {
+  EmptyState,
+  Panel,
+  PanelBody,
+  PanelFullscreenButton,
+  Row,
+  Select,
+  Spinner,
+  Toolbar,
+  ToolbarSpacer,
+} from '../ui';
 
 const IGNORED = new Set(['.git', 'node_modules', '.DS_Store']);
 const INDENT = 12;
 
+/** Join a base directory and a base-relative entry path into one absolute path
+ *  (POSIX). Used for root browsing, where entry paths are relative to `/`. */
+function absoluteUnder(base: string, relPath: string): string {
+  return `${base.replace(/\/+$/, '')}/${relPath}`;
+}
+
 /** File-tree Explorer for the active project. Lazily lists directories and
  *  feeds file selections into the shared content viewer. */
+/** Dropdown value that selects the filesystem root (browse outside the project).
+ *  Doubles as the read base: no worktree lives at `/`, so it never collides. */
+const ROOT_VALUE = '/';
+
 export function ExplorerPanel(): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
   const disconnected = useSessionStore(isDisconnected(activeId));
@@ -20,13 +41,13 @@ export function ExplorerPanel(): JSX.Element {
   // Changes). Null (or the primary worktree) reads from the project root.
   const { worktrees, activeWorktree } = useActiveWorktree();
   const setWorktree = useWorktreeStore((s) => s.setWorktree);
-  // Same option shape/label rule as the Changes panel selector, bound to the
-  // shared store so a switch here also moves Changes (and vice-versa).
-  const worktreeOptions = worktrees.map((w) => ({ value: w.path, label: w.branch ?? w.path }));
+  // Explorer-only "browse the filesystem root" toggle. Kept in Explorer-local
+  // state (NOT the shared worktree selection) so it never moves the Changes panel.
+  const rootBrowse = useExplorerStore((s) => (activeId ? s.rootBrowse[activeId] ?? false : false));
+  const setRootBrowse = useExplorerStore((s) => s.setRootBrowse);
   if (!activeId) {
     return (
       <Panel>
-        <PanelHeader title="Explorer" />
         <EmptyState title="No active project" hint="Select a project to browse its files." />
       </Panel>
     );
@@ -34,34 +55,48 @@ export function ExplorerPanel(): JSX.Element {
   if (disconnected) {
     return (
       <Panel>
-        <PanelHeader title="Explorer" />
         <EmptyState title="Disconnected" hint="Reconnect to view files." />
       </Panel>
     );
   }
+  // Same "<workspace> - <branch>" options as the Changes selector, plus an
+  // Explorer-only trailing "Root (/)" entry for browsing outside the project.
+  const options = [...worktreeSelectOptions(worktrees), { value: ROOT_VALUE, label: 'Root (/)' }];
+  const selectValue = rootBrowse ? ROOT_VALUE : (activeWorktree ?? '');
+  // Read base: `/` when browsing root, else the selected worktree (undefined =
+  // project root). Root selections are external (absolute path, no git diff).
+  const base = rootBrowse ? ROOT_VALUE : (activeWorktree ?? undefined);
   return (
     <Panel>
-      <PanelHeader title="Explorer" />
-      {worktreeOptions.length > 0 && (
-        <Toolbar>
-          <Select
-            aria-label="Worktree"
-            value={activeWorktree ?? ''}
-            onValueChange={(v) => void setWorktree(activeId, v)}
-            options={worktreeOptions}
-            placeholder="Worktree"
-            className="max-w-[220px] shrink"
-          />
-        </Toolbar>
-      )}
+      <Toolbar>
+        <Select
+          aria-label="Worktree"
+          value={selectValue}
+          onValueChange={(v) => {
+            if (v === ROOT_VALUE) {
+              // Browse root — Explorer-local only; leave the shared worktree as-is.
+              setRootBrowse(activeId, true);
+            } else {
+              setWorktree(activeId, v);
+              setRootBrowse(activeId, false);
+            }
+          }}
+          options={options}
+          placeholder="Worktree"
+          className="max-w-[240px] shrink"
+        />
+        <ToolbarSpacer />
+        <PanelFullscreenButton />
+      </Toolbar>
       <PanelBody>
-        {/* key on project+worktree so the tree resets on reconnect AND on a
-            worktree switch (drops stale expanded children of the old worktree) */}
+        {/* key on project+base so the tree resets on reconnect AND on a base
+            switch (worktree or root) — drops stale expanded children */}
         <DirChildren
-          key={`${activeId}:${activeWorktree ?? ''}`}
+          key={`${activeId}:${base ?? ''}`}
           dirPath=""
           depth={0}
-          worktreePath={activeWorktree ?? undefined}
+          worktreePath={base}
+          external={rootBrowse}
         />
       </PanelBody>
     </Panel>
@@ -72,10 +107,14 @@ function DirChildren({
   dirPath,
   depth,
   worktreePath,
+  external = false,
 }: {
   dirPath: string;
   depth: number;
   worktreePath?: string;
+  /** True when browsing the filesystem root: file selections are external
+   *  (absolute path, no git diff) rather than in-project. */
+  external?: boolean;
 }): JSX.Element {
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
 
@@ -103,9 +142,9 @@ function DirChildren({
     <>
       {entries.map((e) =>
         e.isDir ? (
-          <DirNode key={e.path} entry={e} depth={depth} worktreePath={worktreePath} />
+          <DirNode key={e.path} entry={e} depth={depth} worktreePath={worktreePath} external={external} />
         ) : (
-          <FileNode key={e.path} entry={e} depth={depth} worktreePath={worktreePath} />
+          <FileNode key={e.path} entry={e} depth={depth} worktreePath={worktreePath} external={external} />
         ),
       )}
     </>
@@ -116,10 +155,12 @@ function DirNode({
   entry,
   depth,
   worktreePath,
+  external = false,
 }: {
   entry: DirEntry;
   depth: number;
   worktreePath?: string;
+  external?: boolean;
 }): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
   // Expansion lives in the store so a programmatic reveal (from a clicked link)
@@ -141,7 +182,9 @@ function DirNode({
       >
         {entry.name}
       </Row>
-      {open && <DirChildren dirPath={entry.path} depth={depth + 1} worktreePath={worktreePath} />}
+      {open && (
+        <DirChildren dirPath={entry.path} depth={depth + 1} worktreePath={worktreePath} external={external} />
+      )}
     </>
   );
 }
@@ -150,10 +193,12 @@ function FileNode({
   entry,
   depth,
   worktreePath,
+  external = false,
 }: {
   entry: DirEntry;
   depth: number;
   worktreePath?: string;
+  external?: boolean;
 }): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
   const select = useContentSelection((s) => s.select);
@@ -163,7 +208,11 @@ function FileNode({
   const activeSelection = useContentSelection((s) =>
     activeId ? s.selections[activeId] ?? null : null,
   );
-  const active = activeSelection?.kind === 'file' && activeSelection.path === entry.path;
+  // A root-browsed file is outside any repo: select it as an absolute
+  // 'external-file' (no git diff) instead of an in-project 'file'.
+  const targetPath = external ? absoluteUnder(worktreePath ?? ROOT_VALUE, entry.path) : entry.path;
+  const targetKind = external ? 'external-file' : 'file';
+  const active = activeSelection?.kind === targetKind && activeSelection.path === targetPath;
   // Scroll into view when this file is the reveal target of a clicked link.
   const isRevealTarget = useExplorerStore((s) => (activeId ? s.revealTarget[activeId] === entry.path : false));
   const consumeRevealTarget = useExplorerStore((s) => s.consumeRevealTarget);
@@ -179,7 +228,11 @@ function FileNode({
       <Row
         active={active}
         onClick={() => {
-          if (activeId) {
+          if (!activeId) return;
+          if (external) {
+            // External read: absolute path, empty base, no baseline (no git diff).
+            select(activeId, { path: targetPath, worktreePath: '', kind: 'external-file' });
+          } else {
             select(activeId, {
               path: entry.path,
               worktreePath: worktreePath ?? '',

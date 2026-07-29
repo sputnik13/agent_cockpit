@@ -669,6 +669,15 @@ The provider seam realizes the primary flows as follows:
   ARCHITECTURE "Untrusted repository content"). Binary/too-large/missing files
   degrade to a notice; find-in-file is disabled (content lives in the sandboxed
   frame).
+- **Explorer.** `ExplorerPanel` lazily lists directories via `provider.listDir(dirPath,
+  base)` and feeds file selections to the shared content viewer. Its worktree dropdown
+  uses the shared `worktreeSelectOptions` builder (`"<workspace> - <branch>"`, primary
+  first) plus one Explorer-only `Root (/)` entry. Root browsing is held in
+  `explorerStore.rootBrowse` (Explorer-local, never the shared `activeWorktree`, so
+  Changes is unaffected): it reads with base `'/'` and opens files as absolute
+  `external-file` selections (no git diff). The tree remounts (key includes the base) on
+  a worktree/root switch. See ARCHITECTURE "Worktree dropdown labels" / "Explorer root
+  browsing".
 - **Visual system.** `src/renderer/ui/` provides app-owned primitives (Button,
   Badge, Panel, Row, Toolbar, feedback) over Radix (Dialog, Menu, Select, Tabs,
   Tooltip); Dockview is themed via `dockview-theme.css` + token overrides.

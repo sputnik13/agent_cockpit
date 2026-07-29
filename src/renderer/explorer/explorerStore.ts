@@ -18,17 +18,24 @@ interface ExplorerState {
   /** The file path the tree should scroll to, per project (cleared by the
    *  FileNode once it scrolls into view). */
   revealTarget: Record<string, string | null>;
+  /** Whether the Explorer is browsing the filesystem root (`/`) instead of a
+   *  worktree, per project. Explorer-local (NOT the shared worktree selection),
+   *  so it never affects the Changes panel. */
+  rootBrowse: Record<string, boolean>;
   isExpanded: (projectId: string, dirPath: string) => boolean;
   setExpanded: (projectId: string, dirPath: string, open: boolean) => void;
   toggle: (projectId: string, dirPath: string) => void;
   /** Expand every ancestor of `relPath` and mark it as the scroll target. */
   reveal: (projectId: string, relPath: string) => void;
   consumeRevealTarget: (projectId: string) => void;
+  isRootBrowse: (projectId: string) => boolean;
+  setRootBrowse: (projectId: string, on: boolean) => void;
 }
 
 export const useExplorerStore = create<ExplorerState>((set, get) => ({
   expanded: {},
   revealTarget: {},
+  rootBrowse: {},
   isExpanded: (projectId, dirPath) => get().expanded[projectId]?.has(dirPath) ?? false,
   setExpanded: (projectId, dirPath, open) =>
     set((s) => {
@@ -50,4 +57,7 @@ export const useExplorerStore = create<ExplorerState>((set, get) => ({
     }),
   consumeRevealTarget: (projectId) =>
     set((s) => ({ revealTarget: { ...s.revealTarget, [projectId]: null } })),
+  isRootBrowse: (projectId) => get().rootBrowse[projectId] ?? false,
+  setRootBrowse: (projectId, on) =>
+    set((s) => ({ rootBrowse: { ...s.rootBrowse, [projectId]: on } })),
 }));

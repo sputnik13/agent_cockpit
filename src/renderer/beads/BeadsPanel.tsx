@@ -6,11 +6,12 @@ import {
   EmptyState,
   Panel,
   PanelBody,
-  PanelHeader,
+  PanelFullscreenButton,
   Row,
   Spinner,
   StatusDot,
   Toolbar,
+  ToolbarSpacer,
   cn,
 } from '../ui';
 import { GraphView } from './GraphView';
@@ -131,13 +132,10 @@ export function BeadsPanel(): JSX.Element {
 
   return (
     <Panel>
-      <PanelHeader
-        title="Workgraph"
-        actions={hasGraph ? <ViewToggle view={view} onChange={setViewActive} /> : undefined}
-      />
-      {hasGraph && (
-        <Toolbar>
-          <StatesDropdown visibleStates={visibleStates} onToggle={toggleState} />
+      <Toolbar>
+        {hasGraph && <ViewToggle view={view} onChange={setViewActive} />}
+        {hasGraph && <StatesDropdown visibleStates={visibleStates} onToggle={toggleState} />}
+        {hasGraph ? (
           <input
             aria-label="Search tasks"
             type="text"
@@ -150,8 +148,11 @@ export function BeadsPanel(): JSX.Element {
               'focus-visible:ring-2 focus-visible:ring-accent/60',
             )}
           />
-        </Toolbar>
-      )}
+        ) : (
+          <ToolbarSpacer />
+        )}
+        <PanelFullscreenButton />
+      </Toolbar>
       {focusIssue && (
         <div className="flex items-center gap-2 border-b border-accent/40 bg-accent/10 px-2 py-1 text-[12px] text-fg">
           <span className="shrink-0 text-dim">Focused:</span>

@@ -25,7 +25,6 @@ export function ContentViewer({ selection }: { selection: ContentSelection | nul
   if (selection == null) {
     return (
       <Panel>
-        <PanelHeader title="Content" />
         <PanelBody>
           <EmptyState title="No file selected" hint="Select a file in Changes or Explorer to view it." />
         </PanelBody>

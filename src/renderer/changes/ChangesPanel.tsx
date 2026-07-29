@@ -5,7 +5,7 @@ import {
   EmptyState,
   Panel,
   PanelBody,
-  PanelHeader,
+  PanelFullscreenButton,
   Row,
   Select,
   Spinner,
@@ -14,6 +14,7 @@ import {
 } from '@renderer/ui';
 import { useActiveChanges, useChangesStore, type DiffTarget } from './changesStore';
 import { useActiveWorktree, useWorktreeStore } from '@renderer/worktree/worktreeStore';
+import { worktreeSelectOptions } from '@renderer/worktree/worktreeOptions';
 import { useFollowTerminalCwd } from './followCwd';
 import { useContentSelection } from '@renderer/content';
 import { useProjectsStore, useSessionStore, isDisconnected } from '@renderer/providerClient';
@@ -106,10 +107,7 @@ export function ChangesPanel(): JSX.Element {
     });
   }, [surfaced, mode, text]);
 
-  const worktreeOptions = worktrees.map((w) => ({
-    value: w.path,
-    label: w.branch ?? w.path,
-  }));
+  const worktreeOptions = worktreeSelectOptions(worktrees);
 
   // Diff-target selector options. The branch-point label shows the resolved
   // parent ref so the user sees exactly what they're comparing against.
@@ -128,11 +126,6 @@ export function ChangesPanel(): JSX.Element {
 
   return (
     <Panel>
-      <PanelHeader
-        title="Changes"
-        actions={<span className="text-xs text-dim tabular-nums">{count}</span>}
-      />
-
       <Toolbar>
         {worktreeOptions.length > 0 && (
           <Select
@@ -181,6 +174,8 @@ export function ChangesPanel(): JSX.Element {
             </button>
           ))}
         </div>
+        <span className="shrink-0 text-xs text-dim tabular-nums">{count}</span>
+        <PanelFullscreenButton />
       </Toolbar>
 
       <PanelBody>

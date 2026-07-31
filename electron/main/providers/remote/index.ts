@@ -29,6 +29,8 @@ import type {
   ConnectionStatus,
   DirEntry,
   DiffBundle,
+  FileBytesOptions,
+  FileBytesResult,
   FileReadOptions,
   FileReadResult,
   ProjectKind,
@@ -46,8 +48,10 @@ import type {
 } from '../types';
 import { createRemoteTransport } from './transportFactory';
 import type { RemoteTransport } from './transportTypes';
+import { writeStreamToDest } from '../exportWrite';
+import { FILE_BYTES_CAP } from '@shared/providers/fileBytesCap';
 import { RemoteHelperLauncher, type LaunchedHelper } from './helper';
-import type { GitStatusEntry, HelperRpcClient } from './rpcClient';
+import type { GitStatusEntry, HelperRpcClient, ReadFileResult } from './rpcClient';
 import { beadsArgs, beadsErrorMessage, parseComments, parseCreatedId } from '../../beads/runner';
 import { RemoteTerminalManager } from './tmux';
 import { RemoteTmuxControlManager, type ControlChannel } from './tmuxControl';
@@ -173,6 +177,87 @@ function stripRemoteFileUri(input: string): string {
   } catch {
     return input;
   }
+}
+
+/**
+ * The remote byte source for the bounded binary-preview read primitive
+ * (`WorkspaceProvider.readFileBytes`). Exported (alongside `mapGitStatus`/
+ * `assembleChangeset` above) so it is directly unit-testable against a fake
+ * transport — `RemoteProvider` has no transport-injection seam (it always
+ * builds its transport via `createRemoteTransport()`), so this is the only
+ * way to exercise the SFTP byte-read path without a live SSH host.
+ *
+ * Deliberately goes over `RemoteTransport` SFTP (`stat` + `createReadStream`),
+ * NEVER the helper RPC's `readFile` (text-only, hard-capped at 2 MiB) — see
+ * the `WorkspaceProvider.readFileBytes` doc comment for the full rationale.
+ * Stats first and refuses (metadata only) when missing/dir/over-cap, exactly
+ * like `localReadFileBytes`; never passes a `{start,end}` range.
+ *
+ * NOTE: a successful read opens TWO SFTP sessions (stat ends its own channel;
+ * then `createReadStream` opens and releases a second on `'close'`/`'error'`)
+ * — this is expected and correct (matches `RemoteTransport`'s per-operation
+ * channel lifecycle), not a bug to dedupe.
+ */
+export async function readFileBytesOverTransport(
+  transport: Pick<RemoteTransport, 'stat' | 'createReadStream'>,
+  absPath: string,
+): Promise<FileBytesResult> {
+  const st = await transport.stat(absPath);
+  if (!st.exists) return { bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' };
+  if (st.isDir) return { bytesBase64: null, sizeBytes: st.size, exists: true, reason: 'is-dir' };
+  if (st.size > FILE_BYTES_CAP) {
+    return { bytesBase64: null, sizeBytes: st.size, exists: true, reason: 'too-large' };
+  }
+  // No opts — no range, ever (see the readFileBytes doc comment's NON-GOAL note).
+  const stream = await transport.createReadStream(absPath);
+  const buf = await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (c: Buffer) => chunks.push(c));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    // A stream read error MUST reject, never resolve with silent empty bytes.
+    stream.on('error', reject);
+  });
+  return { bytesBase64: buf.toString('base64'), sizeBytes: st.size, exists: true, reason: null };
+}
+
+/**
+ * Adapt a helper `readFile` RPC response into the `FileReadResult` contract,
+ * mirroring `LocalProvider`'s null-content-when-binary rule (electron/main/
+ * git/files.ts's `getFile`: `content: isBin ? null : buf.toString('utf8')`).
+ * Exported (alongside `readFileBytesOverTransport` above) so this
+ * one-line-looking but load-bearing transformation is directly unit-testable
+ * — `RemoteProvider` has no transport-injection seam, so this is the only way
+ * to exercise it without a live SSH host + built helper binary (br r3s6).
+ *
+ * Without the null, every consumer (RawFile.tsx, HtmlPreview.tsx) branches on
+ * `content !== null` BEFORE ever consulting `isBinary` — a non-null (if
+ * U+FFFD-mangled, since Go's encoding/json substitutes invalid UTF-8 rather
+ * than failing) string always won the text branch and `isBinary` was never
+ * consulted.
+ *
+ * `sizeBytes` comes from the helper's own stat/blob-length, never derived
+ * from `content` — computing it via `Buffer.byteLength` over a possibly
+ * U+FFFD-mangled string would inflate the reported size for binary content
+ * (every invalid byte becomes a 3-byte replacement char).
+ *
+ * Both `isBinary` and `sizeBytes` are read defensively (not trusted at their
+ * static type) so a stale helper build that predates one or both fields
+ * degrades to "not binary" / a content-derived size instead of `undefined`
+ * reaching the renderer — matches this repo's existing additive/optional-
+ * field degradation pattern (e.g. `worktreePath`).
+ */
+export function toFileReadResult(res: ReadFileResult): FileReadResult {
+  const isBinary = res.isBinary === true;
+  const sizeBytes =
+    typeof res.sizeBytes === 'number'
+      ? res.sizeBytes
+      : Buffer.byteLength(res.content ?? '', 'utf8');
+  return {
+    content: isBinary ? null : res.content,
+    truncated: res.truncated,
+    isBinary,
+    sizeBytes,
+  };
 }
 
 export class RemoteProvider implements WorkspaceProvider {
@@ -521,12 +606,7 @@ export class RemoteProvider implements WorkspaceProvider {
     const res = opts?.ref
       ? await this.rpc().readFile(this.repoRelative(path), { ref: opts.ref, cwd: base })
       : await this.rpc().readFile(this.resolveIn(base, path), { worktreePath: opts?.worktreePath });
-    return {
-      content: res.content,
-      truncated: res.truncated,
-      isBinary: false,
-      sizeBytes: Buffer.byteLength(res.content, 'utf8'),
-    };
+    return toFileReadResult(res);
   }
   async stat(path: string): Promise<StatResult> {
     const res = await this.rpc().stat(this.resolve(path));
@@ -564,6 +644,22 @@ export class RemoteProvider implements WorkspaceProvider {
     const insideProject = rel !== '..' && !rel.startsWith('../') && !posix.isAbsolute(rel);
     const relPath = insideProject ? (rel === '' ? '.' : rel) : null;
     return { exists: st.exists, isDir: st.isDir, insideProject, relPath, absPath };
+  }
+  // Bounded binary-preview read, over SFTP (never the helper RPC — see
+  // readFileBytesOverTransport's doc comment and the WorkspaceProvider one).
+  async readFileBytes(path: string, opts?: FileBytesOptions): Promise<FileBytesResult> {
+    const base = opts?.worktreePath || this.spec.remotePath;
+    return readFileBytesOverTransport(this.transport, this.resolveIn(base, path));
+  }
+
+  // Filesystem (bounded export — the one write, OUT of the repo only). Goes
+  // over the SFTP-backed RemoteTransport primitive, NOT the helper RPC's
+  // text-only, 2 MiB-capped readFile — this is the whole point of the SFTP
+  // design (see the issue's Contract). Always the whole file; never a range.
+  async exportFile(path: string, destAbsPath: string, opts?: { worktreePath?: string }): Promise<void> {
+    const base = opts?.worktreePath || this.spec.remotePath;
+    const source = await this.transport.createReadStream(this.resolveIn(base, path));
+    await writeStreamToDest(source, destAbsPath);
   }
 
   // Beads (read-only) — helper RPC reads (br h7a.7.3).

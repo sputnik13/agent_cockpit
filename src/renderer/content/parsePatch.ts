@@ -18,15 +18,30 @@ export interface ParsedPatch {
   file: { from: string | null; to: string | null };
   hunks: PatchHunk[];
   meta: string[];
+  /**
+   * True when the patch is git's binary-diff summary ("Binary files a/… and
+   * b/… differ") rather than a line-by-line unified diff — i.e. git detected
+   * a change but never attempted (and could not produce) hunks for it. Never
+   * true together with a non-empty `hunks`: git emits one or the other for a
+   * given file, never both. Only set when git actually reports a change — an
+   * unmodified file's diff is empty and carries no such line, so `binary`
+   * stays `false` for a genuinely-unchanged binary file (there is no signal
+   * to distinguish that case from an unchanged text file without a new
+   * read). See DiffView.tsx, which renders the generic-binary placeholder
+   * when this is `true` instead of its plain empty-diff hint.
+   */
+  binary: boolean;
 }
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
+const BINARY_DIFFER_RE = /^Binary files .* differ$/;
 
 export function parsePatch(patch: string): ParsedPatch {
   const lines = patch.split('\n');
   const meta: string[] = [];
   let from: string | null = null;
   let to: string | null = null;
+  let binary = false;
   const hunks: PatchHunk[] = [];
 
   let current: PatchHunk | null = null;
@@ -46,6 +61,15 @@ export function parsePatch(patch: string): ParsedPatch {
     }
     if (raw.startsWith('diff ') || raw.startsWith('index ') || raw.startsWith('new file') || raw.startsWith('deleted file') || raw.startsWith('similarity index') || raw.startsWith('rename ')) {
       meta.push(raw);
+      continue;
+    }
+    if (BINARY_DIFFER_RE.test(raw)) {
+      // git's binary-diff summary line — no hunks will ever follow for this
+      // file. Intercepted here (rather than falling through to the
+      // `if (!current) continue;` below, which would silently drop it) so
+      // DiffView can detect it.
+      meta.push(raw);
+      binary = true;
       continue;
     }
     const hm = HUNK_RE.exec(raw);
@@ -80,7 +104,7 @@ export function parsePatch(patch: string): ParsedPatch {
       newNum += 1;
     }
   }
-  return { file: { from, to }, hunks, meta };
+  return { file: { from, to }, hunks, meta, binary };
 }
 
 export function hunkId(h: PatchHunk): string {

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import type { FileChange, FileChangeStatus } from '@shared/ipc/channels';
 import {
   Badge,
+  ContextMenu,
   EmptyState,
   Panel,
   PanelBody,
@@ -17,9 +18,15 @@ import { useActiveWorktree, useWorktreeStore } from '@renderer/worktree/worktree
 import { worktreeSelectOptions } from '@renderer/worktree/worktreeOptions';
 import { useFollowTerminalCwd } from './followCwd';
 import { useContentSelection } from '@renderer/content';
-import { useProjectsStore, useSessionStore, isDisconnected } from '@renderer/providerClient';
+import {
+  useProjectsStore,
+  useSessionStore,
+  isDisconnected,
+  selectActiveProject,
+} from '@renderer/providerClient';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
 import { isHiddenFromChanges } from '@shared/watch/policy';
+import { buildFileRowMenuItems, useRowMenuFeedback, type FileRowDescriptor } from '@renderer/files/rowMenu';
 
 type Tone = 'neutral' | 'accent' | 'added' | 'removed' | 'warn';
 
@@ -70,7 +77,12 @@ export function ChangesPanel(): JSX.Element {
   const setTarget = useChangesStore((s) => s.setTarget);
   const selectContent = useContentSelection((s) => s.select);
   const activeId = useProjectsStore((s) => s.activeId);
+  const activeProject = useProjectsStore(selectActiveProject);
   const disconnected = useSessionStore(isDisconnected(activeId));
+  // D3/feedback (local_repo_explorer-dpqo): same visible, transient toolbar
+  // confirmation ExplorerPanel already renders after a row's Copy/Download
+  // action — closes the cross-panel asymmetry flagged in ynz8.5's review.
+  const { message: feedbackMessage, notify: onActionComplete } = useRowMenuFeedback();
 
   const selectFile = (file: FileChange): void => {
     if (!activeId) return;
@@ -175,6 +187,11 @@ export function ChangesPanel(): JSX.Element {
           ))}
         </div>
         <span className="shrink-0 text-xs text-dim tabular-nums">{count}</span>
+        {feedbackMessage && (
+          <span className="shrink-0 text-xs text-dim" role="status">
+            {feedbackMessage}
+          </span>
+        )}
         <PanelFullscreenButton />
       </Toolbar>
 
@@ -201,27 +218,35 @@ export function ChangesPanel(): JSX.Element {
         ) : (
           filtered.map((file) => {
             const glyph = STATUS_GLYPH[file.status];
+            const descriptor: FileRowDescriptor = {
+              relPath: file.newPath,
+              worktreePath: activeWorktree,
+              isDir: false,
+              downloadable: file.status !== 'deleted',
+            };
+            const menuItems = buildFileRowMenuItems(descriptor, { activeProject, onActionComplete });
             return (
-              <Row
-                key={file.newPath}
-                active={selectedPath === file.newPath}
-                onClick={() => selectFile(file)}
-                prefix={
-                  <Badge tone={glyph.tone} aria-label={file.status} title={file.status}>
-                    {glyph.letter}
-                  </Badge>
-                }
-                suffix={
-                  <span className="flex items-center gap-1 text-[10px] text-dim">
-                    {file.isBinary && <span title="binary">bin</span>}
-                    {file.staged && <span title="staged" className="text-added">staged</span>}
+              <ContextMenu key={file.newPath} items={menuItems}>
+                <Row
+                  active={selectedPath === file.newPath}
+                  onClick={() => selectFile(file)}
+                  prefix={
+                    <Badge tone={glyph.tone} aria-label={file.status} title={file.status}>
+                      {glyph.letter}
+                    </Badge>
+                  }
+                  suffix={
+                    <span className="flex items-center gap-1 text-[10px] text-dim">
+                      {file.isBinary && <span title="binary">bin</span>}
+                      {file.staged && <span title="staged" className="text-added">staged</span>}
+                    </span>
+                  }
+                >
+                  <span className={cn('truncate', file.isGenerated && 'text-dim italic')}>
+                    {file.newPath}
                   </span>
-                }
-              >
-                <span className={cn('truncate', file.isGenerated && 'text-dim italic')}>
-                  {file.newPath}
-                </span>
-              </Row>
+                </Row>
+              </ContextMenu>
             );
           })
         )}

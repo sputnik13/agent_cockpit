@@ -91,9 +91,14 @@ surfaces.
    debounced, pausable) emits `evtWatch`, which the renderer uses to refetch the
    changeset and beads graph for the active worktree.
 5. `ChangesPanel` lists files (status badges, filter/search). Selecting one
-   loads it into `ContentViewer`, which picks a mode by extension: unified diff
-   via `parsePatch`, rendered Markdown with `mapHunksToBlocks` changed-block
-   callouts (with inline Mermaid + Graphviz diagrams), raw, or image-compare.
+   loads it into `ContentViewer`, which classifies the file (markdown/html/image/text)
+   and offers the uniform **Diff / Rendered / Raw** modes for that class (see
+   ARCHITECTURE "Content Modes & Bounded Binary-Preview Reads"): Diff is a
+   unified diff via `parsePatch` (for images, the before/after compare),
+   Rendered is the nicest presentation — rendered Markdown with
+   `mapHunksToBlocks` changed-block callouts (with inline Mermaid + Graphviz
+   diagrams), sandboxed HTML preview, highlighted code, or the working-tree
+   image — and Raw is plain text.
 6. The user marks reviewed state, leaves notes (`notes:create`), and the
    since-seen queue separates "changed now" from "already reviewed".
 
@@ -613,9 +618,12 @@ The provider seam realizes the primary flows as follows:
     `connected`, stopped on disconnect/eviction); every live session fans out its
     `projectId`-tagged events, and the renderer `panelDataSync` routes by
     `(projectId, category)` to the right `byProject` slice.
-- **Content viewer.** `ContentViewer` selects a mode by extension and content:
-  `DiffView` (`parsePatch`), `markdown.tsx`, `mermaid.tsx`/`graphviz.tsx`
-  (inline diagrams), `RawFile`, `ImageCompare`. The Markdown renderer runs one whole-document
+- **Content viewer.** `ContentViewer` dispatches through the single (class, mode) → component
+  table in `modeSwitcher.tsx` (uniform Diff/Rendered/Raw modes per content class; runtime
+  generic-binary reclassification — see ARCHITECTURE "Content Modes & Bounded Binary-Preview
+  Reads"): `DiffView` (`parsePatch`), `markdown.tsx`, `mermaid.tsx`/`graphviz.tsx`
+  (inline diagrams), `RawFile` (highlighted Rendered / plain Raw), `ImageCompare`/`ImageView`
+  (bytes via the capped `readFileBytes` primitive), and the shared `BinaryPlaceholder`. The Markdown renderer runs one whole-document
   unified pass (`remark-parse` → `remark-gfm` → `remark-rehype` →
   `rehype-highlight` → a local safe-link/image transform → `rehype-stringify`)
   so reference link definitions, footnotes, and reference images resolve
@@ -652,10 +660,10 @@ The provider seam realizes the primary flows as follows:
   painted as `::highlight(find-match)` / `::highlight(find-active)` ranges WITHOUT
   mutating the DOM (so it is safe over React-rendered content). A `MutationObserver`
   re-collects when async Markdown finishes rendering; next/previous scroll the
-  active match into view. Image mode has no text search. `.html`/`.htm` files add
-  an **HTML preview** mode (`HtmlPreview.tsx`, default for HTML; Diff/Raw stay
-  available) that renders the file's working-tree content visually inside a
-  **sandboxed `blob:` iframe**: the file text gets a restrictive CSP `<meta>`
+  active match into view. Image mode has no text search. `.html`/`.htm` files render
+  their **Rendered** mode (the class default; Diff and a plain-text Raw stay
+  available) as an HTML preview (`HtmlPreview.tsx`) — the file's working-tree
+  content shown visually inside a **sandboxed `blob:` iframe**: the file text gets a restrictive CSP `<meta>`
   injected as its first `<head>` child (`injectPreviewCsp` →
   `default-src 'none'; img-src data:; style-src 'unsafe-inline' data:; font-src
   data:; script-src 'unsafe-inline'`), is wrapped in a `Blob` →
@@ -678,6 +686,25 @@ The provider seam realizes the primary flows as follows:
   `external-file` selections (no git diff). The tree remounts (key includes the base) on
   a worktree/root switch. See ARCHITECTURE "Worktree dropdown labels" / "Explorer root
   browsing".
+- **File-row context menu + Download.** Right-clicking a Changes or Explorer
+  row opens a three-item menu built by the shared
+  `src/renderer/files/rowMenu.ts` substrate (`buildFileRowMenuItems`; `Row` is
+  `forwardRef`, so it is the Radix `ContextMenu` trigger directly): copy the
+  fully-qualified path (base = `activeWorktree || project root`; on a remote
+  project this is the remote-host absolute path), copy the project-relative
+  path, and Download. Download invokes `window.api.files.saveAs` → the
+  `files:save-as` handler in main (native Save-as dialog, basename prefilled,
+  cancel → `null`) → `WorkspaceProvider.exportFile`, which streams the source
+  bytes (local `fs.createReadStream`; remote
+  `RemoteTransport.createReadStream` over SFTP) through the shared
+  temp-then-rename writer (`electron/main/providers/exportWrite.ts`) — never
+  through the text-only `readFile` preview path, never buffering the file, and
+  never leaving a partial destination. Directories and deleted Changes rows
+  disable Download (with a `title` reason); Explorer root-browse rows disable
+  the relative copy; the Explorer toolbar shows transient action feedback
+  (`useRowMenuFeedback`; Changes does not yet render it — tracked in
+  `local_repo_explorer-dpqo`). See ARCHITECTURE "Bounded File Export (Download)
+  & Row Context Menus".
 - **Visual system.** `src/renderer/ui/` provides app-owned primitives (Button,
   Badge, Panel, Row, Toolbar, feedback) over Radix (Dialog, Menu, Select, Tabs,
   Tooltip); Dockview is themed via `dockview-theme.css` + token overrides.

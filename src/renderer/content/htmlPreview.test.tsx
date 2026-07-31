@@ -49,13 +49,13 @@ describe('modeSwitcher html support', () => {
     expect(isHtmlPath('script.ts')).toBe(false);
   });
 
-  it('defaults html files to the sandboxed preview', () => {
-    expect(defaultModeFor('mockup.html', 'change')).toBe('html-preview');
-    expect(defaultModeFor('mockup.htm', 'file')).toBe('html-preview');
+  it('defaults html files to the sandboxed preview (Rendered mode)', () => {
+    expect(defaultModeFor('mockup.html', 'change')).toBe('rendered');
+    expect(defaultModeFor('mockup.htm', 'file')).toBe('rendered');
   });
 
-  it('offers preview + diff + raw for html files', () => {
-    expect(modesFor('mockup.html')).toEqual(['html-preview', 'diff', 'raw']);
+  it('offers diff + rendered + raw for html files', () => {
+    expect(modesFor('mockup.html', 'change')).toEqual(['diff', 'rendered', 'raw']);
   });
 });
 
@@ -112,10 +112,10 @@ describe('HtmlPreview in ContentViewer', () => {
     useContentSelection.setState({ selections: {} });
   });
 
-  it('defaults an .html change to the Preview tab and renders a sandboxed blob iframe', async () => {
+  it('defaults an .html change to the Rendered tab and renders a sandboxed blob iframe', async () => {
     render(<ContentViewer selection={sel('mockup.html')} />);
 
-    expect(screen.getByRole('tab', { name: 'Preview' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true');
 
     const iframe = (await screen.findByTitle('HTML preview')) as HTMLIFrameElement;
     // sandbox present, empty (deny all) — and crucially NEVER allow-same-origin.

@@ -5,9 +5,13 @@
  * renderer consumes it through a provider-client proxy. Panels never know which
  * transport backs the active provider.
  *
- * All repository access is read-only — the embedded terminal is the only write
- * path. Methods are async because the renderer always reaches a provider over
- * IPC (and, for remote, over SSH).
+ * Repository access is read-only — the embedded terminal is the only write
+ * path INTO a project. One deliberate, bounded exception: `exportFile` copies
+ * a file OUT of the repository to a user-chosen destination on the app host
+ * (the Download capability), at explicit user request. It never writes into
+ * the repository, local or remote, and it is not license to reopen the
+ * read-only model. Methods are async because the renderer always reaches a
+ * provider over IPC (and, for remote, over SSH).
  *
  * See docs/proposals/_active_agent-cockpit-local-remote.md (#workspaceprovider-interface-if-1).
  */
@@ -128,6 +132,34 @@ export interface FileReadResult {
   sizeBytes: number;
 }
 
+/** Why `readFileBytes` returned no bytes for an existing path (or `missing`
+ *  when the path itself does not exist). */
+export type FileBytesUnavailableReason = 'missing' | 'too-large' | 'is-dir';
+
+/** Options for `readFileBytes`. Deliberately has NO `ref`: a git-object byte
+ *  read is a different byte source than this primitive's fs/SFTP read and is
+ *  not supported in v1 — see the method's doc comment for the rationale and
+ *  its consequence for image-diff baseline previews. */
+export interface FileBytesOptions {
+  /** Resolve the path against this worktree root instead of the project root;
+   *  empty/absent = project root. */
+  worktreePath?: string;
+}
+
+/**
+ * Result of `readFileBytes`. `bytesBase64` is the file's WHOLE bytes,
+ * base64-encoded; `null` when bytes are refused/absent (see `reason`).
+ * NOTE: an existing 0-byte file yields `''` (empty string) — falsy but valid.
+ * Consumers MUST branch on `reason === null` to detect "bytes are present",
+ * never on the truthiness of `bytesBase64`.
+ */
+export interface FileBytesResult {
+  bytesBase64: string | null;
+  sizeBytes: number;
+  exists: boolean;
+  reason: FileBytesUnavailableReason | null;
+}
+
 export interface StatResult {
   exists: boolean;
   size: number;
@@ -232,6 +264,66 @@ export interface WorkspaceProvider {
   /** Resolve a link target (absolute, `file://`, or relative) to its canonical
    *  path, existence, and project membership. */
   resolvePath(input: string, opts?: ResolvePathOptions): Promise<ResolvedPath>;
+
+  /**
+   * Bounded, general-purpose binary-preview read: returns `path`'s bytes
+   * (base64-encoded) to the renderer over IPC, gated by a prior size check.
+   * This is the byte source every content-type preview needs (images now,
+   * other binary types later) — `readFile` is text-only (assumes UTF-8 and
+   * flags/truncates binary) and `exportFile` writes to the app HOST, not the
+   * renderer, so neither can serve a renderer-side binary preview.
+   *
+   * Name/shape: `readFileBytes` parallels `readFile`/`stat`/`exportFile` —
+   * "file bytes" describes the READ, not a content class, so a second
+   * content type (audio, PDF, ...) can adopt this with no signature change.
+   * `FileBytesResult.reason` is a closed, machine-readable enum rather than a
+   * message string, so callers branch without parsing text.
+   *
+   * Size gate (refuse, never truncate): the resolved path is STATTED FIRST
+   * (local `fs.stat`, remote `RemoteTransport.stat`); `size > FILE_BYTES_CAP`
+   * (10 MiB — see `src/shared/providers/fileBytesCap.ts`, the one authoring
+   * site, for the full justification and contrast with the smaller local
+   * 256 KiB / remote-helper 2 MiB text-read caps) resolves METADATA ONLY
+   * (`sizeBytes` + `reason: 'too-large'`, no bytes) — never a truncated
+   * prefix. A prefix is useless to every decode-dependent consumer anyway (a
+   * half-read PNG does not render), so "refuse with size" is both the
+   * correct product behavior and the boundary-preserving one. A missing path
+   * resolves `{ exists: false, reason: 'missing' }` rather than rejecting.
+   *
+   * No range, ever: this is a WHOLE-FILE read. `RemoteTransport.createReadStream`
+   * accepts an optional `{start,end}` reserved for a distinct, not-yet-built
+   * future streaming/seek capability (see that method's doc comment and
+   * docs/ARCHITECTURE.md "Future streaming (deferred; the range capability)");
+   * this primitive never passes one and no caller may add one — that would
+   * silently widen a documented repo-wide non-goal.
+   *
+   * `ref` (reading content at a git ref) is NOT supported — omitted entirely
+   * from `FileBytesOptions`, not merely left undefined. A git-object read is a
+   * different byte source (git plumbing) than this primitive's fs/SFTP byte
+   * source, and shipping it now would force the remote path through either
+   * the forbidden text-only helper RPC or a new exec surface. Consequence for
+   * consumers: the image-diff "before (baseline)" side has no byte source
+   * from this primitive in v1 — the child issue that wires the Image content
+   * view must render an explicit "no baseline preview" placeholder there
+   * rather than faking it from a working-tree read.
+   *
+   * `opts.worktreePath` behaves exactly like every other provider read: base
+   * = `worktreePath || project root`; an already-absolute `path` passes
+   * through unchanged.
+   */
+  readFileBytes(path: string, opts?: FileBytesOptions): Promise<FileBytesResult>;
+
+  // Filesystem (bounded export — the one write, OUT of the repo only)
+  /**
+   * Copy `path`'s bytes (resolved against `opts.worktreePath || project root`,
+   * exactly like `readFile`/`stat`) to `destAbsPath` on the app host — the
+   * Download capability. Always the whole file; never binary-sniffed or
+   * size-capped (that is `readFile`'s preview concern, not this one). Rejects
+   * on a missing/unreadable source, a disconnected transport, an unwritable
+   * destination, or a mid-transfer failure; on any failure `destAbsPath` is
+   * left with no partial/truncated content.
+   */
+  exportFile(path: string, destAbsPath: string, opts?: { worktreePath?: string }): Promise<void>;
 
   // Beads (read-only)
   detectBeads(): Promise<boolean>;

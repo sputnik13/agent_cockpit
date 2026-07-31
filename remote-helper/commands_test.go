@@ -53,6 +53,9 @@ func TestReadFile(t *testing.T) {
 	if r.Truncated {
 		t.Fatalf("unexpected truncation")
 	}
+	if r.SizeBytes != int64(len("content-here")) {
+		t.Fatalf("sizeBytes = %d, want %d", r.SizeBytes, len("content-here"))
+	}
 }
 
 func TestReadFileTruncation(t *testing.T) {
@@ -76,6 +79,12 @@ func TestReadFileTruncation(t *testing.T) {
 	if len(r.Content) != maxReadFileBytes {
 		t.Fatalf("content len = %d want %d", len(r.Content), maxReadFileBytes)
 	}
+	// SizeBytes must be the TRUE on-disk size (maxReadFileBytes+100), not the
+	// capped Content length (maxReadFileBytes) — a stat-derived value,
+	// independent of the truncation applied to Content.
+	if want := int64(len(big)); r.SizeBytes != want {
+		t.Fatalf("sizeBytes = %d, want %d (true file size, not the capped content length %d)", r.SizeBytes, want, maxReadFileBytes)
+	}
 }
 
 func TestReadFileEmptyPath(t *testing.T) {
@@ -98,6 +107,156 @@ func TestReadFileWorktreePath(t *testing.T) {
 	}
 	if r := res.(readFileResult); r.Content != "wt-content" {
 		t.Fatalf("content = %q, want wt-content", r.Content)
+	}
+}
+
+// readFile's working-tree path must classify content by the same NUL-byte
+// heuristic as electron/main/git/files.ts's looksBinary: text -> isBinary
+// false, a NUL byte anywhere in the content -> true. Also proves SizeBytes for
+// a binary file is the TRUE on-disk byte count (stat-derived), not something
+// computed from Content — the wire value RemoteProvider.readFile (TS) must use
+// verbatim instead of Buffer.byteLength over the (possibly U+FFFD-mangled once
+// JSON-decoded) content string (br r3s6).
+func TestReadFileBinaryDetection(t *testing.T) {
+	dir := t.TempDir()
+
+	textPath := filepath.Join(dir, "text.txt")
+	textContent := "hello world\n"
+	if err := os.WriteFile(textPath, []byte(textContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := handleReadFile(json.RawMessage(`{"path":` + jstr(textPath) + `}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	if r := res.(readFileResult); r.IsBinary {
+		t.Fatalf("expected isBinary=false for text content, got %+v", r)
+	} else if r.SizeBytes != int64(len(textContent)) {
+		t.Fatalf("sizeBytes = %d, want %d", r.SizeBytes, len(textContent))
+	}
+
+	binPath := filepath.Join(dir, "data.bin")
+	binContent := append([]byte("PNG\x00fake-binary-marker"), make([]byte, 32)...)
+	if err := os.WriteFile(binPath, binContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err = handleReadFile(json.RawMessage(`{"path":` + jstr(binPath) + `}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	r := res.(readFileResult)
+	if !r.IsBinary {
+		t.Fatalf("expected isBinary=true for NUL-containing content, got %+v", r)
+	}
+	// The true byte count, NOT len(r.Content) (which happens to match here since
+	// Go strings are byte-for-byte, but the TS layer must use this field rather
+	// than re-deriving a size from Content once it crosses the JSON wire).
+	if want := int64(len(binContent)); r.SizeBytes != want {
+		t.Fatalf("sizeBytes = %d, want %d (true binary file size)", r.SizeBytes, want)
+	}
+}
+
+// A file that is BOTH larger than maxReadFileBytes AND binary (the realistic
+// "large image/binary asset" case) must report SizeBytes as the true full
+// on-disk size — neither the capped Content length nor derived from Content —
+// with Truncated and IsBinary both true.
+func TestReadFileLargeBinarySizeBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large.bin")
+	big := make([]byte, maxReadFileBytes+500)
+	big[10] = 0 // NUL within the binarySniffBytes prefix -> isBinary
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := handleReadFile(json.RawMessage(`{"path":` + jstr(path) + `}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	r := res.(readFileResult)
+	if !r.Truncated {
+		t.Fatalf("expected truncated=true")
+	}
+	if !r.IsBinary {
+		t.Fatalf("expected isBinary=true")
+	}
+	if len(r.Content) != maxReadFileBytes {
+		t.Fatalf("content len = %d, want %d", len(r.Content), maxReadFileBytes)
+	}
+	if want := int64(len(big)); r.SizeBytes != want {
+		t.Fatalf("sizeBytes = %d, want %d (true size, not the capped content length)", r.SizeBytes, want)
+	}
+}
+
+// A NUL byte beyond the binarySniffBytes-byte prefix must NOT flip isBinary —
+// matching electron/main/git/files.ts's looksBinary bound (Math.min(len, 8000))
+// exactly, rather than scanning the whole file.
+func TestReadFileBinaryDetectionBoundedPrefix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mostly-text.bin")
+	content := make([]byte, binarySniffBytes+100)
+	for i := range content {
+		content[i] = 'a'
+	}
+	content[binarySniffBytes+50] = 0 // NUL past the sniff window
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := handleReadFile(json.RawMessage(`{"path":` + jstr(path) + `}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	if r := res.(readFileResult); r.IsBinary {
+		t.Fatalf("expected isBinary=false for a NUL beyond the sniff window, got %+v", r)
+	}
+}
+
+// The ref-read path (`git show <ref>:<path>`) must classify content by the
+// same heuristic as the working-tree path.
+func TestReadFileRefBinaryDetection(t *testing.T) {
+	dir := initRepo(t)
+	binPath := filepath.Join(dir, "image.bin")
+	binContent := []byte("BIN\x00\x01\x02content")
+	if err := os.WriteFile(binPath, binContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitEnv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	addCmd := exec.Command("git", "add", "image.bin")
+	addCmd.Dir = dir
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	commitCmd := exec.Command("git", "commit", "-m", "add binary")
+	commitCmd.Dir = dir
+	commitCmd.Env = gitEnv
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+
+	res, err := handleReadFile(json.RawMessage(`{"path":"image.bin","ref":"HEAD","cwd":` + jstr(dir) + `}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	r := res.(readFileResult)
+	if !r.IsBinary {
+		t.Fatalf("expected isBinary=true for a binary blob at ref, got %+v", r)
+	}
+	// SizeBytes at ref is the full blob length (`git show` reproduces the
+	// committed bytes verbatim), true regardless of Content's eventual
+	// JSON/TS-side handling.
+	if want := int64(len(binContent)); r.SizeBytes != want {
+		t.Fatalf("sizeBytes = %d, want %d (true blob size)", r.SizeBytes, want)
+	}
+
+	// tracked.txt (from initRepo) is text at the same ref.
+	res, err = handleReadFile(json.RawMessage(`{"path":"tracked.txt","ref":"HEAD","cwd":` + jstr(dir) + `}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	if r := res.(readFileResult); r.IsBinary {
+		t.Fatalf("expected isBinary=false for a text blob at ref, got %+v", r)
 	}
 }
 

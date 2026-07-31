@@ -20,6 +20,8 @@ import type {
   DiffBundle,
   DirEntry,
   ConnectionStatus,
+  FileBytesOptions,
+  FileBytesResult,
   FileReadOptions,
   FileReadResult,
   ProjectKind,
@@ -46,6 +48,8 @@ import {
   localStat,
   localTaskGraph,
 } from './reads';
+import { localReadFileBytes } from './readFileBytes';
+import { localExportFile } from './export';
 import { LocalWatchManager } from './watch';
 import { LocalTerminalManager } from './terminal';
 import { sessionNameToken } from '../sessionKey';
@@ -145,6 +149,14 @@ export class LocalProvider implements WorkspaceProvider {
   }
   async resolvePath(input: string, opts?: ResolvePathOptions): Promise<ResolvedPath> {
     return localResolvePath(this.rootPath, input, opts);
+  }
+  async readFileBytes(path: string, opts?: FileBytesOptions): Promise<FileBytesResult> {
+    return localReadFileBytes(this.rootPath, path, opts);
+  }
+
+  // Filesystem (bounded export — the one write, OUT of the repo only)
+  async exportFile(path: string, destAbsPath: string, opts?: { worktreePath?: string }): Promise<void> {
+    return localExportFile(this.rootPath, path, destAbsPath, opts);
   }
 
   // Beads (read-only)

@@ -1,9 +1,10 @@
 /**
  * Ssh2Transport — the default `RemoteTransport` implementation, backed by a
  * single ssh2 `Client`. It owns the wire mechanism: connect/auth lifecycle,
- * one-shot and streaming exec, PTY channels (control-mode + terminals), and the
- * SFTP file-provisioning session. It maps ssh2's untyped error events into typed
- * `RemoteTransportError`s with a `phase`.
+ * one-shot and streaming exec, PTY channels (control-mode + terminals), the
+ * SFTP file-provisioning session, and the SFTP `stat`/`createReadStream` read
+ * primitive behind the Download capability. It maps ssh2's untyped error
+ * events into typed `RemoteTransportError`s with a `phase`.
  *
  * THIS IS THE ONLY FILE PERMITTED TO IMPORT `ssh2` (enforced by ESLint
  * `no-restricted-imports`). All other remote code depends on the
@@ -19,14 +20,16 @@ import type {
   Client as Ssh2Client,
   ClientChannel,
   ConnectConfig,
+  ReadStreamOptions,
   SFTPWrapper,
   VerifyCallback,
 } from 'ssh2';
+import type { Readable } from 'node:stream';
 import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import type { ConnectionState, RemoteConnectionSpec } from '../types';
+import type { ConnectionState, RemoteConnectionSpec, StatResult } from '../types';
 import { resolveSshConfig } from './sshConfigResolve';
 import { logger } from '../../logger';
 import { TERMINAL_TERM } from '@shared/tmux';
@@ -384,6 +387,88 @@ export class Ssh2Transport implements RemoteTransport {
           return;
         }
         resolve(new Ssh2ProvisionSession(sftp));
+      });
+    });
+  }
+
+  /**
+   * Stat a remote path over a fresh, single-use SFTP channel (D2: opened per
+   * call, ended in this callback before resolving — matching `beginProvision`'s
+   * open-per-operation precedent rather than a cached long-lived channel that
+   * could go stale across a reconnect). A stat failure (missing path,
+   * permission denied, etc.) resolves the not-found shape rather than
+   * rejecting; only a connect/SFTP-open failure rejects.
+   *
+   * ssh2 `Stats.mtime` is SECONDS since epoch (unlike Node's `fs.Stats`, which
+   * is milliseconds) — multiplied by 1000 before building the ISO string.
+   */
+  stat(remotePath: string): Promise<StatResult> {
+    return new Promise<StatResult>((resolve, reject) => {
+      const conn = this.tryClient(reject);
+      if (!conn) return;
+      conn.sftp((err, sftp) => {
+        if (err) {
+          reject(new RemoteTransportError(`failed to open SFTP: ${err.message}`, '', 'connect', err));
+          return;
+        }
+        sftp.stat(remotePath, (statErr, stats) => {
+          try {
+            sftp.end();
+          } catch {
+            // already closed
+          }
+          if (statErr) {
+            resolve({ exists: false, size: 0, isDir: false, mtime: null });
+            return;
+          }
+          resolve({
+            exists: true,
+            size: stats.size,
+            isDir: stats.isDirectory(),
+            mtime: new Date(stats.mtime * 1000).toISOString(),
+          });
+        });
+      });
+    });
+  }
+
+  /**
+   * Open a byte-exact read stream over SFTP (the Download capability's byte
+   * source; see the NON-GOAL doc on `RemoteTransport.createReadStream` for why
+   * `start`/`end` exist). D2: a fresh SFTP channel per call; `release()` ends
+   * it exactly once, wired to BOTH `'close'` (normal EOF, and an early
+   * `stream.destroy()`) and `'error'` (a failed read) so the channel never
+   * leaks on any exit path, including a transport disconnect mid-stream
+   * (which errors/closes the stream, which releases the channel via these same
+   * hooks). Stream errors are never swallowed — only the release listener is
+   * attached here, so `pipeline`/consumer error handling still fires.
+   */
+  createReadStream(remotePath: string, opts?: { start?: number; end?: number }): Promise<Readable> {
+    return new Promise<Readable>((resolve, reject) => {
+      const conn = this.tryClient(reject);
+      if (!conn) return;
+      conn.sftp((err, sftp) => {
+        if (err) {
+          reject(new RemoteTransportError(`failed to open SFTP: ${err.message}`, '', 'connect', err));
+          return;
+        }
+        const streamOpts: ReadStreamOptions = {};
+        if (opts?.start !== undefined) streamOpts.start = opts.start;
+        if (opts?.end !== undefined) streamOpts.end = opts.end;
+        const stream = sftp.createReadStream(remotePath, streamOpts);
+        let released = false;
+        const release = (): void => {
+          if (released) return;
+          released = true;
+          try {
+            sftp.end();
+          } catch {
+            // already closed
+          }
+        };
+        stream.once('close', release);
+        stream.once('error', release);
+        resolve(stream);
       });
     });
   }

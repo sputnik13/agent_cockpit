@@ -792,6 +792,75 @@ local and remote. The primary worktree (or none) must read from the project root
 exactly as before. Covered by the linked-worktree case in `local.test.ts`, the
 `remote-helper` `*WorktreePath` Go tests, and `worktreeStore.test.ts`.
 
+## Download/export bytes go over SFTP/fs streams — `provider.readFile` is text-only by construction
+
+**Invariant:** `provider.readFile` is the TEXT PREVIEW/DIFF channel, not a
+byte mover: local `getFile` (`electron/main/git/files.ts`) returns
+`content: null` for binary (`looksBinary`) and over-`maxBytes` files, and the
+remote Go helper's `readFile` RPC returns a JSON string hard-capped at 2 MiB
+(`maxReadFileBytes`, `remote-helper/commands.go`). A future "just read the
+file" download/save/export path built on it silently produces empty or corrupt
+output for exactly the files users most want to move (binary, large) — no
+error is thrown. The one byte-exact path is `WorkspaceProvider.exportFile`:
+local `fs.createReadStream` (`electron/main/providers/local/export.ts`),
+remote `RemoteTransport.createReadStream`/`stat` over ssh2's SFTP client —
+implemented ONLY in `Ssh2Transport` (single-ssh2-import boundary preserved;
+fresh SFTP channel per call, released once on `'close'`/`'error'`) — both
+funneled through the temp-then-rename writer
+(`electron/main/providers/exportWrite.ts`: no partial destination ever, no
+whole-file buffering). Main-only dialog + write via `files:save-as`; no file
+bytes cross IPC; no fs/dialog in preload. `createReadStream`'s `{start, end}`
+range params are a deliberately shaped primitive for a FUTURE streaming
+proposal: do NOT strip them as YAGNI and do NOT build a range consumer. Full
+design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) "Bounded File Export
+(Download) & Row Context Menus".
+
+**Regression check:** on a remote project, download a binary file AND a
+file > 2 MiB; both must be byte-identical to the source (`shasum`) — proving
+neither went through `readFile`/the helper RPC. An aborted/failed download
+must leave no partial destination file.
+
+## Binary preview is its own capped byte channel; binary-ness is confirmed at runtime from ONE read
+
+**Invariant:** the in-app binary preview path is `WorkspaceProvider.readFileBytes`
+(`src/shared/providers/fileBytesCap.ts` owns the single 10 MiB `FILE_BYTES_CAP`;
+local `electron/main/providers/local/readFileBytes.ts`, remote
+`readFileBytesOverTransport` over SFTP — never the 2 MiB text helper RPC):
+stat-first, over-cap REFUSED with metadata (never truncated — a half-read PNG
+doesn't render), whole-file base64 over IPC, no `ref`, no range. `provider.readFile`
+returns `content: null` for binary by construction (see the Download entry), so a
+future "just read the file" preview (audio, PDF, …) silently renders a BLANK pane
+— it must consume `readFileBytes`. Consumers branch on `reason === null`, never
+`bytesBase64` truthiness (a 0-byte file yields `''`). The Download entry's "no
+bytes over IPC" is scoped to the EXPORT path; this read channel is the one
+deliberate, capped exception.
+
+**Renderer classification:** `classOf` (`src/renderer/content/modeSwitcher.tsx`)
+is pure/path-only and NEVER returns `'generic-binary'`; reclassification happens
+only in `ContentViewer` (`effectiveCls`/`effectiveMode`) from RawFile's existing
+`readFile` result via `onBinaryConfirmed` — the read RawFile was already making.
+Do NOT add a stat/read to detect binary earlier, and do NOT add a fallback
+provider read just to enrich a placeholder (e.g. a size): the removed size
+fallback fired real byte reads on remote purely for a placeholder and, ungated
+by view, an unconsumed read for every changed image — four review passes; size
+is omitted when RawFile never mounted (`ContentViewer.tsx`'s `rawFileSize` doc
+comment records the history). Remote `readFile` now performs real binary
+detection too (`local_repo_explorer-r3s6`): the Go helper sniffs for a NUL
+byte (mirroring `looksBinary`'s bound) and reports it alongside the file's
+true size; `RemoteProvider.readFile`'s `toFileReadResult` nulls `content`
+when binary — the same null-content contract `getFile` uses locally — so
+`RawFile`'s `isBinary` branch is actually reached on remote instead of always
+taking the `content !== null` text path first.
+
+**Regression check:** `npm run verify:content-modes`
+(`scripts/screenshots/verify-content-modes.mjs`) — 41 real-UI assertions across
+the (class × mode) matrix, incl. real image pixels on the working-tree pane,
+the exact "Baseline preview unavailable" no-baseline state (never
+"(unavailable)"), the generic-binary placeholders naming Download, and Raw NOT
+offered once binary-ness is confirmed. Recorded run: 41/41 local PASS; remote
+pass explicitly SKIPPED (opt-in `AC_VERIFY_REMOTE_*` env vars; not exercised
+against a live host — do not assert remote parity from this harness).
+
 ## Native modules on Electron 42: `cpu-features` is stripped post-install
 
 **Invariant:** A `postinstall` (`scripts/strip-cpu-features.mjs`) deletes

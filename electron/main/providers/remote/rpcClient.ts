@@ -52,6 +52,17 @@ export interface HandshakeResult {
 export interface ReadFileResult {
   content: string;
   truncated: boolean;
+  /** Real binary sniff from the helper (mirrors electron/main/git/files.ts's
+   *  looksBinary: a NUL byte within the content's first 8000 bytes), computed
+   *  from the same bytes already read for `content` — no second RPC. */
+  isBinary: boolean;
+  /** True byte size from the helper (fs stat for a working-tree read, full
+   *  `git show` blob length for a ref read) — independent of any cap/
+   *  truncation applied to `content`, and NOT derived from `content` (which,
+   *  once JSON round-tripped, substitutes invalid UTF-8 with U+FFFD and would
+   *  inflate a binary file's apparent size). See remote-helper/commands.go's
+   *  `readFileResult.SizeBytes`. */
+  sizeBytes: number;
 }
 
 export interface StatResult {

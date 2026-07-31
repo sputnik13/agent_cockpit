@@ -367,6 +367,19 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   ipcMain.handle(Channels.providerReadFile, async (_e, req: { path: string; opts?: never; projectId?: string }) => ({
     file: await providerFor(req?.projectId).readFile(requireString(req?.path, 'path'), req.opts),
   }));
+  // Whitelists opts to { worktreePath } ONLY — deliberately does not forward
+  // req.opts wholesale like providerReadFile above does. FileBytesOptions has
+  // no `ref` field at all (see the WorkspaceProvider.readFileBytes doc
+  // comment for why); whitelisting here is the boundary enforcement of that
+  // decision, so an untyped renderer/IPC payload can never smuggle one through.
+  ipcMain.handle(
+    Channels.providerReadFileBytes,
+    async (_e, req: { path: string; opts?: { worktreePath?: string }; projectId?: string }) => ({
+      bytes: await providerFor(req?.projectId).readFileBytes(requireString(req?.path, 'path'), {
+        worktreePath: req?.opts?.worktreePath,
+      }),
+    }),
+  );
   ipcMain.handle(Channels.providerStat, async (_e, req: { path: string; projectId?: string }) => ({
     stat: await providerFor(req?.projectId).stat(requireString(req?.path, 'path')),
   }));
@@ -457,6 +470,36 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
         requireString(req?.worktreePath, 'worktreePath'),
       ),
     }),
+  );
+
+  // ---- Files (bounded export — Download capability) ----
+  // The one write this app performs outside the embedded terminal: streams a
+  // project file OUT to a user-chosen destination via a native Save-as dialog.
+  // Never proxied through window.api.provider; the renderer only ever reaches
+  // this through window.api.files.saveAs.
+  ipcMain.handle(
+    Channels.filesSaveAs,
+    async (
+      _e,
+      req: { path: string; worktreePath?: string; projectId?: string; suggestedName?: string },
+    ) => {
+      const path = requireString(req?.path, 'path');
+      // Resolve the provider BEFORE showing the dialog so a session that is
+      // already gone (SessionGoneError) fails fast instead of flashing a save
+      // dialog for a write that can never complete.
+      const provider = providerFor(req?.projectId);
+      // Repo paths are POSIX on both transports; basename via a plain split
+      // avoids introducing a node:path import into this file.
+      const defaultPath = req?.suggestedName || path.split('/').pop() || path;
+      const win = getWindow();
+      const res = win
+        ? await dialog.showSaveDialog(win, { defaultPath })
+        : await dialog.showSaveDialog({ defaultPath });
+      // Cancel is a clean no-op: nothing written, resolves savedPath: null.
+      if (res.canceled || !res.filePath) return { savedPath: null };
+      await provider.exportFile(path, res.filePath, { worktreePath: req?.worktreePath });
+      return { savedPath: res.filePath };
+    },
   );
 
   // ---- Terminal (active project) ----

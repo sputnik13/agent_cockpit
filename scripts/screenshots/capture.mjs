@@ -101,7 +101,8 @@ async function main() {
     console.warn('  (skipped task-detail shot:', e.message, ')');
   }
 
-  await app.close();
+  // app.close() can hang on tmux control-mode teardown; don't block on it.
+  await Promise.race([app.close().catch(() => {}), sleep(3000)]);
   killShotSessions();
   console.log('Done.');
 }

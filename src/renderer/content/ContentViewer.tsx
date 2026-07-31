@@ -7,16 +7,18 @@ import { useFindInContent } from './findInContent';
 import { parsePatch } from './parsePatch';
 import { changedLinesFromPatch } from './hunkMap';
 import { DiffView } from './DiffView';
-import { RawFile } from './RawFile';
+import { RawFile, type RawFileConfirmation } from './RawFile';
 import { ImageCompare } from './ImageCompare';
+import { ImageView } from './ImageView';
 import { HtmlPreview } from './HtmlPreview';
 import { RenderedMarkdown } from './markdown';
 import {
   ModeSwitcher,
+  classOf,
   defaultModeFor,
-  isHtmlPath,
-  isMarkdownPath,
   modesFor,
+  viewFor,
+  type ContentClass,
   type ContentMode,
 } from './modeSwitcher';
 import type { ContentSelection } from './selectionStore';
@@ -36,31 +38,74 @@ export function ContentViewer({ selection }: { selection: ContentSelection | nul
 
 function FileContent({ selection }: { selection: ContentSelection }): JSX.Element {
   const { path, worktreePath, baseline, kind } = selection;
-  // An out-of-project file has no git baseline: restrict to text modes and skip
-  // the diff load entirely (the provider resolves its absolute path directly).
+  // An out-of-project file has no git baseline: skip the diff load entirely
+  // (the provider resolves its absolute path directly). `modesFor`/
+  // `defaultModeFor` fold this restriction into the one pure availability/
+  // default computation below (see modeSwitcher.tsx) instead of a per-mode
+  // filter living here.
   const external = kind === 'external-file';
+  // Pure, path-only content-type class (markdown/html/image/text/
+  // generic-binary). `classOf` never itself produces 'generic-binary' — see
+  // modeSwitcher.tsx's module doc comment. `effectiveCls` below is the
+  // runtime-aware value the render dispatch, wrappable, and findable all
+  // actually key off; `cls` stays the pure baseline.
+  const cls = classOf(path);
   const activeId = useProjectsStore((s) => s.activeId);
+  // RawFile's own `readFile` result (its EXISTING read, never a new one —
+  // see RawFile's `onBinaryConfirmed` doc comment), once known: text, or one
+  // of the three non-text outcomes RawFile already distinguishes for its own
+  // rendering (binary/too-large/missing), carrying whatever size RawFile
+  // already has. Two independent uses below:
+  //  - `confirmedBinary` (kind === 'binary' only) upgrades `cls` to
+  //    'generic-binary' for the rest of this file's lifetime — the ONLY
+  //    reclassification signal, and what lets an Explorer-opened PDF (etc.)
+  //    land on the graceful placeholder instead of staying on Raw's terse
+  //    "Binary file (N)" line.
+  //  - ALL non-'text' kinds feed DiffView's placeholder too (see
+  //    `diffKnownReason`/`rawFileSize` below), so an unmodified/untracked
+  //    binary file — whose diff patch carries no signal at all (parsePatch.ts's
+  //    `binary` field doc comment) — still gets the graceful Diff placeholder
+  //    instead of "No textual diff for this file.".
+  const [rawConfirmation, setRawConfirmation] = useState<RawFileConfirmation | null>(null);
+  const confirmedBinary = rawConfirmation?.kind === 'binary';
+  const effectiveCls: ContentClass = confirmedBinary ? 'generic-binary' : cls;
   // Resolve relative links in the viewed file against the file's own directory.
   const linkBase = useMemo(() => {
     const slash = path.lastIndexOf('/');
     return slash >= 0 ? path.slice(0, slash) : '';
   }, [path]);
   const available = useMemo(
-    () =>
-      external
-        ? modesFor(path).filter((m) => m === 'rendered' || m === 'raw' || m === 'html-preview')
-        : modesFor(path),
-    [external, path],
+    () => modesFor(path, kind, confirmedBinary),
+    [path, kind, confirmedBinary],
   );
+  // Global last-picked mode (persisted setting; `null` when none has ever
+  // been explicitly chosen). Consulted ONLY at mount, in the `useState`
+  // seed below.
+  const rememberedMode = useSettingsStore((s) => s.settings.contentMode);
   const [mode, setMode] = useState<ContentMode>(() =>
-    external
-      ? isHtmlPath(path)
-        ? 'html-preview'
-        : isMarkdownPath(path)
-          ? 'rendered'
-          : 'raw'
+    // Seed from the remembered global preference when it's a valid mode for
+    // THIS selection's class — the SAME `available.includes(...)` membership
+    // check `effectiveMode` performs below, not a duplicated check. Otherwise
+    // fall back to today's per-class default exactly as before. This
+    // initializer runs once per mount, and `FileContent` remounts per
+    // selection (see ContentViewer's `key={kind:path:baseline}`), so a new
+    // file/selection always re-evaluates the seed fresh.
+    rememberedMode != null && available.includes(rememberedMode)
+      ? rememberedMode
       : defaultModeFor(path, kind),
   );
+  // `mode` tracks the user's last explicit tab choice (or the seed above).
+  // Reclassification can drop that choice from `available` (e.g. an
+  // Explorer-opened file defaults to 'raw', and generic-binary drops raw
+  // entirely) — `effectiveMode` corrects for that WITHIN THE SAME RENDER (a
+  // synchronous derivation, not a follow-up effect), so the very first paint
+  // after confirmation already shows the graceful placeholder instead of
+  // flashing Raw's terse one-liner first. This is a DISPLAY correction only —
+  // it never calls `setMode` and is therefore never persisted as if it were a
+  // user choice. `setMode` (via ModeSwitcher's onChange below, wired through
+  // `handleModeChange` which also persists the choice) still writes the real
+  // preference, so a later manual switch is unaffected.
+  const effectiveMode = available.includes(mode) ? mode : defaultModeFor(path, kind, confirmedBinary);
   const [diff, setDiff] = useState<
     | { kind: 'loading' }
     | { kind: 'ready'; patch: string; oldContent: string | null; newContent: string | null }
@@ -85,17 +130,87 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     };
   }, [external, worktreePath, path, baseline]);
 
+  // Parsed once, for `changedLineSet` below. (DiffView separately parses the
+  // raw `patch` string prop itself — see its own doc comment — so this is a
+  // ContentViewer-only parse, not a dedupe across components.)
+  const parsedDiff = useMemo(
+    () => (diff.kind === 'ready' ? parsePatch(diff.patch) : null),
+    [diff],
+  );
   const changedLineSet = useMemo(() => {
-    if (diff.kind !== 'ready') return undefined;
-    return changedLinesFromPatch(parsePatch(diff.patch));
-  }, [diff]);
+    if (!parsedDiff) return undefined;
+    return changedLinesFromPatch(parsedDiff);
+  }, [parsedDiff]);
+
+  // Diff mode's placeholder REASON, independent of size: git's own
+  // "Binary files … differ" signal (parsed.binary, DiffView's own concern —
+  // unchanged) is one source; this is the ADDITIONAL one, for when the patch
+  // text carries no signal at all but RawFile has independently confirmed
+  // (via `rawConfirmation` above) that this path isn't plain text. Never
+  // derived for 'text' — nothing to show a placeholder for.
+  const diffKnownReason =
+    rawConfirmation && rawConfirmation.kind !== 'text' ? rawConfirmation.kind : undefined;
+
+  // Diff mode's placeholder SIZE. Sourced SOLELY from RawFile's OWN
+  // already-fetched `readFile` result, whenever it has mounted
+  // (`rawFileSize`) — the dominant case: RawFile mounts BEFORE Diff for
+  // every Explorer (kind:'file') selection (see modeSwitcher.tsx's
+  // `defaultModeFor` — 'file' defaults to Raw, only reclassifying to Diff
+  // once confirmed; see `effectiveMode` below), which covers the real-world
+  // case this issue exists to fix — an untracked/unmodified binary file
+  // opened from the Explorer, where the diff bundle carries no size field on
+  // either transport (getDiffBundle computes `sizeBytes` internally then
+  // discards it — see electron/main/providers/local/index.ts).
+  //
+  // There is ONE remaining gap: a `kind: 'change'` selection where the patch
+  // ALREADY signals `parsedDiff.binary` (a real, git-confirmed change) but
+  // Diff is the FIRST (and, for that kind, only ever shown) mode (see
+  // `defaultModeFor` — 'change' defaults straight to Diff), so RawFile never
+  // mounts and `rawConfirmation` stays null. `knownSize` is simply undefined
+  // in that case — BinaryPlaceholder already renders gracefully with no
+  // size (it still shows the changed-statement and the Download pointer).
+  //
+  // This is deliberate, not an oversight: an earlier version filled that gap
+  // with one extra `provider.readFile` call, gated on `parsedDiff.binary`.
+  // Two review passes found real, unfixed-by-narrowing problems with it:
+  //  - it fired even on REMOTE, where `readFile` has no metadata-only path
+  //    (electron/main/providers/remote/index.ts + remote-helper/commands.go
+  //    always read up to a 2 MiB cap and ship it over SSH) — a real, if
+  //    capped, byte transfer purely to render a placeholder, which is
+  //    exactly what this issue's own guardrail ("do not read whole bytes
+  //    just to render a placeholder") and AC5 ("rendering a placeholder does
+  //    not trigger a full-file read on remote") rule out — regardless of
+  //    whether the resulting number was then trusted or discarded by a
+  //    later "is this a genuine metadata signal" check;
+  //  - it had no gate on which VIEW was actually rendering — only on
+  //    `parsedDiff.binary` — so a CHANGED IMAGE viewed in Changes (git also
+  //    emits "Binary files … differ" for a changed image, but `image`'s Diff
+  //    mode dispatches to ImageCompare, never DiffView — see `viewFor` in
+  //    modeSwitcher.tsx) fired an extra `readFile` call whose result was
+  //    NEVER consumed by anything, on top of `getDiffBundle`'s own reads and
+  //    ImageCompare's `readFileBytes` call — for the single most common
+  //    binary-diff workflow in a real repo.
+  // Correctly gating a fallback on both transport AND actual rendered view
+  // is ongoing surface area to keep right for a number the issue's own
+  // Acceptance Criteria never requires (only a graceful placeholder is
+  // required, not a size), so this leaf removes the fallback outright
+  // instead of narrowing its gate further.
+  const rawFileSize =
+    rawConfirmation?.kind === 'binary' || rawConfirmation?.kind === 'too-large'
+      ? rawConfirmation.sizeBytes
+      : undefined;
 
   const [source, setSource] = useState<{ kind: 'loading' } | { kind: 'ready'; text: string }>({
     kind: 'loading',
   });
 
   useEffect(() => {
-    if (mode !== 'rendered') return;
+    // Only markdown's Rendered view (RenderedMarkdown) consumes this hoisted
+    // `source` state — HtmlPreview and RawFile (the Rendered view for html and
+    // text-like classes, respectively) already read the file themselves.
+    // Gating on `cls` too avoids a redundant readFile round trip for those
+    // classes now that they share the 'rendered' mode name with markdown.
+    if (mode !== 'rendered' || cls !== 'markdown') return;
     let active = true;
     setSource({ kind: 'loading' });
     void agentCockpit.provider.readFile(path, { worktreePath }).then((r) => {
@@ -104,24 +219,39 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     return () => {
       active = false;
     };
-  }, [mode, path, worktreePath]);
+  }, [mode, cls, path, worktreePath]);
 
-  // Find-in-file: Cmd/Ctrl+F opens a find bar over the rendered content. Image
-  // mode has no searchable text, so find is unavailable there. The search root
-  // (contentRef) excludes the find bar itself; panelRef scopes the shortcut to
-  // this panel (hover or focus within).
+  // Which component actually renders the current (class, mode) pair — the
+  // single value wrappable/findable/the render block all key off, so they
+  // stay correct as classes/modes evolve instead of re-deriving per mode name.
+  // Keyed on the EFFECTIVE class/mode (see above), not the raw `cls`/`mode`,
+  // so a just-confirmed generic-binary file dispatches correctly immediately.
+  const view = viewFor(effectiveCls, effectiveMode);
+
+  // Find-in-file: Cmd/Ctrl+F opens a find bar over the rendered content. The
+  // search root (contentRef) excludes the find bar itself; panelRef scopes the
+  // shortcut to this panel (hover or focus within).
   const panelRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
-  // Soft-wrap toggle (persisted, global) — applies to the code views (diff/raw).
+  // Soft-wrap toggle (persisted, global) — applies to the code views only
+  // (DiffView, RawFile), regardless of which mode name currently hosts them.
   const wrapLines = useSettingsStore((s) => s.settings.wrapLines);
   const setSettings = useSettingsStore((s) => s.set);
-  const wrappable = mode === 'diff' || mode === 'raw';
-  // Image has no searchable text; the HTML preview lives inside a sandboxed
-  // iframe the find search cannot reach — neither supports find-in-file.
-  const findable = mode !== 'image' && mode !== 'html-preview';
-  const revision = `${mode}|${path}|${diff.kind}|${source.kind}`;
+  // Persist an explicit mode change as the new global "last picked" value —
+  // ONLY here, on a genuine user click via ModeSwitcher. This must never be
+  // called from the `effectiveMode` reclassification-safety derivation above,
+  // which corrects DISPLAY only and does not represent a user choice.
+  const handleModeChange = (m: ContentMode): void => {
+    setMode(m);
+    void setSettings({ contentMode: m });
+  };
+  const wrappable = view === 'diff-view' || view === 'raw-file';
+  // ImageCompare, ImageView, and the sandboxed HTML iframe have no searchable
+  // text in the main DOM — none of them support find-in-file.
+  const findable = view === 'diff-view' || view === 'rendered-markdown' || view === 'raw-file';
+  const revision = `${effectiveMode}|${path}|${diff.kind}|${source.kind}`;
   const find = useFindInContent(contentRef, findOpen && findable ? findQuery : '', revision);
 
   useEffect(() => {
@@ -171,7 +301,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                 Wrap
               </button>
             )}
-            <ModeSwitcher available={available} active={mode} onChange={setMode} />
+            <ModeSwitcher available={available} active={effectiveMode} onChange={handleModeChange} />
           </div>
         }
       />
@@ -188,8 +318,12 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
               onClose={() => setFindOpen(false)}
             />
           )}
+          {/* Dispatch on `view` (the (class, mode) lookup from modeSwitcher's
+              VIEW_DISPATCH table), not on `mode`/extension directly — this is
+              the one per-(class,mode) render site ContentViewer owns instead
+              of hand-branching per extension. */}
           <div ref={contentRef} className="h-full">
-            {mode === 'diff' &&
+            {view === 'diff-view' &&
               (diff.kind === 'loading' ? (
                 <Centered>
                   <Spinner />
@@ -204,10 +338,12 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                   wrap={wrapLines}
                   oldContent={diff.oldContent}
                   newContent={diff.newContent}
+                  knownReason={diffKnownReason}
+                  knownSize={rawFileSize}
                 />
               ))}
 
-            {mode === 'rendered' &&
+            {view === 'rendered-markdown' &&
               (source.kind === 'loading' ? (
                 <Centered>
                   <Spinner />
@@ -221,16 +357,27 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                 />
               ))}
 
-            {mode === 'raw' && (
+            {view === 'html-preview' && <HtmlPreview worktreePath={worktreePath} filePath={path} />}
+
+            {view === 'raw-file' && (
               <RawFile
                 worktreePath={worktreePath}
                 filePath={path}
                 wrap={wrapLines}
+                // Rendered (highlighted) vs Raw (plain) is a runtime flag on
+                // the SAME component/read, not a separate view — switching
+                // between them never re-fetches. See RawFile's doc comment
+                // for the settled Rendered/Raw distinction.
+                highlight={effectiveMode === 'rendered'}
+                // The sole runtime classification signal — see the
+                // `rawConfirmation` doc comment above and RawFile's
+                // `onBinaryConfirmed` prop.
+                onBinaryConfirmed={setRawConfirmation}
                 {...(baseline !== undefined ? { gitRef: baseline } : {})}
               />
             )}
 
-            {mode === 'image' && (
+            {view === 'image-compare' && (
               <ImageCompare
                 worktreePath={worktreePath}
                 baseline={baseline ?? 'HEAD'}
@@ -239,7 +386,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
               />
             )}
 
-            {mode === 'html-preview' && <HtmlPreview worktreePath={worktreePath} filePath={path} />}
+            {view === 'image-view' && <ImageView worktreePath={worktreePath} filePath={path} />}
           </div>
         </div>
       </PanelBody>

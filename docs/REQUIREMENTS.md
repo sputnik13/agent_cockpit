@@ -149,9 +149,13 @@ Out of scope:
   error message shown inline. `br` is always invoked with an argv array (no
   shell). Writes are supported for both local and remote projects.
 - **FR-7 Changeset + content viewer.** Show the live per-worktree changeset vs
-  a selected baseline (default `HEAD`); render each file in the best mode
-  (unified diff, rendered Markdown with changed-block callouts, Mermaid, raw,
-  image-compare), with filtering/search across the change list. The rendered-
+  a selected baseline (default `HEAD`); render each file through the uniform
+  per-type mode model — **Diff**, **Rendered**, and (text-like types only)
+  **Raw** — defaulting to the best mode for the type: unified diff, rendered
+  Markdown with changed-block callouts and Mermaid, sandboxed HTML preview,
+  image compare/view, highlighted code; binary files degrade to graceful
+  placeholders that point at Download. Filtering/search across the change
+  list. The rendered-
   Markdown mode is GFM-complete in a single whole-document parse so reference
   link definitions, footnote definitions, and reference images resolve across
   blocks; top-level elements are annotated with their source line range so the
@@ -226,6 +230,10 @@ Out of scope:
   (no shell, so issue ids / titles / messages cannot inject), and never writes the
   working tree or the beads SQLite DB directly. All other repository mutation
   happens through the agent inside the terminal, never through app IPC.
+  The Download capability adds one bounded, **non-repository** write: at
+  explicit user request, a file is copied OUT of the repository to a
+  user-chosen destination on the app host (native Save-as dialog in main; no
+  file bytes cross IPC); it never writes into the repository, local or remote.
 - **NFR-3 Remote footprint.** The only hard remote-host prerequisites are an
   SSH account, `tmux`, and the ability to run the uploaded static helper
   binary. No package manager, language runtime, or root is required.

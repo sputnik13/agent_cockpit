@@ -157,3 +157,22 @@ electron out/main/index.js --user-data-dir=/tmp/ac-test --tmux-socket=ac-test
 The screenshot harness (`scripts/screenshots/`) sets both so it leaves a running
 app untouched. The socket override is read in
 [electron/main/instanceConfig.ts](../electron/main/instanceConfig.ts).
+
+## Verifying renderer changes end-to-end (Playwright)
+
+`scripts/screenshots/` also holds several `verify-*.mjs` scripts that drive the
+REAL packaged renderer with Playwright's `_electron` (isolated per the section
+above) and assert on rendered DOM evidence rather than component props —
+e.g. `verify-html-preview.mjs`, `verify-explorer-root.mjs`,
+`verify-body-search.mjs`, and `verify-content-modes.mjs` (the Content panel's
+full content-type x Diff/Rendered/Raw mode matrix). Each is self-documenting in
+its own header comment (what it asserts, how to run it). Run one directly:
+
+```sh
+npm run build && node scripts/screenshots/verify-content-modes.mjs
+# or:
+npm run verify:content-modes
+```
+
+Requires `@playwright/test` >= 1.61.1 (see CLAUDE.md "Native modules on
+Electron 42" — earlier versions cannot drive Electron 42's renderer at all).

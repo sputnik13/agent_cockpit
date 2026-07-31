@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { useState } from 'react';
+import { createRef, useState } from 'react';
 import { Button } from './Button';
 import { Badge, StatusDot } from './Badge';
 import { Panel, PanelHeader, PanelBody } from './Panel';
@@ -10,6 +10,7 @@ import { PanelFullscreenProvider } from './panelFullscreenContext';
 import { EmptyState, Spinner } from './feedback';
 import { Tabs } from './Tabs';
 import { Dialog } from './Dialog';
+import { Row } from './Row';
 
 describe('UI primitives', () => {
   it('renders Button with role and respects disabled', () => {
@@ -103,5 +104,52 @@ describe('UI primitives', () => {
     render(<Harness />);
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(screen.getByText('Remove project')).toBeInTheDocument();
+  });
+
+  // Row regression coverage (D1, local_repo_explorer-row-context-menu-copy-
+  // download-ynz8.3): Row was converted to forwardRef so it can be used
+  // directly as a Radix `asChild` trigger target (see
+  // src/renderer/files/rowMenu.test.tsx for the ContextMenu-integration
+  // case). These two tests pin down that the conversion (a) actually
+  // forwards a usable ref and (b) left every existing consumer-visible prop
+  // behavior — active/prefix/suffix/interactive/onClick/className — intact.
+  it('Row forwards its ref to the underlying div (D1)', () => {
+    const ref = createRef<HTMLDivElement>();
+    render(<Row ref={ref}>a row</Row>);
+    expect(ref.current).toBeInstanceOf(HTMLDivElement);
+    expect(ref.current?.textContent).toBe('a row');
+  });
+
+  it('Row keeps its existing prop behavior after the forwardRef conversion', () => {
+    const onClick = vi.fn();
+    render(
+      <Row
+        active
+        prefix={<span>PRE</span>}
+        suffix={<span>SUF</span>}
+        className="extra-class"
+        onClick={onClick}
+      >
+        row label
+      </Row>,
+    );
+    const row = screen.getByText('row label').closest('div.extra-class') as HTMLElement;
+    expect(row).toBeInTheDocument();
+    expect(row.className).toContain('border-accent'); // active styling
+    expect(screen.getByText('PRE')).toBeInTheDocument();
+    expect(screen.getByText('SUF')).toBeInTheDocument();
+    fireEvent.click(row);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('Row defaults to interactive (cursor-pointer/hover) and can opt out', () => {
+    const { rerender } = render(<Row data-testid="row">x</Row>);
+    expect(screen.getByTestId('row').className).toContain('cursor-pointer');
+    rerender(
+      <Row data-testid="row" interactive={false}>
+        x
+      </Row>,
+    );
+    expect(screen.getByTestId('row').className).not.toContain('cursor-pointer');
   });
 });

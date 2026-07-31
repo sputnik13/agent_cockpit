@@ -15,7 +15,7 @@
  * pass straight through.
  */
 import type { Readable, Writable } from 'node:stream';
-import type { ConnectionState, RemoteConnectionSpec } from '../types';
+import type { ConnectionState, RemoteConnectionSpec, StatResult } from '../types';
 
 /**
  * Phase of the transport lifecycle at which a failure occurred. `RemoteProvider`
@@ -167,6 +167,35 @@ export interface RemoteTransport {
    * best-effort).
    */
   beginProvision(): Promise<ProvisionSession>;
+
+  /**
+   * Stat a remote path over SFTP (the Download capability's byte-source
+   * primitive). Missing path resolves `{ exists: false, size: 0, isDir: false,
+   * mtime: null }` — it does NOT reject on absence. Rejects with
+   * `RemoteTransportError` when not connected or the SFTP channel cannot be
+   * opened, matching `beginProvision`'s error mapping.
+   */
+  stat(remotePath: string): Promise<StatResult>;
+
+  /**
+   * Open a byte-exact read stream over SFTP. `start`/`end` are INCLUSIVE byte
+   * offsets (`fs.createReadStream` semantics).
+   *
+   * RANGE CAPABILITY — NON-GOAL: `start`/`end` are deliberately included now
+   * for a FUTURE, separately proposed capability (viewing a large remote media
+   * file in-app via range-based streaming/seek); retrofitting range support
+   * onto this primitive later would be more disruptive than shaping it
+   * correctly now, and ssh2's `sftp.createReadStream` supports `{start,end}`
+   * natively so it costs nothing today. The Download capability (this issue)
+   * NEVER passes a range — it always reads the whole file — and NOTHING else
+   * in this repository may pass one or build a range consumer (no streaming
+   * UI, no media player, no HTTP range proxy, no renderer-facing range API).
+   *
+   * Stream errors propagate on the returned Readable's `'error'` event (never
+   * swallowed). Rejects with `RemoteTransportError` when not connected or the
+   * SFTP channel cannot be opened.
+   */
+  createReadStream(remotePath: string, opts?: { start?: number; end?: number }): Promise<Readable>;
 }
 
 /**

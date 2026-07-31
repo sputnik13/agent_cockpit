@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { Channels } from '@shared/ipc/channels';
 import type { RendererApi } from '@shared/ipc/api';
+import type { FileBytesResult } from '@shared/providers/types';
 
 const invoke = <T>(channel: string, payload?: unknown): Promise<T> =>
   ipcRenderer.invoke(channel, payload) as Promise<T>;
@@ -52,6 +53,10 @@ const api: RendererApi = {
       }).then((r) => r.bundle),
     readFile: (path, opts, projectId) =>
       invoke<{ file: never }>(Channels.providerReadFile, { path, opts, projectId }).then((r) => r.file),
+    readFileBytes: (path, opts, projectId) =>
+      invoke<{ bytes: FileBytesResult }>(Channels.providerReadFileBytes, { path, opts, projectId }).then(
+        (r) => r.bytes,
+      ),
     stat: (path, projectId) =>
       invoke<{ stat: never }>(Channels.providerStat, { path, projectId }).then((r) => r.stat),
     listDir: (dirPath, worktreePath, projectId) =>
@@ -91,6 +96,13 @@ const api: RendererApi = {
         worktreePath,
         projectId,
       }).then((r) => r.branchPoint),
+  },
+
+  files: {
+    saveAs: (path, opts) =>
+      invoke<{ savedPath: string | null }>(Channels.filesSaveAs, { path, ...opts }).then(
+        (r) => r.savedPath,
+      ),
   },
 
   terminal: {

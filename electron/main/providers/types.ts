@@ -9,6 +9,8 @@ export type {
   ConnectionStatus,
   DiffBundle,
   DirEntry,
+  FileBytesOptions,
+  FileBytesResult,
   FileReadOptions,
   FileReadResult,
   LocalConnectionSpec,

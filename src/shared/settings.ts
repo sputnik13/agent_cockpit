@@ -43,6 +43,16 @@ export interface DevEnvConfig {
   memoryMaxMb: number;
 }
 
+/**
+ * Content panel view mode (Diff/Rendered/Raw). Mirrors
+ * `src/renderer/content/modeSwitcher.tsx`'s `ContentMode` — redeclared here
+ * rather than imported, because `src/shared/` must stay renderer/main-agnostic
+ * (it is consumed by `electron/main/config.ts` too) and that module is a
+ * renderer-owned `.tsx` component file. Keep these three literal values in
+ * sync if `ContentMode` there ever changes.
+ */
+export type ContentMode = 'diff' | 'rendered' | 'raw';
+
 export interface AppSettings {
   theme: ThemeId;
   /** Monospace family for the terminal and code/diff surfaces. */
@@ -136,6 +146,16 @@ export interface AppSettings {
    * both modes.
    */
   wrapLines: boolean;
+  /**
+   * Last explicitly-chosen Content panel mode (Diff/Rendered/Raw), remembered
+   * globally across files and projects so opening a new file seeds the mode
+   * switcher from it instead of always recomputing the per-class default.
+   * `null` = no remembered preference yet (falls back to `defaultModeFor`'s
+   * per-class default). Only ever written on an explicit user mode change —
+   * never by the per-selection reclassification-safety fallback
+   * (`effectiveMode` in ContentViewer.tsx), which corrects display only.
+   */
+  contentMode: ContentMode | null;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -155,6 +175,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   tmuxFormatSubscriptions: false,
   workgraphColumnsSoftCap: 2,
   wrapLines: false,
+  contentMode: null,
 };
 
 /** Upper sanity bound for the idle timeout (minutes) — one day. */
@@ -238,6 +259,15 @@ export function normalizeSettings(input: unknown): AppSettings {
   const tmuxPauseMode = o.tmuxPauseMode === true;
   const tmuxFormatSubscriptions = o.tmuxFormatSubscriptions === true;
   const wrapLines = o.wrapLines === true;
+  // contentMode: accept only the three valid mode strings; anything else
+  // (missing, malformed, or a stale/unrecognized value) falls back to null
+  // ("no remembered preference") rather than a concrete mode — unlike
+  // terminalRenderer's fallback-to-'dom' pattern, null IS itself the valid
+  // default here (ContentViewer then falls back to its own defaultModeFor).
+  const contentMode: ContentMode | null =
+    o.contentMode === 'diff' || o.contentMode === 'rendered' || o.contentMode === 'raw'
+      ? o.contentMode
+      : null;
   // Idle timeout: 0 = disabled; reject negatives/non-numbers -> default; clamp
   // to an upper sanity bound. Mirrors the fontSize precedent (validate then
   // fall back to the default on invalid input).
@@ -279,5 +309,6 @@ export function normalizeSettings(input: unknown): AppSettings {
     tmuxFormatSubscriptions,
     workgraphColumnsSoftCap,
     wrapLines,
+    contentMode,
   };
 }

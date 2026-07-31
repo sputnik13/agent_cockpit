@@ -13,6 +13,8 @@ import type {
   ConnectionStatus,
   DiffBundle,
   DirEntry,
+  FileBytesOptions,
+  FileBytesResult,
   FileReadOptions,
   FileReadResult,
   ProjectKind,
@@ -47,6 +49,9 @@ export const Channels = {
   providerGetFileDiff: 'provider:get-file-diff',
   providerGetDiffBundle: 'provider:get-diff-bundle',
   providerReadFile: 'provider:read-file',
+  /** Bounded binary-preview read (base64 bytes, size-capped, no range) — see
+   *  WorkspaceProvider.readFileBytes in shared/providers/types.ts. */
+  providerReadFileBytes: 'provider:read-file-bytes',
   providerStat: 'provider:stat',
   providerListDir: 'provider:list-dir',
   providerResolvePath: 'provider:resolve-path',
@@ -64,6 +69,13 @@ export const Channels = {
   /** Resolve the branch-point (merge-base between HEAD and parent branch) for a
    *  worktree; null when no parent can be resolved (orphan, unrelated histories). */
   providerResolveBranchPoint: 'provider:resolve-branch-point',
+
+  /** Bounded export (Download capability): opens a native Save-as dialog in
+   *  main and streams the source file's bytes to the chosen destination. The
+   *  one write this app performs outside the embedded terminal — see
+   *  WorkspaceProvider.exportFile in shared/providers/types.ts. Not part of
+   *  the `provider:*` group: it is never proxied through window.api.provider. */
+  filesSaveAs: 'files:save-as',
 
   terminalOpen: 'terminal:open',
   terminalWrite: 'terminal:write',
@@ -332,6 +344,10 @@ export interface IpcContract {
     request: { path: string; opts?: FileReadOptions; projectId?: string };
     response: { file: FileReadResult };
   };
+  [Channels.providerReadFileBytes]: {
+    request: { path: string; opts?: FileBytesOptions; projectId?: string };
+    response: { bytes: FileBytesResult };
+  };
   [Channels.providerStat]: { request: { path: string; projectId?: string }; response: { stat: StatResult } };
   [Channels.providerListDir]: {
     request: { dirPath: string; projectId?: string };
@@ -374,6 +390,11 @@ export interface IpcContract {
   [Channels.providerResolveBranchPoint]: {
     request: { worktreePath: string; projectId?: string };
     response: { branchPoint: BranchPoint | null };
+  };
+
+  [Channels.filesSaveAs]: {
+    request: { path: string; worktreePath?: string; projectId?: string; suggestedName?: string };
+    response: { savedPath: string | null };
   };
 
   [Channels.terminalOpen]: { request: { opts: TerminalOpenOptions }; response: { terminalId: string } };

@@ -7,6 +7,7 @@ import { tokenizeLines, type TokenLine } from './highlight/highlighter';
 import { CodeLineTokens } from './highlight/CodeTokens';
 import { LineNoteThread, lineNotesByLine, useNotesStore } from '../notes';
 import { pickTokenLine } from './diffTokens';
+import { BinaryPlaceholder, type BinaryPlaceholderReason } from './BinaryPlaceholder';
 
 /** Above this content length a side is left un-highlighted (rendered plain). */
 const SIZE_LIMIT = 256 * 1024;
@@ -42,6 +43,36 @@ interface DiffViewProps {
    *  Both come from the provider's one-call diff bundle, so DiffView no longer
    *  issues its own readFile round trips. */
   oldContent?: string | null;
+  /**
+   * ContentViewer/RawFile's independently-confirmed classification of this
+   * same path (see RawFile's `onBinaryConfirmed` doc comment), supplied when
+   * the patch text itself (`parsed.binary`, below) carries NO signal at all —
+   * e.g. an unmodified or untracked binary file, whose diff is empty (see
+   * parsePatch.ts's `binary` field doc comment). Lets that empty-diff case
+   * show the SAME graceful placeholder as a git-confirmed binary change,
+   * instead of the uninformative `emptyHint`. DiffView makes no provider
+   * calls of its own either way — this is purely a prop.
+   */
+  knownReason?: BinaryPlaceholderReason;
+  /**
+   * File size in bytes for the generic-binary Diff placeholder (see
+   * BinaryPlaceholder's `size` prop doc comment), for EITHER the
+   * `parsed.binary` branch or the `knownReason` branch below. Sourced SOLELY
+   * from RawFile's own already-fetched `readFile` result, whenever RawFile
+   * has independently mounted and confirmed this path (the dominant case —
+   * see RawFile's `onBinaryConfirmed` doc comment and ContentViewer.tsx's
+   * `rawFileSize`). `knownSize` is undefined whenever RawFile hasn't
+   * mounted — e.g. a `kind: 'change'` selection where Diff is the first/only
+   * mode ever shown, so RawFile never mounts at all. ContentViewer
+   * deliberately does NOT fall back to a separate provider call to fill that
+   * gap (see `rawFileSize`'s doc comment in ContentViewer.tsx for why — an
+   * earlier version's fallback fired a real, if capped, read on remote just
+   * to render a placeholder, and had no gate on which view was actually
+   * rendering, so an unrelated changed-image diff triggered an extra,
+   * unconsumed read too); DiffView/BinaryPlaceholder simply render without a
+   * size in that case, which they already do gracefully.
+   */
+  knownSize?: number;
 }
 
 export function DiffView({
@@ -52,6 +83,8 @@ export function DiffView({
   wrap = false,
   newContent = null,
   oldContent = null,
+  knownReason,
+  knownSize,
 }: DiffViewProps): JSX.Element {
   const parsed = useMemo(() => parsePatch(patch), [patch]);
   const theme = useSettingsStore((s) => s.settings.theme);
@@ -103,7 +136,38 @@ export function DiffView({
     };
   }, [filePath, theme, oldContent, newContent]);
 
+  if (parsed.binary) {
+    // git reported its binary-diff summary line — no hunks were ever
+    // possible for this file. `changed` is always true here: this branch
+    // only runs when parsePatch found the "Binary files … differ" line,
+    // which only appears when git detected an actual change (see
+    // parsePatch.ts's `binary` field doc comment). `knownSize` (see this
+    // component's prop doc comment above) is undefined whenever RawFile
+    // hasn't independently mounted and confirmed this path's size —
+    // BinaryPlaceholder renders gracefully either way.
+    return <BinaryPlaceholder mode="diff" reason="binary" changed size={knownSize} />;
+  }
+
   if (parsed.hunks.length === 0) {
+    if (knownReason) {
+      // The patch itself carries no signal at all — this file is unmodified,
+      // untracked, or otherwise has an empty diff (see parsePatch.ts's
+      // `binary` field doc comment) — but ContentViewer/RawFile has
+      // independently confirmed (from RawFile's own `readFile` result — see
+      // this component's `knownReason` prop doc comment above) that this
+      // path isn't plain text. Surface THAT instead of the uninformative
+      // `emptyHint` below: this is what fixes an unmodified/untracked binary
+      // file opened from the Explorer, previously the dominant real-world
+      // case this issue's placeholder work never reached (reclassification
+      // alone makes Diff the DEFAULT for such a file — see
+      // ContentViewer.tsx's `effectiveMode` — so this path is not merely an
+      // edge case reachable by manual navigation). `changed` is deliberately
+      // OMITTED here (never asserted true or false): unlike the
+      // `parsed.binary` branch above, there is no git signal that this file
+      // actually differs from the baseline — see BinaryPlaceholder's
+      // `changed` prop doc comment.
+      return <BinaryPlaceholder mode="diff" reason={knownReason} size={knownSize} />;
+    }
     return (
       <div style={{ padding: 16, color: 'var(--fg-dim)' }}>
         {emptyHint ?? 'No textual diff.'}

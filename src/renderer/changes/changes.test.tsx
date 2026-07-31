@@ -3,6 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import type { Changeset, FileChange, WorktreeRecord } from '@shared/ipc/channels';
+import {
+  COPY_ABSOLUTE_LABEL,
+  COPY_RELATIVE_LABEL,
+  DOWNLOAD_LABEL,
+  DOWNLOAD_UNAVAILABLE_TITLE,
+} from '@renderer/files/rowMenu';
 
 // `cockpit` resolves `window.api` at module-import time, so the bridge mock must
 // be installed before the panel/store modules are dynamically imported.
@@ -46,6 +52,7 @@ function installApi(overrides: {
   listWorktrees?: ReturnType<typeof vi.fn>;
   getChangeset?: ReturnType<typeof vi.fn>;
   onWatch?: ReturnType<typeof vi.fn>;
+  saveAs?: ReturnType<typeof vi.fn>;
 } = {}) {
   const api = {
     provider: {
@@ -65,10 +72,25 @@ function installApi(overrides: {
     events: {
       onWatch: overrides.onWatch ?? vi.fn(() => () => {}),
     },
+    files: {
+      saveAs: overrides.saveAs ?? vi.fn().mockResolvedValue(null),
+    },
   };
   (globalThis as unknown as { window: { api: unknown } }).window.api = api;
   return api;
 }
+
+/** Stub `navigator.clipboard.writeText`; returns the spy. */
+function installClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  return writeText;
+}
+
+/** Flush every pending microtask (the copy/download `.then()` chains) — same
+ *  pattern as rowMenu.test.tsx, needed to prove a silent (non-)outcome rather
+ *  than racing a `waitFor` that would pass on its first, too-early check. */
+const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 async function loadModules() {
   vi.resetModules();
@@ -199,6 +221,176 @@ describe('ChangesPanel', () => {
     });
     await screen.findByText('.beads/issues.jsonl');
     expect(screen.getByText('2/2')).toBeInTheDocument();
+  });
+});
+
+describe('row context menu', () => {
+  it('opens on a context-menu event with exactly the three expected labels', async () => {
+    installApi();
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/new.ts');
+    fireEvent.contextMenu(row);
+
+    expect(await screen.findByText(COPY_ABSOLUTE_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(COPY_RELATIVE_LABEL)).toBeInTheDocument();
+    expect(screen.getByText(DOWNLOAD_LABEL)).toBeInTheDocument();
+  });
+
+  it('Copy path (relative) copies file.newPath verbatim', async () => {
+    installApi();
+    const writeText = installClipboard();
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/new.ts');
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText(COPY_RELATIVE_LABEL));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('src/new.ts'));
+  });
+
+  it('Copy path (fully qualified) copies the path resolved under the active worktree', async () => {
+    installApi();
+    const writeText = installClipboard();
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice(); // default worktree is '/repo/main' (makeWorktree())
+
+    const row = await screen.findByText('src/new.ts');
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText(COPY_ABSOLUTE_LABEL));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('/repo/main/src/new.ts'));
+  });
+
+  it('Download calls the saveAs bridge with the row path and the active worktree', async () => {
+    const saveAs = vi.fn().mockResolvedValue('/Users/me/Downloads/new.ts');
+    installApi({ saveAs });
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/new.ts');
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText(DOWNLOAD_LABEL));
+
+    await waitFor(() =>
+      expect(saveAs).toHaveBeenCalledWith('src/new.ts', {
+        worktreePath: '/repo/main',
+        projectId: undefined,
+        suggestedName: 'new.ts',
+      }),
+    );
+  });
+
+  it('disables Download on a deleted row with an explanatory title, leaving both copy actions enabled', async () => {
+    installApi();
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/gone.ts');
+    fireEvent.contextMenu(row);
+
+    const download = await screen.findByText(DOWNLOAD_LABEL);
+    expect(download).toHaveAttribute('aria-disabled', 'true');
+    expect(download).toHaveAttribute('title', DOWNLOAD_UNAVAILABLE_TITLE);
+
+    const copyAbsolute = screen.getByText(COPY_ABSOLUTE_LABEL);
+    const copyRelative = screen.getByText(COPY_RELATIVE_LABEL);
+    expect(copyAbsolute).not.toHaveAttribute('aria-disabled', 'true');
+    expect(copyRelative).not.toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('does not change the selection, content selection, or active-row highlight on right-click', async () => {
+    installApi();
+    const { ChangesPanel, useChangesStore } = await loadModules();
+    const { useContentSelection } = await import('@renderer/content');
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/new.ts');
+    const rowEl = row.closest('div')!;
+    const classNameBefore = rowEl.className;
+    expect(useChangesStore.getState().byProject[PROJECT]!.selectedPath).toBeNull();
+    expect(useContentSelection.getState().selections[PROJECT] ?? null).toBeNull();
+
+    fireEvent.contextMenu(row);
+    // Let the menu open (and any microtasks settle) before asserting nothing moved.
+    await screen.findByText(DOWNLOAD_LABEL);
+
+    expect(useChangesStore.getState().byProject[PROJECT]!.selectedPath).toBeNull();
+    expect(useContentSelection.getState().selections[PROJECT] ?? null).toBeNull();
+    expect(rowEl.className).toBe(classNameBefore);
+    expect(rowEl.className).not.toMatch(/border-accent/);
+  });
+});
+
+describe('row menu feedback (D3, wired per local_repo_explorer-dpqo)', () => {
+  it('shows a transient confirmation in the toolbar after a successful copy', async () => {
+    installApi();
+    const writeText = installClipboard();
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/new.ts');
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText(COPY_RELATIVE_LABEL));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('src/new.ts'));
+    expect(await screen.findByRole('status')).toHaveTextContent('Copied relative path');
+  });
+
+  it('shows a transient confirmation after a completed download', async () => {
+    const saveAs = vi.fn().mockResolvedValue('/Users/me/Downloads/new.ts');
+    installApi({ saveAs });
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/new.ts');
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText(DOWNLOAD_LABEL));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Downloaded');
+  });
+
+  it('stays silent on a canceled download (saveAs resolves null)', async () => {
+    const saveAs = vi.fn().mockResolvedValue(null);
+    installApi({ saveAs });
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/new.ts');
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText(DOWNLOAD_LABEL));
+
+    await waitFor(() => expect(saveAs).toHaveBeenCalled());
+    await flush();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('stays silent on a failed copy (clipboard write rejects)', async () => {
+    installApi();
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const row = await screen.findByText('src/new.ts');
+    fireEvent.contextMenu(row);
+    fireEvent.click(await screen.findByText(COPY_RELATIVE_LABEL));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('src/new.ts'));
+    await flush();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 });
 

@@ -169,8 +169,13 @@ flowchart TB
   `onStateChange`), one-shot `exec` (lenient: returns `{stdout, stderr, code}`,
   never rejects on non-zero), long-lived `execStream` duplex for the helper RPC
   (the existing `RpcStream` shape, so `rpcClient.ts` is untouched), `openPty`
-  (control-mode) and `openShell` (terminals) PTY channels, and a single-SFTP-session
-  file-provisioning surface (`uploadExecutable`/`mkdirp`/`exists`).
+  (control-mode) and `openShell` (terminals) PTY channels, a single-SFTP-session
+  file-provisioning surface (`uploadExecutable`/`mkdirp`/`exists`), and two
+  per-call SFTP byte-read primitives — `stat(remotePath)` and the range-capable
+  `createReadStream(remotePath, { start?, end? })`, the Download capability's
+  remote byte source (see "Bounded File Export (Download) & Row Context
+  Menus"). No ssh2 type leaks through any of these: `createReadStream` returns
+  a Node `Readable`, `stat` a plain `StatResult`.
 - **Raw-byte channel contract (typed):** `PtyChannel`/`DuplexChannel` `onData` is
   typed `(b: Uint8Array) => void` and delivers wire bytes undecoded, making the
   control-mode raw-byte invariant a typed contract end to end (see the byte
@@ -494,6 +499,16 @@ List, Tree, Graph, and TaskDetail are pure derivations of it.
 
 - **`WorkspaceProvider`** ([src/shared/providers/types.ts](../src/shared/providers/types.ts))
   is the contract every panel depends on and both providers implement.
+- **Bounded byte paths (one read, one write).** `WorkspaceProvider.readFileBytes`
+  (IPC channel `provider:read-file-bytes`) is the single renderer-facing byte
+  READ: stat-gated at `FILE_BYTES_CAP` (10 MiB — one authoring site,
+  [src/shared/providers/fileBytesCap.ts](../src/shared/providers/fileBytesCap.ts)),
+  whole-file base64 over IPC, no `ref`, no range; the main handler whitelists
+  `{ worktreePath }` explicitly rather than forwarding the renderer's options
+  wholesale. `WorkspaceProvider.exportFile` (channel `files:save-as`) is the
+  single byte WRITE, OUT of the repository to the app host, streaming with no
+  bytes over IPC. See "Content Modes & Bounded Binary-Preview Reads" and
+  "Bounded File Export (Download) & Row Context Menus".
 - **Beads read/write split.** Beads has two distinct paths behind the provider.
   **Reads** (`getTaskGraph`/`getTask`) are read-only — local opens the beads
   SQLite DB `readonly`/`query_only` (open-read-close), remote parses
@@ -841,10 +856,451 @@ before (project-root reads). Covered by the linked-worktree case in
 `electron/main/providers/local/local.test.ts`, the `remote-helper` `*WorktreePath`
 Go tests, and `worktreeStore.test.ts`.
 
+## Bounded File Export (Download) & Row Context Menus
+
+The Changes and Explorer panels offer a per-row context menu (right-click, or
+the platform context-menu key) with three actions — **Copy path (fully
+qualified)**, **Copy path (relative)**, and **Download** — and Download is the
+application's one **bounded file-export write path**: it streams a project
+file's bytes OUT to a user-chosen destination on the app host via a native
+Save-as dialog.
+
+**Invariant — the read-only model stands.** Repository access is read-only —
+the embedded terminal is the only write path INTO a project.
+`WorkspaceProvider.exportFile` is the one deliberate, bounded exception: it
+copies a file OUT of the repository to a user-chosen destination on the app
+host (the Download capability), at explicit user request. It never writes into
+the repository, local or remote, and it is not license to reopen the read-only
+model. (The `WorkspaceProvider` header doc comment in
+[src/shared/providers/types.ts](../src/shared/providers/types.ts) carries this
+same statement; the two must not drift.)
+
+```mermaid
+---
+config:
+  layout: elk
+---
+flowchart LR
+  Menu["Row menu: Download"]
+  IPC["files:save-as"]
+  H["main: save dialog"]
+  EF["provider.exportFile"]
+  LS["local fs stream"]
+  RS["SFTP stream"]
+  W["temp → rename writer"]
+  Menu -. typed IPC .-> IPC --> H --> EF
+  EF --> LS --> W
+  EF --> RS --> W
+```
+
+### Why `readFile` is not the byte source
+
+`provider.readFile` is the **text preview/diff channel**, text-only by
+construction: the local implementation (`getFile` in
+[electron/main/git/files.ts](../electron/main/git/files.ts)) returns
+`content: null` for binary content (`looksBinary`) and for files over the
+preview `maxBytes` cap, and the remote Go helper's `readFile` RPC returns a
+JSON string hard-capped at 2 MiB (`maxReadFileBytes` in
+[remote-helper/commands.go](../remote-helper/commands.go)). Raising the cap
+does not make it binary-safe — that channel exists to feed text preview/diff
+rendering, and a download built on it would silently save empty or corrupt
+output for exactly the files most worth downloading. The text preview path
+(`readFile`/`FileReadResult`/`getDiffBundle`) therefore
+stays text-only, and there are exactly TWO bounded, deliberately-shaped
+exceptions to it — one in each direction, not to be mistaken for each other:
+
+- **`exportFile` — the bounded byte WRITE (Download).** Whole file, uncapped,
+  streamed OUT of the repository to a user-chosen destination on the app
+  host; no file bytes ever cross IPC. This section describes it.
+- **`readFileBytes` — the bounded byte READ (in-app preview).** Whole file,
+  refused (never truncated) above a 10 MiB cap, delivered INTO the renderer
+  as base64 over IPC — the one channel that intentionally carries file bytes
+  across IPC. See "Content Modes & Bounded Binary-Preview Reads".
+
+### Byte sources and the shared writer (main-only)
+
+- **Remote — SFTP on `RemoteTransport`.** The transport boundary gained two
+  byte-read primitives — `stat(remotePath)` and
+  `createReadStream(remotePath, { start?, end? })`
+  ([transportTypes.ts](../electron/main/providers/remote/transportTypes.ts)) —
+  implemented by `Ssh2Transport`
+  ([transport.ts](../electron/main/providers/remote/transport.ts)) over ssh2's
+  built-in SFTP client. The single-ssh2-import boundary is preserved (the
+  ESLint `no-restricted-imports` ban is unchanged), no ssh2 type leaks through
+  the interface (`createReadStream` returns a Node `Readable`, `stat` a plain
+  `StatResult`), and both are selectable through the same swap seam as every
+  other transport method (`createRemoteTransport()` in
+  [transportFactory.ts](../electron/main/providers/remote/transportFactory.ts) —
+  consumers depend only on the interface). SFTP channel lifecycle: a fresh
+  `conn.sftp()` per call, ended exactly once — `stat` ends it in its callback;
+  `createReadStream` wires a once-guarded release to BOTH `'close'` and
+  `'error'` on the returned stream, so normal EOF, early destroy, a read
+  failure, and a transport disconnect mid-stream all release the channel.
+  `stat` resolves `{ exists: false, … }` for a missing path rather than
+  rejecting. This path **bypasses the helper RPC entirely** (no
+  `remote-helper` Go change): a file larger than the helper's 2 MiB cap
+  downloads byte-identically. `stat` ships as part of the primitive pair;
+  Download itself calls only `createReadStream`, always for the whole file.
+- **Local — no new abstraction.** `localExportFile`
+  ([electron/main/providers/local/export.ts](../electron/main/providers/local/export.ts))
+  streams via Node stdlib `fs.createReadStream`; there is deliberately no
+  local mirror of the transport interface.
+- **Worktree-parametrized base.** Both sides resolve the source exactly like
+  every other provider read: base = `worktreePath || project root` (local
+  `rootPath`, remote `remotePath`), with an already-absolute path passed
+  through unchanged (the Explorer root-browse shape).
+- **One shared writer.** Both transports funnel their stream through
+  `writeStreamToDest`
+  ([electron/main/providers/exportWrite.ts](../electron/main/providers/exportWrite.ts)):
+  `pipeline` into a same-directory temp file, atomically renamed into place
+  only on success; on ANY failure the temp is best-effort unlinked and the
+  error rethrown — the destination never holds partial/truncated content, and
+  the whole file is never buffered in memory.
+- **Main-only dialog + write; no bytes over IPC.** The renderer sends a
+  descriptor over one channel, `files:save-as`
+  ([src/shared/ipc/channels.ts](../src/shared/ipc/channels.ts); renderer shape
+  `files.saveAs` in [api.ts](../src/shared/ipc/api.ts) — deliberately not part
+  of the `provider:*` group); main resolves the provider **before** showing
+  the dialog (so a gone session fails fast instead of flashing a dialog),
+  opens `dialog.showSaveDialog` with the source basename prefilled, streams on
+  confirm, and returns only the saved path — `null` on cancel, with nothing
+  written. The preload bridge only invokes the typed channel; no `fs`, `path`,
+  or `dialog` is exposed to preload or the renderer, and no file bytes ever
+  cross IPC.
+
+### Future streaming (deferred; the range capability)
+
+`RemoteTransport.createReadStream(path, { start?, end? })` is deliberately
+**range-capable** (inclusive byte offsets, `fs.createReadStream` semantics)
+even though Download never passes a range. The range parameters exist for a
+FUTURE, separately proposed capability — viewing a large remote media file
+in-app via range-based streaming/seek — because retrofitting range support
+onto the transport boundary later is more disruptive than shaping the
+primitive correctly now (ssh2's `sftp.createReadStream` supports
+`{start, end}` natively, so it costs nothing today). Streaming/media playback
+was an explicit **non-goal** of the work that introduced the primitive: there
+is no streaming UI, no media player, no HTTP range proxy, no renderer-facing
+range API, and nothing in the repository passes a range. Do not strip
+`start`/`end` as unused, and do not build a range consumer ad hoc — a future
+streaming proposal MUST start from this primitive rather than inventing a
+second remote byte path.
+
+### Row context menus (Changes + Explorer)
+
+The substrate is one shared module,
+[src/renderer/files/rowMenu.ts](../src/renderer/files/rowMenu.ts)
+(`buildFileRowMenuItems(descriptor, ctx)` → `MenuItemDef[]` for the Radix
+`ContextMenu`; `Row` is `forwardRef` so it serves directly as the
+`Trigger asChild` target). It lives in `renderer/files/` — a domain-aware
+sibling of the presentation-only `ui/` package, following the `worktree/`
+precedent. Path semantics:
+
+- **Copy path (relative)** copies the row's path relative to the selected
+  worktree/project root, verbatim (Changes: `file.newPath`, the same string
+  the row displays; Explorer in-project: `entry.path`).
+- **Copy path (fully qualified)** copies `resolveAbsolutePath(...)`: base =
+  `activeWorktree || project root`, POSIX join (`absoluteUnder`, whose single
+  home is now this module). For a REMOTE project the root is
+  `RemoteConnectionSpec.remotePath`, so "fully qualified" means the absolute
+  path **on the remote host** — the useful value; there is no local file at
+  that path, and it must not be "fixed" into a local path. An already-absolute
+  row path (root browse) passes through unchanged.
+- **Download** calls `files.saveAs(relPath, { worktreePath, projectId, suggestedName: basename })`;
+  main re-resolves the path exactly like every other provider read.
+
+Shipped disabled-state rules — disabled with an explanatory `title`, never
+omitted, so the menu's shape (and the capability's discoverability) stays
+stable across row types:
+
+- **Directories** (Explorer `DirNode`): Download disabled ("Directories cannot
+  be downloaded"); both copy actions stay enabled. No directory archiving.
+- **Deleted Changes rows** (`status === 'deleted'`): Download disabled ("This
+  file cannot be downloaded" — no working-tree bytes to fetch); both copy
+  actions stay enabled.
+- **Root-browse rows** (Explorer `Root (/)` mode, files AND directories):
+  "Copy path (relative)" disabled ("This path is outside the project") — a
+  project-relative path is semantically undefined outside the project. The
+  fully-qualified copy and (for files) Download stay enabled.
+
+Right-clicking never changes state: it does not select a Changes file, move
+the content selection, toggle Explorer expansion, or consume a reveal target.
+Action feedback is the substrate's `useRowMenuFeedback` transient message: the
+Explorer renders it as a `role="status"` toolbar span ("Copied
+fully-qualified path" / "Copied relative path" / "Downloaded"); the Changes
+panel does not yet render it (tracked as a follow-up,
+`local_repo_explorer-dpqo`). A canceled save dialog is a clean no-op; a failed
+download is logged to the diagnostics log (`rowMenu` scope) rather than
+silently dropped; a failed clipboard write is a silent no-op (the NotesPanel
+precedent).
+
+### Regression Check
+
+On a LOCAL and a REMOTE project, download (a) a UTF-8 text file, (b) a binary
+file, and (c) a file larger than 2 MiB: each saved file must be byte-identical
+(`shasum`) to its source — (c) proves the remote helper RPC is not on this
+path. Cancel must write nothing and resolve `null`. Abort a transfer
+mid-stream: the destination must not exist with partial content (the temp file
+is unlinked). With a linked worktree selected, a branch-only file must
+download that worktree's bytes. In the menus: a deleted Changes row and a
+directory row disable only Download (with their titles), a root-browse row
+disables only the relative copy, and right-click changes no
+selection/expansion. Covered by `exportWrite.test.ts`, the export cases in
+`local.test.ts`, the stubbed-SFTP cases in `transport.conformance.test.ts`,
+the factory-level interface case in `remote.test.ts`, `rowMenu.test.tsx`, and
+the panel cases in `changes.test.tsx` / `explorer.test.tsx`.
+
+## Content Modes & Bounded Binary-Preview Reads
+
+The Content panel presents every file through one uniform mode model: **Diff**,
+**Rendered**, and — text-like content only — **Raw**. Which modes a file
+offers, which is the default, and which component renders each combination are
+all decided in a single authoring site,
+[src/renderer/content/modeSwitcher.tsx](../src/renderer/content/modeSwitcher.tsx),
+replacing the old per-extension mode values (`'image'`, `'html-preview'`) and
+the hand-branched render blocks that used to live in `ContentViewer`. The
+model's companion is the application's one **bounded byte READ**,
+`WorkspaceProvider.readFileBytes` — the renderer-facing binary-preview channel
+that the image views consume — described below in the same terms the Download
+work framed its bounded WRITE exception.
+
+### Class model and (class, mode) dispatch (single authoring site)
+
+`classOf(path)` is a **pure, path-only** classifier producing a `ContentClass`
+(`markdown | html | image | text | generic-binary`); `modesFor` computes mode
+availability, `defaultModeFor` the default, and `viewFor` the
+`(class, mode) → component` lookup (`VIEW_DISPATCH`). `ContentViewer`
+dispatches on `viewFor`'s result — no other module branches on extension or
+mode name. Shipped matrix (`ImageView` and `BinaryPlaceholder` are new; every
+other cell reuses a pre-existing component, and no new text viewer was
+introduced):
+
+| Class            | Diff                              | Rendered                         | Raw               |
+| ---------------- | --------------------------------- | -------------------------------- | ----------------- |
+| `markdown`       | `DiffView`                        | `RenderedMarkdown`               | `RawFile` (plain) |
+| `html`           | `DiffView`                        | `HtmlPreview` (sandboxed iframe) | `RawFile` (plain) |
+| `text`           | `DiffView`                        | `RawFile` (Shiki-highlighted)    | `RawFile` (plain) |
+| `image`          | `ImageCompare` (before/after)     | `ImageView` (working-tree image) | —                 |
+| `generic-binary` | `DiffView` (graceful placeholder) | `RawFile` (graceful placeholder) | —                 |
+
+An `external-file` selection (out-of-project, no git baseline) never offers
+Diff; its image/generic-binary classes fall back to Raw only (a deliberate
+carve-out preserved from the pre-epic behavior — see `modesFor`'s doc
+comment). Defaults: markdown/html → Rendered; image/generic-binary → Diff
+(the type-appropriate comparison); text → Diff for a Changes row, Raw for an
+Explorer file; external files → Raw.
+
+### What Diff / Rendered / Raw mean
+
+- **Diff is a real textual diff only for text-like classes.** For images it is
+  the type-appropriate comparison (`ImageCompare`); for generic-binary it is
+  the graceful cannot-compare placeholder (below) — never a fake byte-level
+  textual diff.
+- **Rendered is the nicest available presentation per class**; **Raw is the
+  plainest** (a settled rule — see `RawFile.tsx`'s doc comment). For the
+  `text` class both dispatch to the SAME `RawFile` component and the SAME
+  single read; a `highlight` prop (`true` for Rendered, `false` for Raw)
+  decides whether Shiki tokenization runs at all, so toggling never
+  re-fetches.
+- **Raw exists only for text-like classes.** An image or a confirmed binary
+  file has no meaningful plain-text presentation — a byte dump helps no one —
+  so `CLASS_MODES` omits Raw for both rather than offering a junk view.
+- **HTML's Raw is plain text — a deliberate behavior change.** Before this
+  model, `.html` had a single highlighted-source view. Now Rendered is the
+  sandboxed `HtmlPreview` iframe and Raw is plain text via `RawFile`
+  (`highlight` is false), so HTML has no highlighted-source mode at all. This
+  is the faithful reading of Rendered-nicest/Raw-plainest, not a regression;
+  `html` stays in the highlight language registry solely for `DiffView`'s
+  diff sides. (Markdown was never in the registry, so its Raw was already
+  plain.)
+
+### Generic-binary is a RUNTIME reclassification (the classifier stays pure)
+
+An extension list can enumerate markdown/html/image reliably but can never
+enumerate every binary format, so `classOf` does not try: it **never** returns
+`'generic-binary'` — an unrecognized extension classifies as `'text'`
+("unknown at classification time"). True binary-ness is resolved at runtime by
+the component that already reads the file: `RawFile`'s one existing `readFile`
+call reports its outcome upward via `onBinaryConfirmed`
+(`RawFileConfirmation`: `text | binary | too-large | missing`, with the size
+it already has), and `ContentViewer` derives an **effective class**
+(`'generic-binary'` once `binary` is confirmed) and an **effective mode**
+(re-derived synchronously in the same render when the current mode falls out
+of the reclassified availability — no placeholder flash). Reclassification
+changes only availability/default (drops Raw, defaults to Diff); the
+dispatch cells reuse the same `DiffView`/`RawFile` components, which render
+the shared `BinaryPlaceholder`
+([src/renderer/content/BinaryPlaceholder.tsx](../src/renderer/content/BinaryPlaceholder.tsx))
+— one component parameterized by `(mode, reason: binary|too-large|missing,
+size?, changed?)`, pointing at the Download escape hatch (see "Bounded File
+Export (Download) & Row Context Menus") for the binary and too-large reasons.
+Diff mode additionally gets git's own signal: a patch carrying the
+"Binary files … differ" summary line (`parsePatch`'s `binary` field) renders
+the placeholder with `changed: true`; an unmodified/untracked binary — whose
+patch is empty and carries no signal — is covered by `RawFile`'s confirmation
+threaded through as `DiffView`'s `knownReason`/`knownSize` props.
+
+Two deliberate boundaries of this mechanism, both settled after review:
+
+- **No extra read, ever.** Classification never triggers a new
+  `stat`/`readFile`/`readFileBytes` call — the signal is exclusively the
+  outcome of the read `RawFile` was already going to make. An earlier version
+  added one fallback `provider.readFile` purely to put a size on the Diff
+  placeholder; it was removed outright because it fired a real (if capped)
+  byte transfer on remote just to render a placeholder and, ungated by view,
+  also fired an unconsumed read for every changed image. The size is simply
+  omitted when `RawFile` never mounted (`BinaryPlaceholder` renders gracefully
+  without it). See `ContentViewer.tsx`'s `rawFileSize` doc comment for the
+  full history; do not reintroduce a fallback.
+- **Remote binary detection works too.** `RemoteProvider.readFile` derives a
+  real `isBinary` from the Go helper's own NUL-byte sniff (mirroring
+  `looksBinary`'s bound and semantics) and, critically, nulls `content` when
+  binary — `toFileReadResult` in
+  [electron/main/providers/remote/index.ts](../electron/main/providers/remote/index.ts)
+  mirrors local's `getFile` contract exactly, so `RawFile`/`HtmlPreview` reach
+  their `isBinary` branch on remote instead of always taking the
+  `content !== null` text path first (fixed in `local_repo_explorer-r3s6`,
+  which also corrected `sizeBytes` to the helper's true stat/blob-length
+  rather than a value derived from the — possibly UTF-8-mangled —
+  content string). Image previews were unaffected throughout (the image class
+  is extension-based and reads via `readFileBytes`, not this path).
+
+### The bounded binary-preview read (`readFileBytes`)
+
+**The read-only model is unchanged.** Repository access stays read-only, and
+`exportFile` remains the one deliberate, bounded WRITE exception (see
+"Bounded File Export (Download) & Row Context Menus" and the
+`WorkspaceProvider` header doc comment in
+[src/shared/providers/types.ts](../src/shared/providers/types.ts) — the two
+statements must not drift). `readFileBytes` is a READ: it moves bytes INTO
+the renderer for preview and never writes anywhere.
+
+`WorkspaceProvider.readFileBytes(path, opts?) → FileBytesResult`
+(`{ bytesBase64, sizeBytes, exists, reason }`,
+`reason: 'missing' | 'too-large' | 'is-dir' | null`) is the general-purpose
+byte source for in-app previews — images today, other binary types (audio,
+PDF, …) later with no signature change ("file bytes" names the read, not a
+content class). Contract, as shipped:
+
+- **Stat-first, refuse — never truncate.** Both transports stat the resolved
+  path first and refuse with metadata only (`reason: 'too-large'`,
+  `sizeBytes` set, no bytes) above the cap. A truncated prefix is useless to
+  every decode-dependent consumer (a half-read PNG does not render), so
+  refusal is both the correct product behavior and the boundary-preserving
+  one. A missing path resolves `{ exists: false, reason: 'missing' }` rather
+  than rejecting.
+- **One cap authoring site.** `FILE_BYTES_CAP` (10 MiB) lives in
+  [src/shared/providers/fileBytesCap.ts](../src/shared/providers/fileBytesCap.ts)
+  (the `TERMINAL_SCROLLBACK` single-site precedent) with its full
+  justification: it bounds a one-shot IPC preview payload, covers virtually
+  every repo-committed image, and deliberately exceeds the remote helper's
+  2 MiB text-read cap — a remote binary between 2 and 10 MiB previews
+  correctly over this primitive when the helper RPC cannot serve it at all.
+  It is not a call-site parameter anywhere (a cap parameter would be a bypass
+  seam). Anything larger uses the unbounded Download escape hatch.
+- **Byte sources.** Local: `localReadFileBytes`
+  ([electron/main/providers/local/readFileBytes.ts](../electron/main/providers/local/readFileBytes.ts)),
+  a worktree-aware `localStat` + `fs` read. Remote:
+  `readFileBytesOverTransport`
+  ([electron/main/providers/remote/index.ts](../electron/main/providers/remote/index.ts))
+  over `RemoteTransport` SFTP (`stat` + `createReadStream`) — **never** the
+  text-only helper RPC. Both resolve base = `worktreePath || project root`,
+  exactly like every other provider read.
+- **Base64 over IPC.** The one channel that intentionally carries (capped)
+  file bytes across IPC: `provider:read-file-bytes` →
+  `window.api.provider.readFileBytes`
+  ([src/shared/ipc/channels.ts](../src/shared/ipc/channels.ts) /
+  [api.ts](../src/shared/ipc/api.ts)). Worst-case renderer allocation for a
+  just-under-cap file is ~13.4 MiB — a tolerable one-off, not a steady
+  footprint. An existing 0-byte file yields `bytesBase64: ''` (falsy but
+  valid): consumers branch on `reason === null`, never on `bytesBase64`
+  truthiness.
+- **No range, ever.** This is a whole-file read gated by the prior size
+  check. `RemoteTransport.createReadStream`'s optional `{start, end}` remains
+  reserved for the separately-proposed future streaming capability (see
+  "Future streaming (deferred; the range capability)" — that non-goal is
+  reinforced, not weakened, by this primitive): `readFileBytesOverTransport`
+  never passes a range, a bounded preview needs none (refuse-over-cap makes a
+  partial read pointless), and a conformance test pins the SFTP fake's
+  recorded stream opts to `{start: undefined, end: undefined}`.
+- **No `ref`, by construction.** `FileBytesOptions` omits `ref` entirely (not
+  merely leaves it undefined): a git-object read is a different byte source
+  (git plumbing) than this primitive's fs/SFTP read, and supporting it now
+  would force the remote path through the forbidden text-only helper RPC or a
+  new exec surface. The IPC handler enforces this at the boundary by
+  constructing `{ worktreePath }` explicitly instead of forwarding the
+  renderer's `opts` wholesale, so a `ref` cannot be smuggled through even by
+  a malformed call.
+
+```mermaid
+---
+config:
+  layout: elk
+---
+flowchart LR
+  UI["useImageBytes"]
+  IPC["provider:read-file-bytes"]
+  RB["provider.readFileBytes"]
+  ST["stat gate (10 MiB)"]
+  LF["local fs read"]
+  SF["SFTP read"]
+  B64["base64 reply"]
+  UI -. typed IPC .-> IPC --> RB --> ST
+  ST --> LF --> B64
+  ST --> SF --> B64
+```
+
+### Image views and the baseline-side decision
+
+The image bug this epic fixed: the old image compare's `makeDataUrl` stub
+returned `null` unconditionally, so BOTH panes silently read "(unavailable)"
+— no image ever rendered. Now `useImageBytes`
+([src/renderer/content/useImageBytes.ts](../src/renderer/content/useImageBytes.ts))
+fetches working-tree bytes via `readFileBytes` and builds a **`data:` URL**
+(`data:<mime>;base64,<bytes>` — the bytes already arrive base64-encoded, so
+there is no Blob/`createObjectURL` indirection and nothing to revoke); a
+small local extension→MIME map is the one place deciding which extensions
+render as images at all (an unrecognized extension degrades to `unreadable`,
+never a wrong-MIME URL). `ImagePaneBody` renders every pane state in one
+place, exclusively via `<img src>` (script-inert even for SVG bytes);
+`ImageView` (Rendered) and `ImageCompare`'s "after" pane share the hook.
+
+**The "before (baseline)" pane is a stated v1 limitation, not a bug:**
+because `readFileBytes` has no `ref`, the baseline side has no byte source at
+all, and `ImageCompare` hardcodes that pane to an explicit
+`'no-baseline-preview'` state ("Baseline preview unavailable — binary files
+can't be read at a git ref yet.") for every add/modify/delete/rename case —
+deliberately never faked from the working-tree image (identical before/after
+panes would be worse than admitting the gap). A follow-up bead
+(`local_repo_explorer-bn8a`) tracks lifting this constraint.
+
+### Regression Check
+
+Run the epic's end-to-end gate: `npm run verify:content-modes` (builds, then
+drives the REAL built app via Playwright —
+[scripts/screenshots/verify-content-modes.mjs](../scripts/screenshots/verify-content-modes.mjs)).
+It asserts the full (class × mode) matrix on rendered evidence: exact offered
+modes per class; real added/removed diff rows; Rendered vs Raw observably
+different (token-color spans present vs absent; markdown heading elements vs
+literal `#` source); real image pixels (`naturalWidth > 0`) on the
+working-tree pane and the exact `no-baseline-preview` text (and zero `<img>`)
+on the baseline pane, with the literal "(unavailable)" asserted globally
+absent; the generic-binary placeholders naming Download and Raw NOT offered
+once binary-ness is confirmed; the gutter-alignment invariant across
+Wrap/mode round-trips; and an uncaught-renderer-error gate. Recorded outcome
+(2026-07-31): 41/41 local checks pass; the remote pass is **opt-in**
+(`AC_VERIFY_REMOTE_HOST`/`_USER`/`_PATH`, precondition in the script header)
+and was **explicitly SKIPPED** — the remote transport path exists but has not
+been exercised against a live host, so remote parity is not asserted here.
+Unit coverage: the `readFileBytes` cases in `local.test.ts` and
+`transport.conformance.test.ts` (including the no-range pin), and the
+renderer cases in `content.test.tsx`, `useImageBytes.test.ts`, and
+`modeSwitcher.test.ts`.
+
 ## Content Panel Highlighting
 
-The Content panel supports **Shiki-based syntax highlighting** for the `raw` and `diff`
-views. Supported languages (TypeScript/TSX, JavaScript/JSX, Java, Python, Rust, Go, HTML,
+The Content panel supports **Shiki-based syntax highlighting** for the text-class
+**Rendered** view and the **Diff** view (Raw is deliberately plain — see "Content
+Modes & Bounded Binary-Preview Reads"). Supported languages (TypeScript/TSX, JavaScript/JSX, Java, Python, Rust, Go, HTML,
 CSS, JSON, and shell — bash/sh/zsh) are defined entirely by the language registry below;
 extending the set is a registry-only change. Markdown highlighting uses a separate
 pipeline (`rehype-highlight` in `markdown.tsx`) and is not part of this subsystem.
@@ -904,12 +1360,17 @@ DOM. That is a deliberate alternative to node-removing windowing: find-in-conten
 walks the rendered DOM (a `TreeWalker`), so removing rows would break it —
 `content-visibility` preserves find, the wrap toggle, and note anchors.
 
-### Raw mode wiring
+### Rendered/Raw wiring (text class)
 
-`RawFile.tsx` uses `resolveLanguage` + `useHighlightedTokens` + `CodeTokens` for the
-`text` case when a language is resolved. The plain `<pre>` is used for unknown extensions
-and for the progressive first-paint before tokens are ready. Loading/binary/too-large/missing
-cases are unchanged.
+`RawFile.tsx` is the single component behind BOTH the text-class Rendered and
+Raw modes; a `highlight` prop (from the active mode) decides whether
+`resolveLanguage` + `useHighlightedTokens` + `CodeTokens` run at all. Rendered
+(`highlight=true`) tokenizes when the language is supported, with the plain
+progressive first-paint fallback; Raw (`highlight=false`) always renders plain
+and performs NO tokenization work (the hook's `lang=null` no-op branch). The
+file is read exactly once regardless of toggling. The binary/too-large/
+missing cases render `BinaryPlaceholder` under Rendered and the original terse
+messages under Raw (the loading state is unchanged in both).
 
 ### Diff bundle — one round trip + cache
 

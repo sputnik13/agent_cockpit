@@ -16,7 +16,8 @@ import {
   encodeFrame,
   type RpcStream,
 } from './rpcClient';
-import { assembleChangeset, mapGitStatus } from './index';
+import { assembleChangeset, mapGitStatus, toFileReadResult } from './index';
+import type { ReadFileResult } from './rpcClient';
 import { deriveWatchSpec } from '@shared/watch/policy';
 
 /**
@@ -142,6 +143,47 @@ describe('HelperRpcClient correlation', () => {
     expect(seen[0]!.cwd).toBeUndefined();
   });
 
+  it('readFile surfaces the helper isBinary verdict + sizeBytes for both binary and text content (br r3s6)', async () => {
+    // Mirrors electron/main/git/files.ts's looksBinary semantics on the wire: a
+    // NUL byte in the content -> isBinary true; plain text -> false. The Go
+    // helper computes both isBinary and the true sizeBytes from bytes/stat it
+    // already has in hand (see remote-helper/commands.go's
+    // looksBinary/handleReadFile) and returns them on the SAME readFile
+    // response (no second RPC). This proves the RPC client forwards both
+    // fields through ReadFileResult with no loss, matching local's
+    // classification for equivalent content.
+    const { stream } = fakeHelper((req) => {
+      if (req.method === 'readFile') {
+        const params = req.params as { path: string };
+        if (params.path === '/bin.dat') {
+          return { content: 'PNG fake-binary', truncated: false, isBinary: true, sizeBytes: 4096 };
+        }
+        return {
+          content: 'plain text content',
+          truncated: false,
+          isBinary: false,
+          sizeBytes: 19,
+        };
+      }
+      return null;
+    });
+    const client = new HelperRpcClient(stream);
+    const bin = await client.readFile('/bin.dat');
+    const text = await client.readFile('/text.txt');
+    expect(bin).toEqual({
+      content: 'PNG fake-binary',
+      truncated: false,
+      isBinary: true,
+      sizeBytes: 4096,
+    });
+    expect(text).toEqual({
+      content: 'plain text content',
+      truncated: false,
+      isBinary: false,
+      sizeBytes: 19,
+    });
+  });
+
   it('getDiffBundle issues ONE call carrying cwd/path/baseline and returns the bundle', async () => {
     const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
     const { stream } = fakeHelper((req) => {
@@ -205,6 +247,97 @@ describe('HelperRpcClient correlation', () => {
     pushEvent('watch', { token: 'other', paths: ['/x'] });
     await new Promise((r) => setImmediate(r));
     expect(received).toHaveLength(0);
+  });
+});
+
+describe('toFileReadResult (br r3s6 REJECT fix: content-nulling + true sizeBytes)', () => {
+  // RemoteProvider has no transport-injection seam (see readFileBytesOverTransport's
+  // doc comment for the established precedent), so this pure adapter is exported
+  // from index.ts specifically to make the class method's one-line-looking
+  // transformation directly unit-testable without a live SSH host + built helper.
+
+  it('passes text content through unchanged and reports the helper-provided size', () => {
+    const res: ReadFileResult = {
+      content: 'plain text content',
+      truncated: false,
+      isBinary: false,
+      sizeBytes: 19,
+    };
+    expect(toFileReadResult(res)).toEqual({
+      content: 'plain text content',
+      truncated: false,
+      isBinary: false,
+      sizeBytes: 19,
+    });
+  });
+
+  it('nulls content for binary and uses the TRUE sizeBytes, not Buffer.byteLength over the (possibly U+FFFD-mangled) content string', () => {
+    // Simulates what Go's encoding/json actually produces for invalid UTF-8: a
+    // single NUL byte substituted with U+FFFD, which is 3 bytes in UTF-8 -- so
+    // Buffer.byteLength(content, 'utf8') (the old, buggy computation) would
+    // report 3, not the true original 1-byte size the helper reports via
+    // sizeBytes. This is the exact regression the REJECT identified.
+    const res: ReadFileResult = {
+      content: '�',
+      truncated: false,
+      isBinary: true,
+      sizeBytes: 1,
+    };
+    const mangledByteLength = Buffer.byteLength(res.content, 'utf8');
+    expect(mangledByteLength).toBe(3); // sanity: confirms the mangling inflates size
+    const result = toFileReadResult(res);
+    expect(result.content).toBeNull();
+    expect(result.isBinary).toBe(true);
+    expect(result.sizeBytes).toBe(1); // true size, NOT mangledByteLength (3)
+  });
+
+  it('routes a binary+truncated response to the "too-large" branch contract: content null, truncated true', () => {
+    // Consumers (RawFile.tsx) check `truncated` BEFORE `isBinary`, so a file
+    // that is both binary and over the cap must still null its content (this
+    // just proves toFileReadResult does not special-case that combination).
+    const res: ReadFileResult = {
+      content: 'aaaa...(capped)',
+      truncated: true,
+      isBinary: true,
+      sizeBytes: 5_000_000,
+    };
+    const result = toFileReadResult(res);
+    expect(result.content).toBeNull();
+    expect(result.truncated).toBe(true);
+    expect(result.sizeBytes).toBe(5_000_000);
+  });
+
+  it('degrades isBinary to false against a stale helper build missing the field (never trusts the static type at runtime)', () => {
+    // A pre-br-r3s6 helper's response has no isBinary/sizeBytes fields at all;
+    // cast past the static type to model that wire shape precisely.
+    const stale = { content: 'text from an old helper', truncated: false } as unknown as ReadFileResult;
+    const result = toFileReadResult(stale);
+    expect(result.isBinary).toBe(false);
+    expect(result.content).toBe('text from an old helper'); // not nulled
+  });
+
+  it('degrades sizeBytes to a content-derived length against a stale helper build missing the field', () => {
+    const stale = {
+      content: 'hello',
+      truncated: false,
+      isBinary: false,
+    } as unknown as ReadFileResult;
+    const result = toFileReadResult(stale);
+    expect(result.sizeBytes).toBe(Buffer.byteLength('hello', 'utf8'));
+  });
+
+  it('rejects a truthy-but-not-true isBinary (defensive equality, not truthiness)', () => {
+    // A malformed/unexpected wire value (e.g. a stringly-typed "true") must
+    // NOT be treated as binary -- only the literal boolean true does.
+    const malformed = {
+      content: 'text',
+      truncated: false,
+      isBinary: 'true',
+      sizeBytes: 4,
+    } as unknown as ReadFileResult;
+    const result = toFileReadResult(malformed);
+    expect(result.isBinary).toBe(false);
+    expect(result.content).toBe('text');
   });
 });
 

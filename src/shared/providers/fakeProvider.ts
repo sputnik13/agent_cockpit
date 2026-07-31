@@ -14,6 +14,8 @@ import type {
 import type {
   ConnectionStatus,
   DiffBundle,
+  FileBytesOptions,
+  FileBytesResult,
   FileReadOptions,
   FileReadResult,
   ProjectKind,
@@ -37,6 +39,8 @@ export interface FakeProviderData {
   issues?: Record<string, BeadsIssue>;
   hasBeads?: boolean;
   branchPoint?: BranchPoint | null;
+  /** Canned results for `readFileBytes`, keyed by the same path used to call it. */
+  fileBytes?: Record<string, FileBytesResult>;
 }
 
 const EMPTY_GRAPH: BeadsTaskGraph = {
@@ -182,6 +186,17 @@ export class FakeProvider implements WorkspaceProvider {
       absPath: input,
     };
   }
+
+  async readFileBytes(path: string, _opts?: FileBytesOptions): Promise<FileBytesResult> {
+    return (
+      this.data.fileBytes?.[path] ?? { bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' }
+    );
+  }
+
+  // Filesystem (bounded export) — no-op stub for interface compliance; this
+  // fake has no real filesystem to write to. Not exercised by the provider
+  // contract-conformance suite.
+  async exportFile(): Promise<void> {}
 
   // Beads
   async detectBeads(): Promise<boolean> {

@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { DirEntry } from '@shared/providers/types';
-import { agentCockpit, useProjectsStore, useSessionStore, isDisconnected } from '../providerClient';
+import {
+  agentCockpit,
+  useProjectsStore,
+  useSessionStore,
+  isDisconnected,
+  selectActiveProject,
+} from '../providerClient';
 import { useActiveWorktree, useWorktreeStore } from '@renderer/worktree/worktreeStore';
 import { worktreeSelectOptions } from '@renderer/worktree/worktreeOptions';
 import { useContentSelection } from '../content';
@@ -8,6 +14,13 @@ import { useExplorerStore } from './explorerStore';
 import { FileTypeIcon } from './icons/FileTypeIcon';
 import { FolderIcon } from './icons/FolderIcon';
 import {
+  absoluteUnder,
+  buildFileRowMenuItems,
+  useRowMenuFeedback,
+  type FileRowDescriptor,
+} from '@renderer/files/rowMenu';
+import {
+  ContextMenu,
   EmptyState,
   Panel,
   PanelBody,
@@ -22,17 +35,24 @@ import {
 const IGNORED = new Set(['.git', 'node_modules', '.DS_Store']);
 const INDENT = 12;
 
-/** Join a base directory and a base-relative entry path into one absolute path
- *  (POSIX). Used for root browsing, where entry paths are relative to `/`. */
-function absoluteUnder(base: string, relPath: string): string {
-  return `${base.replace(/\/+$/, '')}/${relPath}`;
-}
-
 /** File-tree Explorer for the active project. Lazily lists directories and
  *  feeds file selections into the shared content viewer. */
 /** Dropdown value that selects the filesystem root (browse outside the project).
  *  Doubles as the read base: no worktree lives at `/`, so it never collides. */
 const ROOT_VALUE = '/';
+
+/**
+ * Resolve `entryPath` to the row's menu/selection identity path: unchanged
+ * (worktree/project-relative) in-project, or joined under the read base
+ * (an absolute filesystem path, via the shared `absoluteUnder`) when
+ * browsing outside the project (root-browse). Mirrors the `worktreePath`
+ * read base both `DirNode` and `FileNode` already receive — this replaces
+ * the old panel-local `absoluteUnder` call at the `FileNode` `targetPath`
+ * site with a byte-for-byte-identical call into the shared resolver.
+ */
+function resolveRowPath(entryPath: string, worktreePath: string | undefined, external: boolean): string {
+  return external ? absoluteUnder(worktreePath ?? ROOT_VALUE, entryPath) : entryPath;
+}
 
 export function ExplorerPanel(): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
@@ -45,6 +65,10 @@ export function ExplorerPanel(): JSX.Element {
   // state (NOT the shared worktree selection) so it never moves the Changes panel.
   const rootBrowse = useExplorerStore((s) => (activeId ? s.rootBrowse[activeId] ?? false : false));
   const setRootBrowse = useExplorerStore((s) => s.setRootBrowse);
+  // D3/feedback decision (ynz8.5, recorded in a bead comment): wire the
+  // shared transient-feedback hook into a visible confirmation here, shown
+  // in the toolbar next to the worktree selector.
+  const { message: feedbackMessage, notify: onActionComplete } = useRowMenuFeedback();
   if (!activeId) {
     return (
       <Panel>
@@ -86,6 +110,11 @@ export function ExplorerPanel(): JSX.Element {
           className="max-w-[240px] shrink"
         />
         <ToolbarSpacer />
+        {feedbackMessage && (
+          <span className="shrink-0 text-xs text-dim" role="status">
+            {feedbackMessage}
+          </span>
+        )}
         <PanelFullscreenButton />
       </Toolbar>
       <PanelBody>
@@ -97,6 +126,7 @@ export function ExplorerPanel(): JSX.Element {
           depth={0}
           worktreePath={base}
           external={rootBrowse}
+          onActionComplete={onActionComplete}
         />
       </PanelBody>
     </Panel>
@@ -108,6 +138,7 @@ function DirChildren({
   depth,
   worktreePath,
   external = false,
+  onActionComplete,
 }: {
   dirPath: string;
   depth: number;
@@ -115,6 +146,9 @@ function DirChildren({
   /** True when browsing the filesystem root: file selections are external
    *  (absolute path, no git diff) rather than in-project. */
   external?: boolean;
+  /** D3 feedback: forwarded into the row menu context for both file and dir
+   *  rows. See `ExplorerPanel`'s `useRowMenuFeedback` wiring. */
+  onActionComplete: (message: string) => void;
 }): JSX.Element {
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
 
@@ -142,9 +176,23 @@ function DirChildren({
     <>
       {entries.map((e) =>
         e.isDir ? (
-          <DirNode key={e.path} entry={e} depth={depth} worktreePath={worktreePath} external={external} />
+          <DirNode
+            key={e.path}
+            entry={e}
+            depth={depth}
+            worktreePath={worktreePath}
+            external={external}
+            onActionComplete={onActionComplete}
+          />
         ) : (
-          <FileNode key={e.path} entry={e} depth={depth} worktreePath={worktreePath} external={external} />
+          <FileNode
+            key={e.path}
+            entry={e}
+            depth={depth}
+            worktreePath={worktreePath}
+            external={external}
+            onActionComplete={onActionComplete}
+          />
         ),
       )}
     </>
@@ -156,34 +204,58 @@ function DirNode({
   depth,
   worktreePath,
   external = false,
+  onActionComplete,
 }: {
   entry: DirEntry;
   depth: number;
   worktreePath?: string;
   external?: boolean;
+  onActionComplete: (message: string) => void;
 }): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
+  const activeProject = useProjectsStore(selectActiveProject);
   // Expansion lives in the store so a programmatic reveal (from a clicked link)
   // can expand ancestor directories of a target file.
   const open = useExplorerStore((s) => (activeId ? s.expanded[activeId]?.has(entry.path) ?? false : false));
   const toggle = useExplorerStore((s) => s.toggle);
+  // Same path resolution FileNode uses for its selection target — directories
+  // are never selected/opened, but the menu still needs a resolved path for
+  // the copy actions (root-browse: absolute; in-project: entry.path as-is).
+  const menuPath = resolveRowPath(entry.path, worktreePath, external);
+  const descriptor: FileRowDescriptor = {
+    relPath: menuPath,
+    worktreePath: external ? '' : worktreePath,
+    isDir: true,
+    downloadable: false,
+    // D1 (ynz8.5): root-browse rows have no project-relative meaning.
+    relativeAvailable: !external,
+  };
+  const menuItems = buildFileRowMenuItems(descriptor, { activeProject, onActionComplete });
   return (
     <>
-      <Row
-        onClick={() => activeId && toggle(activeId, entry.path)}
-        prefix={
-          <span className="flex items-center gap-1">
-            <span className="w-3 text-dim">{open ? '▾' : '▸'}</span>
-            <FolderIcon open={open} />
-          </span>
-        }
-        style={{ paddingLeft: depth * INDENT + 8 }}
-        title={entry.path}
-      >
-        {entry.name}
-      </Row>
+      <ContextMenu items={menuItems}>
+        <Row
+          onClick={() => activeId && toggle(activeId, entry.path)}
+          prefix={
+            <span className="flex items-center gap-1">
+              <span className="w-3 text-dim">{open ? '▾' : '▸'}</span>
+              <FolderIcon open={open} />
+            </span>
+          }
+          style={{ paddingLeft: depth * INDENT + 8 }}
+          title={entry.path}
+        >
+          {entry.name}
+        </Row>
+      </ContextMenu>
       {open && (
-        <DirChildren dirPath={entry.path} depth={depth + 1} worktreePath={worktreePath} external={external} />
+        <DirChildren
+          dirPath={entry.path}
+          depth={depth + 1}
+          worktreePath={worktreePath}
+          external={external}
+          onActionComplete={onActionComplete}
+        />
       )}
     </>
   );
@@ -194,13 +266,16 @@ function FileNode({
   depth,
   worktreePath,
   external = false,
+  onActionComplete,
 }: {
   entry: DirEntry;
   depth: number;
   worktreePath?: string;
   external?: boolean;
+  onActionComplete: (message: string) => void;
 }): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
+  const activeProject = useProjectsStore(selectActiveProject);
   const select = useContentSelection((s) => s.select);
   // Subscribe to the active project's selection slice (not the stable
   // `selectionFor` action) so the active-row highlight re-renders when the
@@ -209,13 +284,17 @@ function FileNode({
     activeId ? s.selections[activeId] ?? null : null,
   );
   // A root-browsed file is outside any repo: select it as an absolute
-  // 'external-file' (no git diff) instead of an in-project 'file'.
-  const targetPath = external ? absoluteUnder(worktreePath ?? ROOT_VALUE, entry.path) : entry.path;
+  // 'external-file' (no git diff) instead of an in-project 'file'. Uses the
+  // shared resolver (moved from this file's own removed `absoluteUnder`) —
+  // same base/relPath inputs, so the result is byte-for-byte identical.
+  const targetPath = resolveRowPath(entry.path, worktreePath, external);
   const targetKind = external ? 'external-file' : 'file';
   const active = activeSelection?.kind === targetKind && activeSelection.path === targetPath;
   // Scroll into view when this file is the reveal target of a clicked link.
   const isRevealTarget = useExplorerStore((s) => (activeId ? s.revealTarget[activeId] === entry.path : false));
   const consumeRevealTarget = useExplorerStore((s) => s.consumeRevealTarget);
+  // `Row` forwards its ref to its root `<div>` (ynz8.3 D1), so it can be the
+  // scroll-into-view target directly — no separate wrapper `<div>` needed.
   const rowRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (isRevealTarget && activeId) {
@@ -223,9 +302,19 @@ function FileNode({
       consumeRevealTarget(activeId);
     }
   }, [isRevealTarget, activeId, consumeRevealTarget]);
+  const descriptor: FileRowDescriptor = {
+    relPath: targetPath,
+    worktreePath: external ? '' : worktreePath,
+    isDir: false,
+    downloadable: true,
+    // D1 (ynz8.5): root-browse rows have no project-relative meaning.
+    relativeAvailable: !external,
+  };
+  const menuItems = buildFileRowMenuItems(descriptor, { activeProject, onActionComplete });
   return (
-    <div ref={rowRef}>
+    <ContextMenu items={menuItems}>
       <Row
+        ref={rowRef}
         active={active}
         onClick={() => {
           if (!activeId) return;
@@ -253,6 +342,6 @@ function FileNode({
       >
         {entry.name}
       </Row>
-    </div>
+    </ContextMenu>
   );
 }

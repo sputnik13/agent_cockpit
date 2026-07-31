@@ -143,6 +143,20 @@ panels never touch a real transport.
   `XTERM_THEMES` onto wterm CSS variables; `normalizeSettings` accepts the `wterm`
   `terminalRenderer` value (default `dom`). DOM glyph fidelity (powerline) is a
   runtime check.
+- Bounded file export (Download): `writeStreamToDest` temp-then-rename
+  semantics (success renames into place; any failure unlinks the temp and
+  leaves the destination untouched) in `exportWrite.test.ts`; `localExportFile`
+  byte-identity for text, binary, and over-preview-cap files plus
+  linked-worktree base resolution in `local.test.ts`;
+  `Ssh2Transport.stat`/`createReadStream` over a stubbed SFTP surface
+  (whole-file read, `{start, end}` ranged read, error propagation on the
+  returned `Readable`, per-call SFTP channel release) in
+  `transport.conformance.test.ts`, exercised through the `RemoteTransport`
+  interface via `createRemoteTransport()` in `remote.test.ts`; the shared
+  row-menu substrate (path resolution including the remote and root-browse
+  shapes, disabled states, clipboard/download actions, transient feedback) in
+  `rowMenu.test.tsx`, with panel wiring in `changes.test.tsx` /
+  `explorer.test.tsx`.
 
 ## Integration Scope
 

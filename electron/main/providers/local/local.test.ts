@@ -1,8 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { FILE_BYTES_CAP } from '@shared/providers/fileBytesCap';
 import { LocalProvider } from './index';
 import { localListDir, localReadFile } from './reads';
 
@@ -107,6 +117,142 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     const p = new LocalProvider('proj', repo);
     expect((await p.stat('README.md')).exists).toBe(true);
     expect((await p.stat('nope.md')).exists).toBe(false);
+  });
+
+  describe('exportFile (Download capability)', () => {
+    let destDir: string;
+
+    beforeEach(() => {
+      destDir = mkdtempSync(join(tmpdir(), 'cockpit-export-dest-'));
+    });
+
+    afterEach(() => {
+      rmSync(destDir, { recursive: true, force: true });
+    });
+
+    it('exports a UTF-8 text file byte-identical to the source', async () => {
+      const p = new LocalProvider('proj', repo);
+      const dest = join(destDir, 'README.md');
+      await p.exportFile('README.md', dest);
+      expect(readFileSync(dest).equals(readFileSync(join(repo, 'README.md')))).toBe(true);
+    });
+
+    it('exports a binary file byte-identical to the source', async () => {
+      const bin = Buffer.from([0x00, 0x89, 0xff, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      writeFileSync(join(repo, 'image.png'), bin);
+      const p = new LocalProvider('proj', repo);
+      const dest = join(destDir, 'image.png');
+      await p.exportFile('image.png', dest);
+      expect(Buffer.compare(readFileSync(dest), bin)).toBe(0);
+    });
+
+    it('exports a file larger than the preview maxBytes cap byte-identical', async () => {
+      // 3 MiB: bigger than both the local 256 KiB preview cap and the remote
+      // helper's 2 MiB readFile cap, proving Download does not go through
+      // either capped path.
+      const big = randomBytes(1024 * 1024 * 3);
+      writeFileSync(join(repo, 'big.bin'), big);
+      const p = new LocalProvider('proj', repo);
+      const dest = join(destDir, 'big.bin');
+      await p.exportFile('big.bin', dest);
+      expect(Buffer.compare(readFileSync(dest), big)).toBe(0);
+    });
+
+    it('resolves export against a linked worktree root when worktreePath is supplied', async () => {
+      // A linked worktree on its own branch, holding a file absent from the
+      // main worktree root — so the base switch is observable (mirrors the
+      // existing linked-worktree read test above).
+      const linked = mkdtempSync(join(tmpdir(), 'cockpit-export-linked-'));
+      rmSync(linked, { recursive: true, force: true });
+      git(repo, ['worktree', 'add', '-q', '-b', 'wt-export-branch', linked]);
+      mkdirSync(join(linked, 'only'), { recursive: true });
+      writeFileSync(join(linked, 'only', 'wt.txt'), 'worktree-only-export\n');
+
+      const p = new LocalProvider('proj', repo);
+      const dest = join(destDir, 'wt.txt');
+      await p.exportFile('only/wt.txt', dest, { worktreePath: linked });
+      expect(readFileSync(dest, 'utf8')).toBe('worktree-only-export\n');
+
+      // Without the worktree override, the same relative path does not exist
+      // at the project root: the export rejects, and leaves no dest/partial file.
+      const destMissing = join(destDir, 'wt-missing.txt');
+      await expect(p.exportFile('only/wt.txt', destMissing)).rejects.toThrow();
+      expect(existsSync(destMissing)).toBe(false);
+      expect(readdirSync(destDir).some((f) => f.includes('.part'))).toBe(false);
+
+      git(repo, ['worktree', 'remove', '--force', linked]);
+    });
+
+    it('rejects and leaves no partial file when the destination is unwritable', async () => {
+      const p = new LocalProvider('proj', repo);
+      const dest = join(destDir, 'nonexistent-subdir', 'out.md');
+      await expect(p.exportFile('README.md', dest)).rejects.toThrow();
+      expect(existsSync(dest)).toBe(false);
+      expect(readdirSync(destDir)).toEqual([]);
+    });
+  });
+
+  describe('readFileBytes (bounded byte preview)', () => {
+    it('round-trips a binary file under the cap byte-identically after base64 decode', async () => {
+      const buf = Buffer.from([0x00, 0x89, 0xff, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      writeFileSync(join(repo, 'image.png'), buf);
+      const p = new LocalProvider('proj', repo);
+      const res = await p.readFileBytes('image.png');
+      expect(res.reason).toBeNull();
+      expect(res.exists).toBe(true);
+      expect(res.sizeBytes).toBe(buf.length);
+      expect(Buffer.from(res.bytesBase64!, 'base64').equals(buf)).toBe(true);
+    });
+
+    it('refuses an over-cap file with metadata only, never a truncated prefix', async () => {
+      const big = Buffer.alloc(FILE_BYTES_CAP + 1);
+      writeFileSync(join(repo, 'big.bin'), big);
+      const p = new LocalProvider('proj', repo);
+      const res = await p.readFileBytes('big.bin');
+      expect(res).toEqual({
+        bytesBase64: null,
+        sizeBytes: FILE_BYTES_CAP + 1,
+        exists: true,
+        reason: 'too-large',
+      });
+    });
+
+    it('resolves (does not reject) a not-exists result for a missing path', async () => {
+      const p = new LocalProvider('proj', repo);
+      const res = await p.readFileBytes('nope.bin');
+      expect(res).toEqual({ bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' });
+    });
+
+    it('reports reason "is-dir" for a directory path, with no bytes', async () => {
+      mkdirSync(join(repo, 'adir'), { recursive: true });
+      const p = new LocalProvider('proj', repo);
+      const res = await p.readFileBytes('adir');
+      expect(res.reason).toBe('is-dir');
+      expect(res.bytesBase64).toBeNull();
+    });
+
+    it('resolves reads against a linked worktree root when worktreePath is supplied', async () => {
+      // Mirrors the exportFile/readFile linked-worktree tests above: a file
+      // that exists ONLY in the linked worktree, absent from the main root.
+      const linked = mkdtempSync(join(tmpdir(), 'cockpit-bytes-linked-'));
+      rmSync(linked, { recursive: true, force: true });
+      git(repo, ['worktree', 'add', '-q', '-b', 'wt-bytes-branch', linked]);
+      mkdirSync(join(linked, 'only'), { recursive: true });
+      const buf = Buffer.from('worktree-only-bytes\n');
+      writeFileSync(join(linked, 'only', 'wt.bin'), buf);
+
+      const p = new LocalProvider('proj', repo);
+      const inWt = await p.readFileBytes('only/wt.bin', { worktreePath: linked });
+      expect(inWt.reason).toBeNull();
+      expect(Buffer.from(inWt.bytesBase64!, 'base64').equals(buf)).toBe(true);
+
+      // Without the override, the same relative path does not exist at the
+      // project root — proving the base actually switched.
+      const inRoot = await p.readFileBytes('only/wt.bin');
+      expect(inRoot.reason).toBe('missing');
+
+      git(repo, ['worktree', 'remove', '--force', linked]);
+    });
   });
 
   it('detects beads and loads the task graph (jsonl source)', async () => {

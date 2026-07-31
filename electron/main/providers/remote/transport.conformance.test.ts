@@ -17,10 +17,13 @@ import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { FILE_BYTES_CAP } from '@shared/providers/fileBytesCap';
 import type { RemoteConnectionSpec } from '../types';
 import { Ssh2Transport } from './transport';
 import { RemoteTransportError } from './transportTypes';
+import { readFileBytesOverTransport } from './index';
 
 /** A fake ssh2 exec/shell channel: an EventEmitter with write/close/setWindow + stderr. */
 class FakeChannel extends EventEmitter {
@@ -49,6 +52,81 @@ interface ExecCall {
   channel: FakeChannel;
 }
 
+/** A fake ssh2 SFTP read stream — a REAL Readable so the transport's
+ *  `.once('close', ...)` / `.once('error', ...)` wiring behaves exactly as it
+ *  would against a genuine ssh2 ReadStream. `failImmediately` simulates a
+ *  mid-read failure (emits 'error' instead of ever pushing data). */
+class FakeSftpReadStream extends Readable {
+  private sent = false;
+  constructor(
+    private readonly chunk: Buffer,
+    private readonly failImmediately: boolean,
+  ) {
+    super();
+  }
+  override _read(): void {
+    if (this.failImmediately) {
+      queueMicrotask(() => this.emit('error', new Error('simulated SFTP read failure')));
+      return;
+    }
+    if (!this.sent) {
+      this.sent = true;
+      this.push(this.chunk);
+      return;
+    }
+    this.push(null);
+  }
+}
+
+/** Structural stand-in for ssh2's `Stats` (only the members `Ssh2Transport.stat`
+ *  actually reads). Deliberately NOT `import('ssh2').Stats` — this test stays
+ *  off the single-ssh2-import-site invariant just like every other file. */
+interface FakeStats {
+  size: number;
+  mtime: number;
+  isDirectory(): boolean;
+}
+
+/** A fake ssh2 `SFTPWrapper`: `stat`/`createReadStream` over a canned buffer,
+ *  plus an `end()` call counter so tests can assert the D2 channel-per-call
+ *  lifecycle (opened fresh per operation, released exactly once). */
+class FakeSftp {
+  endCallCount = 0;
+  /** Options passed to the most recent createReadStream() call on this
+   *  session — lets a test assert NO range was requested. */
+  lastReadStreamOpts: { start?: number; end?: number } | undefined;
+  constructor(
+    private readonly data: Buffer,
+    private readonly missing: boolean,
+    private readonly streamFails: boolean,
+  ) {}
+
+  stat(path: string, cb: (err: Error | undefined, stats?: FakeStats) => void): void {
+    queueMicrotask(() => {
+      if (this.missing) {
+        cb(new Error(`no such file: ${path}`));
+        return;
+      }
+      cb(undefined, {
+        size: this.data.length,
+        mtime: 1_700_000_000, // seconds since epoch (ssh2 convention)
+        isDirectory: () => false,
+      });
+    });
+  }
+
+  createReadStream(_path: string, opts?: { start?: number; end?: number }): FakeSftpReadStream {
+    this.lastReadStreamOpts = opts;
+    const start = opts?.start ?? 0;
+    const end = opts?.end ?? this.data.length - 1;
+    return new FakeSftpReadStream(this.data.subarray(start, end + 1), this.streamFails);
+  }
+
+  end(): void {
+    this.endCallCount += 1;
+  }
+}
+
 /** A fake ssh2 Client. Records connect config and exec/shell calls. */
 class FakeClient extends EventEmitter {
   connectConfig: Record<string, unknown> | null = null;
@@ -56,6 +134,43 @@ class FakeClient extends EventEmitter {
   shellCalls: Array<{ opts: Record<string, unknown>; channel: FakeChannel }> = [];
   /** When set, the next connect runs the hostVerifier with this key then proceeds. */
   presentHostKey: Buffer | null = null;
+  /** Every FakeSftp session opened via sftp() (D2: one per call). */
+  sftpInstances: FakeSftp[] = [];
+  /** Data served by the NEXT sftp() session's stat/createReadStream. Consumed
+   *  (not reset) across calls within a test unless overwritten, so a test that
+   *  issues several reads sets it before each call it cares about. */
+  nextSftpData: Buffer = Buffer.alloc(0);
+  /** One-shot: the next sftp() session's stat() reports the path missing. */
+  nextSftpMissing = false;
+  /** One-shot: the next sftp() session's createReadStream() fails on read. */
+  nextSftpStreamFails = false;
+  /** STICKY (not one-shot): when true, EVERY subsequently-opened FakeSftp's
+   *  createReadStream() fails on read — not just the next one. Needed because
+   *  a readFileBytesOverTransport read opens a stat session first, which would
+   *  otherwise consume the one-shot `nextSftpStreamFails` before the stream
+   *  session ever opens. Additive: default false preserves every existing
+   *  test's behavior (only the one-shot flag applies). */
+  allSftpStreamsFail = false;
+  /** One-shot: the next sftp() call itself fails to open the SFTP channel. */
+  failNextSftpOpen: Error | null = null;
+
+  sftp(cb: (err: Error | undefined, sftp: FakeSftp) => void): void {
+    if (this.failNextSftpOpen) {
+      const err = this.failNextSftpOpen;
+      this.failNextSftpOpen = null;
+      queueMicrotask(() => cb(err, undefined as unknown as FakeSftp));
+      return;
+    }
+    const inst = new FakeSftp(
+      this.nextSftpData,
+      this.nextSftpMissing,
+      this.allSftpStreamsFail || this.nextSftpStreamFails,
+    );
+    this.nextSftpMissing = false;
+    this.nextSftpStreamFails = false;
+    this.sftpInstances.push(inst);
+    queueMicrotask(() => cb(undefined, inst));
+  }
 
   connect(config: Record<string, unknown>): void {
     this.connectConfig = config;
@@ -466,5 +581,211 @@ describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
       expect(t.fake.connectConfig?.['port']).toBe(2222);
       expect(t.fake.connectConfig?.['username']).toBe('deploy');
     });
+  });
+});
+
+/**
+ * SFTP read primitive (Download capability, br ynz8.1): `stat` and
+ * `createReadStream` over the fake sftp() seam added to FakeClient above.
+ * Asserts: whole-file read and INCLUSIVE {start,end} ranged reads return
+ * exact byte windows (including raw bytes > 0x7E, per the raw-byte
+ * invariant); a stream read error propagates to the consumer; the SFTP
+ * channel is opened fresh per call and released exactly once (D2), including
+ * on an errored read and an early consumer destroy(); stat maps
+ * size/isDir/mtime (seconds -> ISO) and resolves exists:false for a missing
+ * path rather than rejecting; both reject with RemoteTransportError when the
+ * SFTP channel cannot be opened, and when not connected at all.
+ */
+describe('SFTP read primitive (stat + createReadStream) — Download capability', () => {
+  // 'hello-' (6 bytes) + a 3-byte >0x7E powerline sequence + '-world'.
+  const SAMPLE = Buffer.concat([
+    Buffer.from('hello-'),
+    Buffer.from([0xe2, 0x96, 0x88]), // U+2588 full block
+    Buffer.from('-world'),
+  ]);
+
+  function collect(stream: Readable): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      stream.on('data', (c: Buffer) => chunks.push(c));
+      stream.on('end', () => resolve(Buffer.concat(chunks)));
+      stream.on('error', reject);
+    });
+  }
+
+  let t: TestTransport;
+  beforeEach(async () => {
+    process.env.SSH_AUTH_SOCK = '/tmp/agent.sock';
+    t = new TestTransport();
+    await t.connect(SPEC, { hostKeyPolicy: tofuPolicy() });
+  });
+
+  it('createReadStream returns the whole file, including raw bytes > 0x7E undecoded', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    const stream = await t.createReadStream('/srv/repo/file.bin');
+    const got = await collect(stream);
+    expect(got.equals(SAMPLE)).toBe(true);
+  });
+
+  it('createReadStream honors an inclusive {start,end} range', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    // Bytes 6..8 are the 3-byte powerline sequence; end is INCLUSIVE.
+    const stream = await t.createReadStream('/srv/repo/file.bin', { start: 6, end: 8 });
+    const got = await collect(stream);
+    expect(got.equals(SAMPLE.subarray(6, 9))).toBe(true);
+  });
+
+  it('propagates a stream read error to the consumer (never swallowed)', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    t.fake.nextSftpStreamFails = true;
+    const stream = await t.createReadStream('/srv/repo/file.bin');
+    await expect(collect(stream)).rejects.toThrow(/simulated/);
+  });
+
+  it('ends the SFTP channel exactly once per read, including on error and an early destroy (D2)', async () => {
+    // Two ordinary sequential reads -> two fresh FakeSftp sessions, one end() each.
+    t.fake.nextSftpData = SAMPLE;
+    await collect(await t.createReadStream('/f1'));
+    t.fake.nextSftpData = SAMPLE;
+    await collect(await t.createReadStream('/f2'));
+    expect(t.fake.sftpInstances).toHaveLength(2);
+    expect(t.fake.sftpInstances.map((s) => s.endCallCount)).toEqual([1, 1]);
+
+    // An errored read still ends its channel exactly once.
+    t.fake.nextSftpData = SAMPLE;
+    t.fake.nextSftpStreamFails = true;
+    const errored = await t.createReadStream('/f3');
+    await expect(collect(errored)).rejects.toThrow();
+    expect(t.fake.sftpInstances).toHaveLength(3);
+    expect(t.fake.sftpInstances[2]!.endCallCount).toBe(1);
+
+    // An early destroy() (consumer abort, no error passed) still ends its
+    // channel exactly once, via 'close' rather than 'error'.
+    t.fake.nextSftpData = SAMPLE;
+    const aborted = await t.createReadStream('/f4');
+    aborted.destroy();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(t.fake.sftpInstances).toHaveLength(4);
+    expect(t.fake.sftpInstances[3]!.endCallCount).toBe(1);
+  });
+
+  it('stat maps size/isDir/mtime (seconds -> ISO) for an existing path, ending its channel', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    const st = await t.stat('/srv/repo/file.bin');
+    expect(st).toEqual({
+      exists: true,
+      size: SAMPLE.length,
+      isDir: false,
+      mtime: new Date(1_700_000_000 * 1000).toISOString(),
+    });
+    expect(t.fake.sftpInstances).toHaveLength(1);
+    expect(t.fake.sftpInstances[0]!.endCallCount).toBe(1);
+  });
+
+  it('stat resolves exists:false for a missing path rather than rejecting', async () => {
+    t.fake.nextSftpMissing = true;
+    const st = await t.stat('/srv/repo/nope.bin');
+    expect(st).toEqual({ exists: false, size: 0, isDir: false, mtime: null });
+  });
+
+  it('stat and createReadStream both reject with RemoteTransportError when the SFTP channel cannot be opened', async () => {
+    t.fake.failNextSftpOpen = new Error('channel open refused');
+    await expect(t.stat('/srv/repo/file.bin')).rejects.toBeInstanceOf(RemoteTransportError);
+    t.fake.failNextSftpOpen = new Error('channel open refused');
+    await expect(t.createReadStream('/srv/repo/file.bin')).rejects.toBeInstanceOf(RemoteTransportError);
+  });
+
+  it('stat and createReadStream both reject with RemoteTransportError when not connected', async () => {
+    const disconnected = new TestTransport();
+    await expect(disconnected.stat('/x')).rejects.toBeInstanceOf(RemoteTransportError);
+    await expect(disconnected.createReadStream('/x')).rejects.toBeInstanceOf(RemoteTransportError);
+  });
+});
+
+/**
+ * readFileBytesOverTransport (bounded binary-preview read primitive, br
+ * ynz8-sx0i.1): the remote byte source behind `WorkspaceProvider.readFileBytes`.
+ * Reuses the same TestTransport/FakeClient/FakeSftp harness and connected
+ * transport as the SFTP primitive suite above — RemoteProvider itself has no
+ * transport-injection seam, so the exported helper is exercised directly
+ * against a connected TestTransport (which satisfies `Pick<RemoteTransport,
+ * 'stat' | 'createReadStream'>` structurally) rather than through a
+ * RemoteProvider instance.
+ */
+describe('readFileBytesOverTransport (bounded byte preview over SFTP)', () => {
+  // 'hello-' (6 bytes) + a 3-byte >0x7E powerline sequence + '-world'.
+  const SAMPLE = Buffer.concat([
+    Buffer.from('hello-'),
+    Buffer.from([0xe2, 0x96, 0x88]), // U+2588 full block
+    Buffer.from('-world'),
+  ]);
+
+  let t: TestTransport;
+  beforeEach(async () => {
+    process.env.SSH_AUTH_SOCK = '/tmp/agent.sock';
+    t = new TestTransport();
+    await t.connect(SPEC, { hostKeyPolicy: tofuPolicy() });
+  });
+
+  it('reads bytes undecoded and returns a correct base64 round-trip, with sizeBytes and reason null', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    const res = await readFileBytesOverTransport(t, '/srv/repo/file.bin');
+    expect(res.reason).toBeNull();
+    expect(res.exists).toBe(true);
+    expect(res.sizeBytes).toBe(SAMPLE.length);
+    expect(Buffer.from(res.bytesBase64!, 'base64').equals(SAMPLE)).toBe(true);
+  });
+
+  it('requests no range from the SFTP stream (whole-file read only)', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    await readFileBytesOverTransport(t, '/srv/repo/file.bin');
+    // Index 0 is the stat() session; index 1 is the createReadStream() session.
+    expect(t.fake.sftpInstances).toHaveLength(2);
+    const streamSession = t.fake.sftpInstances[1]!;
+    expect(streamSession.lastReadStreamOpts?.start).toBeUndefined();
+    expect(streamSession.lastReadStreamOpts?.end).toBeUndefined();
+  });
+
+  it('rejects when the SFTP read stream errors (never resolves silent empty bytes)', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    // Sticky, not one-shot: the one-shot flag would be consumed by the stat
+    // session's own sftp() call before the stream session ever opens.
+    t.fake.allSftpStreamsFail = true;
+    await expect(readFileBytesOverTransport(t, '/srv/repo/file.bin')).rejects.toThrow();
+  });
+
+  it('opens exactly two SFTP sessions for a successful read and ends each exactly once', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    await readFileBytesOverTransport(t, '/srv/repo/file.bin');
+    expect(t.fake.sftpInstances).toHaveLength(2);
+    expect(t.fake.sftpInstances.map((s) => s.endCallCount)).toEqual([1, 1]);
+  });
+
+  it('still ends the stream session exactly once when the read errors', async () => {
+    t.fake.nextSftpData = SAMPLE;
+    t.fake.allSftpStreamsFail = true;
+    await expect(readFileBytesOverTransport(t, '/srv/repo/file.bin')).rejects.toThrow();
+    expect(t.fake.sftpInstances).toHaveLength(2);
+    expect(t.fake.sftpInstances[1]!.endCallCount).toBe(1);
+  });
+
+  it('short-circuits on a missing path: reason "missing", only the stat session is opened', async () => {
+    t.fake.nextSftpMissing = true;
+    const res = await readFileBytesOverTransport(t, '/srv/repo/nope.bin');
+    expect(res).toEqual({ bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' });
+    expect(t.fake.sftpInstances).toHaveLength(1);
+  });
+
+  it('refuses an over-cap file without ever opening a stream (refuse, not truncate)', async () => {
+    t.fake.nextSftpData = Buffer.alloc(FILE_BYTES_CAP + 1);
+    const res = await readFileBytesOverTransport(t, '/srv/repo/big.bin');
+    expect(res).toEqual({
+      bytesBase64: null,
+      sizeBytes: FILE_BYTES_CAP + 1,
+      exists: true,
+      reason: 'too-large',
+    });
+    // Refused before any stream session was opened — only the stat session.
+    expect(t.fake.sftpInstances).toHaveLength(1);
   });
 });

@@ -18,6 +18,12 @@ import (
 // maxReadFileBytes caps the content returned by readFile (2 MiB).
 const maxReadFileBytes = 2 << 20
 
+// binarySniffBytes bounds the NUL-byte scan used to classify content as
+// binary. Mirrors electron/main/git/files.ts's looksBinary exactly (same
+// 8000-byte prefix bound), so local and remote report the same isBinary
+// verdict for identical file content.
+const binarySniffBytes = 8000
+
 // execTimeout bounds any shelled-out command.
 //
 // Tools are spawned by bare name (br, git); the helper's process PATH is fixed
@@ -65,6 +71,20 @@ type readFileParams struct {
 type readFileResult struct {
 	Content   string `json:"content"`
 	Truncated bool   `json:"truncated"`
+	// IsBinary mirrors electron/main/git/files.ts's looksBinary semantics (a
+	// NUL byte within the first binarySniffBytes bytes). Computed from the
+	// same bytes already read for Content — no second read, no extra RPC.
+	IsBinary bool `json:"isBinary"`
+	// SizeBytes is the TRUE byte size of the underlying content (on-disk file
+	// size for a working-tree read, full `git show` blob length for a ref
+	// read) — independent of any cap/truncation applied to Content, and NOT
+	// derived from Content (which, once JSON-encoded, substitutes invalid
+	// UTF-8 with U+FFFD and would inflate a binary file's apparent size).
+	// Mirrors electron/main/git/files.ts's getFile, whose sizeBytes is always
+	// a real stat()/buffer-length value, never computed from the (possibly
+	// nulled) content string. Computed from data the handler already has — no
+	// second read, no extra RPC.
+	SizeBytes int64 `json:"sizeBytes"`
 }
 
 func handleReadFile(raw json.RawMessage) (interface{}, error) {
@@ -85,11 +105,16 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
+		isBin := looksBinaryString(out)
+		// Capture the full blob length BEFORE the truncation slice below — the
+		// true size, mirroring local's ref-path sizeBytes (buf.length of the
+		// full git-cat-file blob, read before its truncation check).
+		sizeBytes := int64(len(out))
 		truncated := len(out) > maxReadFileBytes
 		if truncated {
 			out = out[:maxReadFileBytes]
 		}
-		return readFileResult{Content: out, Truncated: truncated}, nil
+		return readFileResult{Content: out, Truncated: truncated, IsBinary: isBin, SizeBytes: sizeBytes}, nil
 	}
 	// Working-tree read: resolve a relative path against the worktree root when
 	// supplied; empty/absent falls back to the path as-given (already absolute
@@ -104,17 +129,57 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 	}
 	defer f.Close()
 
+	// True on-disk size via a stat on the fd already open for the read below —
+	// no extra RPC, and (unlike the byte count from the capped read) still
+	// correct when the file is larger than maxReadFileBytes. Falls back to the
+	// bytes actually read if the stat somehow fails (the fd was just opened
+	// successfully, so this is a defensive, not expected, path).
+	var sizeBytes int64
+	statOK := false
+	if fi, statErr := f.Stat(); statErr == nil {
+		sizeBytes = fi.Size()
+		statOK = true
+	}
+
 	// Read one byte past the cap so we can detect truncation.
 	buf := make([]byte, maxReadFileBytes+1)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, fmt.Errorf("readFile: read %q: %w", target, err)
 	}
+	isBin := looksBinary(buf[:n])
 	truncated := n > maxReadFileBytes
 	if truncated {
 		n = maxReadFileBytes
 	}
-	return readFileResult{Content: string(buf[:n]), Truncated: truncated}, nil
+	if !statOK {
+		sizeBytes = int64(n)
+	}
+	return readFileResult{Content: string(buf[:n]), Truncated: truncated, IsBinary: isBin, SizeBytes: sizeBytes}, nil
+}
+
+// looksBinary reports whether buf's first binarySniffBytes bytes contain a
+// NUL byte — the same heuristic electron/main/git/files.ts's looksBinary uses
+// on the local read path. A bounded prefix scan, not full MIME sniffing, by
+// design (matches local exactly rather than being "more correct").
+func looksBinary(buf []byte) bool {
+	n := len(buf)
+	if n > binarySniffBytes {
+		n = binarySniffBytes
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0
+}
+
+// looksBinaryString is looksBinary for content already captured as a string
+// (the git-show ref-read path). It slices the bounded prefix BEFORE
+// converting to []byte, so classifying a large ref blob never copies more
+// than binarySniffBytes worth of content just to sniff it.
+func looksBinaryString(s string) bool {
+	n := len(s)
+	if n > binarySniffBytes {
+		n = binarySniffBytes
+	}
+	return looksBinary([]byte(s[:n]))
 }
 
 // readCappedFile reads up to maxReadFileBytes of a working-tree file, reporting

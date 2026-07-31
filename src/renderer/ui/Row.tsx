@@ -1,4 +1,4 @@
-import type { HTMLAttributes, ReactNode } from 'react';
+import { forwardRef, type HTMLAttributes, type ReactNode } from 'react';
 import { cn } from './cn';
 
 export interface RowProps extends Omit<HTMLAttributes<HTMLDivElement>, 'prefix'> {
@@ -9,18 +9,22 @@ export interface RowProps extends Omit<HTMLAttributes<HTMLDivElement>, 'prefix'>
   interactive?: boolean;
 }
 
-/** Compact list row used by change lists, worktrees, task lists, notes. */
-export function Row({
-  active = false,
-  interactive = true,
-  prefix,
-  suffix,
-  className,
-  children,
-  ...rest
-}: RowProps) {
+/**
+ * Compact list row used by change lists, worktrees, task lists, notes.
+ *
+ * `forwardRef` so `Row` can be used directly as a Radix `asChild` trigger
+ * target (e.g. `ContextMenu`'s `Trigger asChild`) — Radix clones its child
+ * and attaches its own ref to the underlying DOM node on every render, not
+ * just on interaction; a plain function component would log a ref warning
+ * and the trigger would not functionally attach.
+ */
+export const Row = forwardRef<HTMLDivElement, RowProps>(function Row(
+  { active = false, interactive = true, prefix, suffix, className, children, ...rest },
+  ref,
+) {
   return (
     <div
+      ref={ref}
       className={cn(
         'flex items-center gap-2 px-2 py-1 text-[13px] border-l-2',
         active ? 'border-accent bg-accent/15' : 'border-transparent',
@@ -34,4 +38,4 @@ export function Row({
       {suffix != null && <span className="shrink-0">{suffix}</span>}
     </div>
   );
-}
+});

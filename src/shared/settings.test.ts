@@ -173,6 +173,34 @@ describe('normalizeSettings — terminalRenderer', () => {
   });
 });
 
+describe('normalizeSettings — contentMode', () => {
+  it('defaults to null when absent', () => {
+    expect(normalizeSettings({}).contentMode).toBeNull();
+    expect(DEFAULT_SETTINGS.contentMode).toBeNull();
+  });
+
+  it('accepts each of the three valid mode strings verbatim', () => {
+    expect(normalizeSettings({ contentMode: 'diff' }).contentMode).toBe('diff');
+    expect(normalizeSettings({ contentMode: 'rendered' }).contentMode).toBe('rendered');
+    expect(normalizeSettings({ contentMode: 'raw' }).contentMode).toBe('raw');
+  });
+
+  it('falls back to null for an invalid/unrecognized string', () => {
+    expect(normalizeSettings({ contentMode: 'nonsense' as unknown as never }).contentMode).toBeNull();
+    expect(normalizeSettings({ contentMode: 'image' as unknown as never }).contentMode).toBeNull();
+  });
+
+  it('falls back to null for a malformed (non-string) value', () => {
+    expect(normalizeSettings({ contentMode: 42 as unknown as never }).contentMode).toBeNull();
+    expect(normalizeSettings({ contentMode: true as unknown as never }).contentMode).toBeNull();
+    expect(normalizeSettings({ contentMode: {} as unknown as never }).contentMode).toBeNull();
+  });
+
+  it('null is explicitly preserved (not treated as malformed)', () => {
+    expect(normalizeSettings({ contentMode: null }).contentMode).toBeNull();
+  });
+});
+
 describe('normalizeSettings — followTerminalCwd', () => {
   it('defaults to false when absent', () => {
     expect(normalizeSettings({}).followTerminalCwd).toBe(false);

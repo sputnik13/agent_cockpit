@@ -23,6 +23,8 @@ import type {
   ConnectionStatus,
   DiffBundle,
   DirEntry,
+  FileBytesOptions,
+  FileBytesResult,
   FileReadOptions,
   FileReadResult,
   ResolvedPath,
@@ -76,6 +78,9 @@ export interface RendererApi {
       projectId?: string,
     ): Promise<DiffBundle>;
     readFile(path: string, opts?: FileReadOptions, projectId?: string): Promise<FileReadResult>;
+    /** Bounded binary-preview read (base64 bytes, size-capped, no range, no
+     *  `ref`) — see WorkspaceProvider.readFileBytes for the full contract. */
+    readFileBytes(path: string, opts?: FileBytesOptions, projectId?: string): Promise<FileBytesResult>;
     stat(path: string, projectId?: string): Promise<StatResult>;
     listDir(dirPath: string, worktreePath?: string, projectId?: string): Promise<DirEntry[]>;
     /** Resolve + validate + classify a link target (inside/outside project). */
@@ -99,6 +104,20 @@ export interface RendererApi {
      * resolved (orphan branch, unrelated histories, no upstream + no default).
      */
     resolveBranchPoint(worktreePath: string, projectId?: string): Promise<BranchPoint | null>;
+  };
+
+  /**
+   * Bounded export (Download capability): opens a native Save-as dialog in
+   * main and streams `path`'s bytes to the chosen destination — no file bytes
+   * cross IPC. Resolves the saved absolute path, or `null` if the user
+   * canceled (nothing is written in that case). `path` resolves against
+   * `opts.worktreePath || project root`, matching every other provider read.
+   */
+  files: {
+    saveAs(
+      path: string,
+      opts?: { worktreePath?: string; projectId?: string; suggestedName?: string },
+    ): Promise<string | null>;
   };
 
   terminal: {

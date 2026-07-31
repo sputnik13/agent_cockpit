@@ -8,6 +8,9 @@ export interface MenuItemDef {
   onSelect: () => void;
   disabled?: boolean;
   danger?: boolean;
+  /** Native hover tooltip — e.g. why a disabled item is disabled. Per
+   *  ui-standards ("disabled controls Should indicate why"). */
+  title?: string;
 }
 
 const CONTENT =
@@ -43,6 +46,7 @@ export function DropdownMenu({ trigger, items }: { trigger: ReactNode; items: Me
               disabled={item.disabled}
               className={itemClass(item)}
               onSelect={item.onSelect}
+              title={item.title}
             >
               {item.label}
             </RDropdown.Item>
@@ -66,6 +70,7 @@ export function ContextMenu({ children, items }: { children: ReactNode; items: M
               disabled={item.disabled}
               className={itemClass(item)}
               onSelect={item.onSelect}
+              title={item.title}
             >
               {item.label}
             </RContext.Item>

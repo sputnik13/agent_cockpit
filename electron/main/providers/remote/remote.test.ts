@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { RemoteConnectionSpec } from '../types';
 import { RemoteProvider } from './index';
 import { Ssh2Transport } from './transport';
-import { RemoteTransportError } from './transportTypes';
+import { RemoteTransportError, type RemoteTransport } from './transportTypes';
 import { createRemoteTransport } from './transportFactory';
 
 const SPEC: RemoteConnectionSpec = {
@@ -32,6 +32,7 @@ describe('RemoteProvider (no live SSH server)', () => {
     // helper; without one each call rejects with a clear not-connected error.
     await expect(p.listWorktrees()).rejects.toThrow(/not connected/i);
     await expect(p.readFile('README.md')).rejects.toThrow(/not connected/i);
+    await expect(p.readFileBytes('README.md')).rejects.toThrow(/not connected/i);
     await expect(p.detectBeads()).rejects.toThrow(/not connected/i);
     await expect(p.getTaskGraph()).rejects.toThrow(/not connected/i);
     await expect(p.getTask('h1.1')).rejects.toThrow(/not connected/i);
@@ -107,6 +108,20 @@ describe('Ssh2Transport (no live SSH server)', () => {
 describe('createRemoteTransport factory', () => {
   it('returns an Ssh2Transport (FR6)', () => {
     expect(createRemoteTransport()).toBeInstanceOf(Ssh2Transport);
+  });
+
+  it('the returned transport satisfies stat/createReadStream through the RemoteTransport interface alone (CLARIFICATION, br ynz8.1)', async () => {
+    // Declared as RemoteTransport, NOT Ssh2Transport: this is the swap-seam
+    // guarantee itself — a future transport plugged into the factory only
+    // needs to satisfy this interface, never Ssh2Transport internals, so the
+    // test enforces the abstraction rather than merely documenting it.
+    const t: RemoteTransport = createRemoteTransport();
+    expect(typeof t.stat).toBe('function');
+    expect(typeof t.createReadStream).toBe('function');
+    // Not connected -> both reject with RemoteTransportError, exercised
+    // strictly through the interface type (no Ssh2Transport-specific access).
+    await expect(t.stat('/some/path')).rejects.toBeInstanceOf(RemoteTransportError);
+    await expect(t.createReadStream('/some/path')).rejects.toBeInstanceOf(RemoteTransportError);
   });
 });
 

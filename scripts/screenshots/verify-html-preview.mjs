@@ -93,7 +93,7 @@ async function main() {
   await sleep(1500);
 
   // Preview is the default mode.
-  const previewTab = win.locator('[role="tab"]', { hasText: 'Preview' });
+  const previewTab = win.locator('[role="tab"]', { hasText: 'Rendered' });
   record('preview tab is default/selected', (await previewTab.getAttribute('aria-selected')) === 'true');
 
   const frame = win.frameLocator('iframe[title="HTML preview"]');

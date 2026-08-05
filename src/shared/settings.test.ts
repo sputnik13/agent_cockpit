@@ -2,8 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_SETTINGS,
   SESSION_IDLE_TIMEOUT_MAX_MIN,
+  STRUCTURED_FOLD_MAX_MB_MAX,
+  STRUCTURED_FOLD_MAX_MB_MIN,
   WORKGRAPH_COLUMNS_SOFT_CAP_MAX,
   normalizeSettings,
+  structuredFoldReadMaxBytes,
 } from './settings';
 
 describe('normalizeSettings — workgraphColumnsSoftCap bounds', () => {
@@ -23,6 +26,79 @@ describe('normalizeSettings — workgraphColumnsSoftCap bounds', () => {
     expect(
       normalizeSettings({ workgraphColumnsSoftCap: '3' as unknown as number }).workgraphColumnsSoftCap,
     ).toBe(2);
+  });
+});
+
+describe('normalizeSettings — structuredFoldMaxMb bounds', () => {
+  it('defaults to 10 when absent', () => {
+    expect(normalizeSettings({}).structuredFoldMaxMb).toBe(10);
+    expect(DEFAULT_SETTINGS.structuredFoldMaxMb).toBe(10);
+  });
+
+  it('keeps a valid value and floors fractionals', () => {
+    expect(normalizeSettings({ structuredFoldMaxMb: 25 }).structuredFoldMaxMb).toBe(25);
+    expect(normalizeSettings({ structuredFoldMaxMb: 25.9 }).structuredFoldMaxMb).toBe(25);
+  });
+
+  it('clamps above the max', () => {
+    expect(normalizeSettings({ structuredFoldMaxMb: 500 }).structuredFoldMaxMb).toBe(
+      STRUCTURED_FOLD_MAX_MB_MAX,
+    );
+    expect(
+      normalizeSettings({ structuredFoldMaxMb: STRUCTURED_FOLD_MAX_MB_MAX }).structuredFoldMaxMb,
+    ).toBe(STRUCTURED_FOLD_MAX_MB_MAX);
+  });
+
+  it('rejects < MIN -> default (deliberate asymmetry: NOT clamped up to MIN, unlike the above-MAX case)', () => {
+    expect(normalizeSettings({ structuredFoldMaxMb: 0 }).structuredFoldMaxMb).toBe(10);
+    expect(
+      normalizeSettings({ structuredFoldMaxMb: STRUCTURED_FOLD_MAX_MB_MIN - 1 }).structuredFoldMaxMb,
+    ).toBe(10);
+  });
+
+  it('keeps the exact MIN value verbatim', () => {
+    expect(
+      normalizeSettings({ structuredFoldMaxMb: STRUCTURED_FOLD_MAX_MB_MIN }).structuredFoldMaxMb,
+    ).toBe(STRUCTURED_FOLD_MAX_MB_MIN);
+  });
+
+  it('rejects non-numbers, NaN, Infinity, and a missing field -> default', () => {
+    expect(
+      normalizeSettings({ structuredFoldMaxMb: '25' as unknown as number }).structuredFoldMaxMb,
+    ).toBe(10);
+    expect(normalizeSettings({ structuredFoldMaxMb: NaN }).structuredFoldMaxMb).toBe(10);
+    expect(normalizeSettings({ structuredFoldMaxMb: Infinity }).structuredFoldMaxMb).toBe(10);
+    expect(normalizeSettings({}).structuredFoldMaxMb).toBe(10);
+  });
+
+  it('round-trips through normalizeSettings: the field appears in the return object and survives a full-settings pass unchanged', () => {
+    const once = normalizeSettings({ structuredFoldMaxMb: 42 });
+    expect(once).toHaveProperty('structuredFoldMaxMb', 42);
+    // Feeding an already-normalized settings object back through must
+    // preserve the field verbatim — a genuine round trip, not just a
+    // single-field construction.
+    expect(normalizeSettings(once).structuredFoldMaxMb).toBe(42);
+  });
+});
+
+// local_repo_explorer-ftbq: the read-cap override that makes the
+// structural-fold size degrade actually reachable — see the function's own
+// doc comment in settings.ts for the full rationale.
+describe('structuredFoldReadMaxBytes', () => {
+  it('is exactly 2x the threshold, in bytes', () => {
+    expect(structuredFoldReadMaxBytes(1)).toBe(2 * 1024 * 1024);
+    expect(structuredFoldReadMaxBytes(10)).toBe(20 * 1024 * 1024);
+    expect(structuredFoldReadMaxBytes(100)).toBe(200 * 1024 * 1024);
+  });
+
+  it('is strictly greater than the threshold it is derived from (bytes)', () => {
+    for (const mb of [STRUCTURED_FOLD_MAX_MB_MIN, 10, STRUCTURED_FOLD_MAX_MB_MAX]) {
+      expect(structuredFoldReadMaxBytes(mb)).toBeGreaterThan(mb * 1024 * 1024);
+    }
+  });
+
+  it('is a pure function: same input always yields the same output, no hidden state', () => {
+    expect(structuredFoldReadMaxBytes(7)).toBe(structuredFoldReadMaxBytes(7));
   });
 });
 

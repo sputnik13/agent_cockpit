@@ -15,6 +15,13 @@
  *  - On a watch event tagged with `projectId`: refresh that project's addressed
  *    slice by category (git-state → re-list worktrees; working-tree → changeset
  *    refresh; beads → graph reload), targeting reads with that `projectId`.
+ *  - On an `activeWorktree` selection transition: refresh Changes AND project
+ *    the new selection to main via `watch:set-active-worktree` — main has no
+ *    other way to learn which worktree is active, and uses it to (de)establish
+ *    the lazy, at-most-one-per-project active-external-worktree watch
+ *    (`SessionManager.setActiveWorktree`, local_repo_explorer-g1je). This
+ *    module owns no watch-subscription state of its own; it only forwards the
+ *    selection `worktreeStore` already owns.
  *  - Evict a project's slices when it disappears from `projects.list()` (FR7).
  *
  * Connection truth flows only from the main `ConnectionMachine` via
@@ -23,7 +30,7 @@
 import { useChangesStore } from '@renderer/changes';
 import { useBeadsStore } from '@renderer/beads';
 import { useWorktreeStore } from '@renderer/worktree/worktreeStore';
-import { useSessionStore, useProjectsStore } from '@renderer/providerClient';
+import { agentCockpit, useSessionStore, useProjectsStore } from '@renderer/providerClient';
 import { subscribeWatch } from '@renderer/watch/hub';
 import type { ConnectionState } from '@shared/providers/types';
 
@@ -81,6 +88,16 @@ export function initPanelDataSync(): () => void {
       if (prev === slice.activeWorktree) continue;
       prevWorktree.set(projectId, slice.activeWorktree);
       void useChangesStore.getState().refresh(projectId);
+      // Project the selection to main on the SAME transition (local_repo_
+      // explorer-g1je): main has no other way to learn which worktree is
+      // active, and uses this to (de)establish the lazy, at-most-one-per-
+      // project active-external-worktree watch (SessionManager.
+      // setActiveWorktree). Folded into this existing subscription rather
+      // than a second, parallel activeWorktree-diffing effect — one owning
+      // site for "detect a worktree-selection transition", per this repo's
+      // shared-behavior/no-duplicate-diffing-logic convention. Fires on
+      // every transition, including to `null` (clearForDisconnect / evict).
+      void agentCockpit.watch.setActiveWorktree(projectId, slice.activeWorktree);
     }
     // Drop bookkeeping for projects whose worktree slice was evicted.
     for (const projectId of [...prevWorktree.keys()]) {

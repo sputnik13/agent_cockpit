@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -58,7 +59,13 @@ func TestReadFile(t *testing.T) {
 	}
 }
 
-func TestReadFileTruncation(t *testing.T) {
+// Over the default cap: refuse-never-truncate (local_repo_explorer-ftbq) —
+// Content is EMPTY (never a truncated prefix), Truncated is true, and
+// SizeBytes is the TRUE on-disk size. Mirrors electron/main/git/files.ts's
+// getFile working-tree branch exactly. Renamed from the pre-fix
+// TestReadFileTruncation, which pinned the OLD (truncate-not-refuse)
+// contract this leaf replaces.
+func TestReadFileOverCapRefusesWithoutTruncating(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "big.bin")
 	big := make([]byte, maxReadFileBytes+100)
@@ -76,14 +83,138 @@ func TestReadFileTruncation(t *testing.T) {
 	if !r.Truncated {
 		t.Fatalf("expected truncated=true")
 	}
-	if len(r.Content) != maxReadFileBytes {
-		t.Fatalf("content len = %d want %d", len(r.Content), maxReadFileBytes)
+	if r.Content != "" {
+		t.Fatalf("expected EMPTY content (refuse, never a truncated prefix), got len=%d", len(r.Content))
 	}
-	// SizeBytes must be the TRUE on-disk size (maxReadFileBytes+100), not the
-	// capped Content length (maxReadFileBytes) — a stat-derived value,
-	// independent of the truncation applied to Content.
+	// SizeBytes must be the TRUE on-disk size (maxReadFileBytes+100) —
+	// a stat-derived value, computed WITHOUT reading the file at all.
 	if want := int64(len(big)); r.SizeBytes != want {
-		t.Fatalf("sizeBytes = %d, want %d (true file size, not the capped content length %d)", r.SizeBytes, want, maxReadFileBytes)
+		t.Fatalf("sizeBytes = %d, want %d (true file size)", r.SizeBytes, want)
+	}
+}
+
+// An absent/zero maxBytes falls back to the original 2 MiB default cap —
+// same fixture/assertions as TestReadFileOverCapRefusesWithoutTruncating,
+// just spelled out explicitly against a request that OMITS maxBytes.
+func TestReadFileNoMaxBytesFallsBackToDefaultCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.bin")
+	big := make([]byte, maxReadFileBytes+1)
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := handleReadFile(json.RawMessage(`{"path":` + jstr(path) + `,"maxBytes":0}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	r := res.(readFileResult)
+	if !r.Truncated {
+		t.Fatalf("expected truncated=true under the default 2 MiB cap (maxBytes=0 must NOT be honored as a real override)")
+	}
+}
+
+// A file over the DEFAULT cap but under a caller-supplied maxBytes override
+// reads FULLY — the structural-fold size-degrade read-cap override
+// (local_repo_explorer-ftbq) this leaf exists to make reachable.
+func TestReadFileMaxBytesOverrideReadsFully(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raised.json")
+	size := maxReadFileBytes + (1 << 20) // 3 MiB — over the 2 MiB default
+	big := make([]byte, size)
+	for i := range big {
+		big[i] = 'a'
+	}
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 4 MiB override — comfortably above `size`, well under maxReadFileCapBytes.
+	res, err := handleReadFile(json.RawMessage(`{"path":` + jstr(path) + `,"maxBytes":4194304}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	r := res.(readFileResult)
+	if r.Truncated {
+		t.Fatalf("expected truncated=false: content should read fully under the raised cap")
+	}
+	if len(r.Content) != size {
+		t.Fatalf("content len = %d, want %d (full content, not capped at the default)", len(r.Content), size)
+	}
+	if r.SizeBytes != int64(size) {
+		t.Fatalf("sizeBytes = %d, want %d", r.SizeBytes, size)
+	}
+}
+
+// A requested maxBytes ABOVE maxReadFileCapBytes (12 MiB) is clamped down to
+// it rather than honored verbatim — a file between the clamp ceiling and the
+// (larger) requested value must still refuse.
+func TestReadFileMaxBytesClampedToHelperCeiling(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-fixture test in -short mode")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "beyond-ceiling.json")
+	size := maxReadFileCapBytes + (1 << 20) // 13 MiB — over the 12 MiB ceiling
+	big := make([]byte, size)
+	for i := range big {
+		big[i] = 'a'
+	}
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Request 50 MiB — far above maxReadFileCapBytes; must clamp to 12 MiB, not
+	// be honored verbatim, so this 13 MiB file still refuses.
+	res, err := handleReadFile(json.RawMessage(`{"path":` + jstr(path) + `,"maxBytes":52428800}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	r := res.(readFileResult)
+	if !r.Truncated {
+		t.Fatalf("expected truncated=true: a requested maxBytes above the helper ceiling must be clamped, not honored verbatim")
+	}
+	if r.Content != "" {
+		t.Fatalf("expected empty content on refuse, got len=%d", len(r.Content))
+	}
+	if r.SizeBytes != int64(size) {
+		t.Fatalf("sizeBytes = %d, want %d", r.SizeBytes, size)
+	}
+}
+
+// The frame-budget guard refuses a payload that fits the byte CAP but would
+// exceed the RPC frame ceiling once JSON-escaped. A control byte (0x01)
+// encodes as the escape sequence \u0001 — 6 JSON characters per 1 raw byte — so a 3 MiB raw
+// file of nothing but 0x01 bytes encodes to ~18 MiB, comfortably over
+// frameBudgetBytes (~15.94 MiB), while staying well under both the requested
+// maxBytes (6 MiB) and maxReadFileCapBytes (12 MiB). This is the scenario
+// the guard exists for: a request that the byte-count cap alone would wrongly
+// allow through, which would then get silently dropped by writeFrame
+// (protocol.go) and hang the caller forever without this check.
+func TestReadFileFrameBudgetGuardRefusesEscapeHeavyContent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-fixture test in -short mode")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "escape-heavy.bin")
+	size := 3 << 20 // 3 MiB raw
+	big := make([]byte, size)
+	for i := range big {
+		big[i] = 0x01
+	}
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := handleReadFile(json.RawMessage(`{"path":` + jstr(path) + `,"maxBytes":6291456}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	r := res.(readFileResult)
+	if !r.Truncated {
+		t.Fatalf("expected truncated=true: escape-inflated encoding should exceed the frame budget even though raw size is under the requested cap")
+	}
+	if r.Content != "" {
+		t.Fatalf("expected empty content on refuse, got len=%d", len(r.Content))
+	}
+	if r.SizeBytes != int64(size) {
+		t.Fatalf("sizeBytes = %d, want %d (true raw size, not an encoded/escaped length)", r.SizeBytes, size)
 	}
 }
 
@@ -157,14 +288,27 @@ func TestReadFileBinaryDetection(t *testing.T) {
 }
 
 // A file that is BOTH larger than maxReadFileBytes AND binary (the realistic
-// "large image/binary asset" case) must report SizeBytes as the true full
-// on-disk size — neither the capped Content length nor derived from Content —
-// with Truncated and IsBinary both true.
-func TestReadFileLargeBinarySizeBytes(t *testing.T) {
+// "large image/binary asset" case) refuses (never truncates) and reports
+// SizeBytes as the true full on-disk size. IsBinary is FALSE on this refusal
+// — deliberately, NOT a regression: refusing on the working-tree branch means
+// never reading the file at all (see effectiveReadCap's refuse branch in
+// handleReadFile), so a binary sniff is impossible without defeating the
+// point of refusing before reading. This exactly mirrors electron/main/git/
+// files.ts's getFile working-tree branch, which returns `isBinary: false`
+// unconditionally when `sizeBytes > maxBytes` for the identical reason. (The
+// consumer-visible outcome is unaffected either way: RawFile.tsx/
+// FoldingView.tsx check `truncated` BEFORE `isBinary`, so this file still
+// correctly renders the "too large" placeholder, not a false "not binary"
+// claim about content nobody read.) Renamed from the pre-fix
+// TestReadFileLargeBinarySizeBytes, which pinned the OLD (sniff-then-
+// truncate) contract this leaf replaces — see
+// TestReadFileOverCapRefusesWithoutTruncating for the plain-text sibling of
+// this same refuse-never-truncate fix.
+func TestReadFileLargeBinaryRefusesWithoutSniffing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "large.bin")
 	big := make([]byte, maxReadFileBytes+500)
-	big[10] = 0 // NUL within the binarySniffBytes prefix -> isBinary
+	big[10] = 0 // NUL within the binarySniffBytes prefix -- never actually sniffed
 	if err := os.WriteFile(path, big, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -176,14 +320,14 @@ func TestReadFileLargeBinarySizeBytes(t *testing.T) {
 	if !r.Truncated {
 		t.Fatalf("expected truncated=true")
 	}
-	if !r.IsBinary {
-		t.Fatalf("expected isBinary=true")
+	if r.IsBinary {
+		t.Fatalf("expected isBinary=false: a refused working-tree read never sniffs (mirrors local's getFile)")
 	}
-	if len(r.Content) != maxReadFileBytes {
-		t.Fatalf("content len = %d, want %d", len(r.Content), maxReadFileBytes)
+	if r.Content != "" {
+		t.Fatalf("expected EMPTY content (refuse, never a truncated prefix), got len=%d", len(r.Content))
 	}
 	if want := int64(len(big)); r.SizeBytes != want {
-		t.Fatalf("sizeBytes = %d, want %d (true size, not the capped content length)", r.SizeBytes, want)
+		t.Fatalf("sizeBytes = %d, want %d (true size, computed via stat without reading)", r.SizeBytes, want)
 	}
 }
 
@@ -257,6 +401,157 @@ func TestReadFileRefBinaryDetection(t *testing.T) {
 	}
 	if r := res.(readFileResult); r.IsBinary {
 		t.Fatalf("expected isBinary=false for a text blob at ref, got %+v", r)
+	}
+}
+
+// Over the effective cap via a git-ref read: refuse-never-truncate
+// (local_repo_explorer-ftbq) — the SAME contract as the working-tree branch
+// (TestReadFileOverCapRefusesWithoutTruncating), exercised through `git show`
+// instead of a direct file read. Content is EMPTY (the oversized blob is
+// dropped entirely, never a truncated prefix), Truncated is true, and
+// SizeBytes is the true full blob length. Unlike the working-tree branch,
+// IsBinary IS still correctly reported here (true — this fixture also
+// contains a NUL byte): sniffing costs nothing extra on the ref branch
+// because the blob is already fully in memory from `git show`, so refusing
+// does not need to skip it — mirrors local's getFile ref branch exactly (see
+// TestReadFileLargeBinaryRefusesWithoutSniffing for the working-tree branch's
+// deliberately different IsBinary=false-on-refuse behavior, and why).
+func TestReadFileRefOverCapRefusesWithoutTruncating(t *testing.T) {
+	dir := initRepo(t)
+	path := filepath.Join(dir, "big.bin")
+	big := make([]byte, maxReadFileBytes+500)
+	big[10] = 0 // NUL within the binarySniffBytes prefix -> isBinary
+	if err := os.WriteFile(path, big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, dir, "add big binary", "big.bin")
+
+	res, err := handleReadFile(json.RawMessage(`{"path":"big.bin","ref":"HEAD","cwd":` + jstr(dir) + `}`))
+	if err != nil {
+		t.Fatalf("readFile: %v", err)
+	}
+	r := res.(readFileResult)
+	if !r.Truncated {
+		t.Fatalf("expected truncated=true")
+	}
+	if r.Content != "" {
+		t.Fatalf("expected EMPTY content (refuse, never a truncated prefix), got len=%d", len(r.Content))
+	}
+	if !r.IsBinary {
+		t.Fatalf("expected isBinary=true: the ref branch sniffs before deciding to refuse (blob already in memory)")
+	}
+	if want := int64(len(big)); r.SizeBytes != want {
+		t.Fatalf("sizeBytes = %d, want %d (true blob size)", r.SizeBytes, want)
+	}
+}
+
+// commitFile stages and commits path (relative to dir) with fixed author
+// identity — shared setup for the handleReadFileBytes tests below.
+func commitFile(t *testing.T, dir, message string, paths ...string) {
+	t.Helper()
+	addArgs := append([]string{"add"}, paths...)
+	addCmd := exec.Command("git", addArgs...)
+	addCmd.Dir = dir
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	commitCmd := exec.Command("git", "commit", "-m", message)
+	commitCmd.Dir = dir
+	commitCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+}
+
+// handleReadFileBytes (br bn8a) — the byte-safe git-ref branch of the
+// binary-preview read primitive. Round-trips a committed binary blob
+// byte-identically via the []byte result field (never the string Content
+// field readFile uses, which corrupts invalid UTF-8 — br r3s6).
+func TestReadFileBytesRef(t *testing.T) {
+	dir := initRepo(t)
+	binContent := []byte{0x89, 'P', 'N', 'G', 0x00, 0x01, 0x02, 0xff, 0xfe, 0x00}
+	if err := os.WriteFile(filepath.Join(dir, "image.bin"), binContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, dir, "add binary", "image.bin")
+
+	res, err := handleReadFileBytes(json.RawMessage(`{"path":"image.bin","ref":"HEAD","cwd":` + jstr(dir) + `}`))
+	if err != nil {
+		t.Fatalf("readFileBytes: %v", err)
+	}
+	r := res.(readFileBytesResult)
+	if r.Reason != "" || !r.Exists {
+		t.Fatalf("unexpected refusal: %+v", r)
+	}
+	if !bytes.Equal(r.BytesBase64, binContent) {
+		t.Fatalf("bytes = %v, want %v", r.BytesBase64, binContent)
+	}
+	if r.SizeBytes != int64(len(binContent)) {
+		t.Fatalf("sizeBytes = %d, want %d", r.SizeBytes, len(binContent))
+	}
+}
+
+// A path absent at the given ref (e.g. an added file with no baseline
+// version) must resolve reason="missing" — never an RPC-level error — so the
+// TS side maps it to useImageBytes' existing 'absent' state instead of
+// 'unreadable'.
+func TestReadFileBytesMissingAtRef(t *testing.T) {
+	dir := initRepo(t)
+	res, err := handleReadFileBytes(json.RawMessage(`{"path":"nope.png","ref":"HEAD","cwd":` + jstr(dir) + `}`))
+	if err != nil {
+		t.Fatalf("readFileBytes: %v", err)
+	}
+	r := res.(readFileBytesResult)
+	if r.Reason != "missing" || r.Exists {
+		t.Fatalf("expected reason=missing, exists=false; got %+v", r)
+	}
+	if r.BytesBase64 != nil {
+		t.Fatalf("expected nil bytes for a missing-at-ref result, got %v", r.BytesBase64)
+	}
+}
+
+// Over maxRefBytesCap: refuse with metadata only (true blob size), never a
+// truncated prefix — the SAME refuse-never-truncate contract as the fs/SFTP
+// branches of readFileBytes, applied to the ref branch too (no weaker cap).
+func TestReadFileBytesOverCap(t *testing.T) {
+	dir := initRepo(t)
+	big := make([]byte, maxRefBytesCap+100)
+	for i := range big {
+		big[i] = 'a'
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, dir, "add big file", "big.bin")
+
+	res, err := handleReadFileBytes(json.RawMessage(`{"path":"big.bin","ref":"HEAD","cwd":` + jstr(dir) + `}`))
+	if err != nil {
+		t.Fatalf("readFileBytes: %v", err)
+	}
+	r := res.(readFileBytesResult)
+	if r.Reason != "too-large" || !r.Exists {
+		t.Fatalf("expected reason=too-large, exists=true; got Reason=%q Exists=%v", r.Reason, r.Exists)
+	}
+	if r.BytesBase64 != nil {
+		t.Fatalf("expected refuse-never-truncate: nil bytes over cap, got %d bytes", len(r.BytesBase64))
+	}
+	if r.SizeBytes != int64(len(big)) {
+		t.Fatalf("sizeBytes = %d, want %d (true blob size)", r.SizeBytes, len(big))
+	}
+}
+
+func TestReadFileBytesEmptyParams(t *testing.T) {
+	if _, err := handleReadFileBytes(json.RawMessage(`{"path":"","ref":"HEAD","cwd":"/tmp"}`)); err == nil {
+		t.Fatal("expected error for empty path")
+	}
+	if _, err := handleReadFileBytes(json.RawMessage(`{"path":"a.png","ref":"","cwd":"/tmp"}`)); err == nil {
+		t.Fatal("expected error for empty ref")
+	}
+	if _, err := handleReadFileBytes(json.RawMessage(`{"path":"a.png","ref":"HEAD","cwd":""}`)); err == nil {
+		t.Fatal("expected error for empty cwd")
 	}
 }
 

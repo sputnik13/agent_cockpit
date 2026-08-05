@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { FakeProvider } from '@shared/providers/fakeProvider';
-import type { ConnectionSpec } from './types';
+import type { ConnectionSpec, WatchSubscription } from './types';
 import { ProviderRegistry } from './registry';
 import { SessionManager } from './sessionManager';
 
@@ -237,6 +237,266 @@ describe('SessionManager session-owned watch lifecycle (FR7/NFR1)', () => {
     await sm.activate('a');
     await sm.reconnect('a');
     expect(sm.watchSubCount()).toBe(1);
+  });
+});
+
+describe('SessionManager active-external-worktree watch lifecycle (local_repo_explorer-g1je)', () => {
+  function setupWorktreeWatch(rootPath = '/repo', onCreate?: (p: FakeProvider) => void) {
+    const created = new Map<string, FakeProvider>();
+    const registry = new ProviderRegistry();
+    registry.register('local', ({ projectId }) => {
+      const p = new FakeProvider(projectId, 'local');
+      created.set(projectId, p);
+      onCreate?.(p);
+      return p;
+    });
+    const watchEvents: Array<{ projectId: string; paths: string[]; worktreePath?: string }> = [];
+    const spec: ConnectionSpec = { kind: 'local', rootPath };
+    const sm = new SessionManager(registry, {
+      loadSpec: () => spec,
+      persistActive: vi.fn(),
+      onWatch: (projectId, event, worktreePath) =>
+        watchEvents.push({ projectId, paths: event.paths, worktreePath }),
+    });
+    return { sm, created, watchEvents };
+  }
+
+  describe('path classification (external vs nested-under-base vs equal-to-base)', () => {
+    it('establishes an extra watch for a worktree EXTERNAL to the project root, alongside the primary watch, and forwards tagged events', async () => {
+      const { sm, created, watchEvents } = setupWorktreeWatch();
+      await sm.activate('a');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+      expect(sm.watchSubCount()).toBe(1); // primary watch already live
+
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      expect(sm.watchSubCount()).toBe(1); // primary watch untouched
+
+      // FakeProvider.emitWatch() with no token broadcasts to every active
+      // subscription; the WORKTREE subscription's own closure tags its event
+      // with worktreePath, the PRIMARY subscription's does not.
+      created.get('a')!.emitWatch(['data.json']);
+      expect(watchEvents).toContainEqual({
+        projectId: 'a',
+        paths: ['data.json'],
+        worktreePath: '/sibling-wt',
+      });
+      expect(watchEvents).toContainEqual({ projectId: 'a', paths: ['data.json'], worktreePath: undefined });
+    });
+
+    it('does NOT establish an extra watch when the active worktree IS the project root', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/repo');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+
+    it('does NOT establish an extra watch when the active worktree is NESTED under the project root', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/repo/.worktrees/feature');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+
+    it('treats a trailing-slash root/worktree path as equal to its normalized form (no spurious extra watch)', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/repo/');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+  });
+
+  describe('establish / replace / no-op / teardown', () => {
+    it('replaces the extra watch when the selection switches to a DIFFERENT external worktree (still exactly one)', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/sibling-1');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      await sm.setActiveWorktree('a', '/sibling-2');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+    });
+
+    it('is a no-op when called again with the identical target (no churn)', async () => {
+      const { sm, created } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      const provider = created.get('a')!;
+      const subscribeSpy = vi.spyOn(provider, 'subscribeWorktreeWatch');
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      expect(subscribeSpy).not.toHaveBeenCalled(); // no re-subscribe on a same-target call
+    });
+
+    it('tears down the extra watch when the selection moves back to the root/nested (external -> non-external)', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      await sm.setActiveWorktree('a', '/repo');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+
+    it('tears down the extra watch when the selection clears to null', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      await sm.setActiveWorktree('a', null);
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+
+    it('establishes nothing for a session that is not yet live (no cached provider)', async () => {
+      const { sm } = setupWorktreeWatch();
+      // No open()/activate() — 'a' has no session yet.
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+
+    it('establishes nothing for an unknown project (no spec resolves)', async () => {
+      const registry = new ProviderRegistry();
+      registry.register('local', ({ projectId }) => new FakeProvider(projectId));
+      const sm = new SessionManager(registry, { loadSpec: () => null, persistActive: vi.fn() });
+      await expect(sm.setActiveWorktree('x', '/sibling-wt')).resolves.toBeUndefined();
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+  });
+
+  describe('symmetric teardown (disconnect / eviction / closeAll)', () => {
+    it('stops the extra watch on a plain disconnect (status edge, no eviction) alongside the primary watch', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      await sm.disconnect('a');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+      expect(sm.watchSubCount()).toBe(0);
+    });
+
+    it('stops the extra watch on close() (eviction path)', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      await sm.close('a');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+
+    it('stops the extra watch on reconnect() (eviction path) — a fresh provider starts with no worktree selection', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      await sm.reconnect('a');
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+
+    it('closeAll() tears down every project\'s extra watch alongside every primary watch', async () => {
+      const { sm } = setupWorktreeWatch();
+      await sm.activate('a');
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+      expect(sm.watchSubCount()).toBe(1);
+      await sm.closeAll();
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+      expect(sm.watchSubCount()).toBe(0);
+    });
+
+    it("closeAll() tears down an extra watch even for a project whose PRIMARY watch never established (union-of-keys teardown)", async () => {
+      // Forces the "primary watch absent, worktree watch present" shape a
+      // union-of-watchSubs-keys-only closeAll would miss: subscribeWatch is
+      // patched to fail BEFORE activate(), so startWatch's best-effort catch
+      // (electron/main/providers/sessionManager.ts) leaves watchSubs empty
+      // for this project, while setActiveWorktree's OWN subscribeWorktreeWatch
+      // call still succeeds normally afterward.
+      const { sm, created } = setupWorktreeWatch('/repo', (p) => {
+        p.subscribeWatch = async () => {
+          throw new Error('boom: primary watch unavailable');
+        };
+      });
+      await sm.activate('a');
+      expect(sm.watchSubCount()).toBe(0); // primary watch failed to establish
+      expect(created.get('a')).toBeDefined();
+
+      await sm.setActiveWorktree('a', '/sibling-wt');
+      expect(sm.worktreeWatchSubCount()).toBe(1);
+
+      await sm.closeAll();
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+    });
+  });
+
+  describe('in-flight guard (mirrors startWatch\'s in-flight-eviction pattern)', () => {
+    it('a NEWER setActiveWorktree call supersedes an older one still resolving (rapid worktree switching): only the newer target survives, the stale one unsubscribes itself', async () => {
+      const { sm, created } = setupWorktreeWatch();
+      await sm.activate('a');
+      const provider = created.get('a')!;
+
+      // Defer the FIRST subscribeWorktreeWatch call so a second, newer call
+      // can be issued and complete before the first one resolves.
+      let releaseFirst: (() => void) | null = null;
+      let callCount = 0;
+      const original = provider.subscribeWorktreeWatch.bind(provider);
+      provider.subscribeWorktreeWatch = async (worktreePath, handler) => {
+        callCount += 1;
+        if (callCount === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return original(worktreePath, handler);
+      };
+
+      const firstCall = sm.setActiveWorktree('a', '/sibling-1'); // in flight, deferred
+      await sm.setActiveWorktree('a', '/sibling-2'); // supersedes before the first resolves
+
+      expect(sm.worktreeWatchSubCount()).toBe(1); // the NEWER target's sub only
+
+      // Release the first call's deferred subscribe; its subscription must
+      // be unsubscribed immediately as stale, not clobber the newer one.
+      releaseFirst?.();
+      await firstCall;
+
+      expect(sm.worktreeWatchSubCount()).toBe(1); // still exactly one
+    });
+
+    it('a session evicted while subscribeWorktreeWatch is in flight does not leak the subscription', async () => {
+      const { sm, created } = setupWorktreeWatch();
+      await sm.activate('a');
+      const provider = created.get('a')!;
+
+      let subscribed: WatchSubscription | null = null;
+      let releaseSubscribe: (() => void) | null = null;
+      let signalEntered: (() => void) | null = null;
+      // Resolves the INSTANT subscribeWorktreeWatch is entered (before ITS
+      // OWN internal await) — awaiting this in the test (rather than a fixed
+      // number of microtask ticks after issuing the call) is what guarantees
+      // close() below only runs once setActiveWorktree has ALREADY read a
+      // live provider and is genuinely suspended inside the subscribe call,
+      // reproducing the real eviction-mid-subscribe race deterministically.
+      const entered = new Promise<void>((resolve) => {
+        signalEntered = resolve;
+      });
+      const original = provider.subscribeWorktreeWatch.bind(provider);
+      provider.subscribeWorktreeWatch = async (worktreePath, handler) => {
+        signalEntered?.();
+        await new Promise<void>((resolve) => {
+          releaseSubscribe = resolve;
+        });
+        const sub = await original(worktreePath, handler);
+        subscribed = sub;
+        return sub;
+      };
+
+      const inFlight = sm.setActiveWorktree('a', '/sibling-wt');
+      await entered;
+      await sm.close('a'); // evicts the session while subscribeWorktreeWatch is still pending
+      releaseSubscribe?.();
+      await inFlight;
+
+      expect(sm.worktreeWatchSubCount()).toBe(0);
+      expect(subscribed).not.toBeNull();
+    });
   });
 });
 

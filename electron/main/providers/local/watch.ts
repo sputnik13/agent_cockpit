@@ -32,10 +32,23 @@ export class LocalWatchManager {
 
   constructor(private readonly rootPath: string) {}
 
-  subscribe(_globs: string[], handler: WatchHandler): WatchSubscription {
-    const token = `local-watch-${++counter}`;
+  /**
+   * Shared scaffolding for both `subscribe()` (project-root-rooted, plus the
+   * dedicated git/beads signal watchers below) and `subscribeWorktree()`
+   * (a specific worktree root, working-tree-only — no signal watchers): the
+   * ingest wiring, the `excludedSegments` derivation, and the working-tree
+   * mechanism itself. Registers the entry in `this.watches` keyed by the
+   * returned token so both callers' `unsubscribe` shares one teardown path
+   * (`unsubscribeOf`).
+   */
+  private createBase(
+    rootPath: string,
+    tokenPrefix: string,
+    handler: WatchHandler,
+  ): { token: string; active: ActiveWatch; feed: (path: string) => void } {
+    const token = `${tokenPrefix}-${++counter}`;
     const spec = deriveWatchSpec();
-    const gitignored = createGitignoreFilter(this.rootPath);
+    const gitignored = createGitignoreFilter(rootPath);
 
     // Ingest owns debounce + classification. We adapt the canonical event back
     // to the WatchEvent contract (rel path strings) the provider handler expects.
@@ -73,13 +86,37 @@ export class LocalWatchManager {
     // chokidar instance on Linux (see workingTreeWatcher.ts). globs is no longer
     // honored — chokidar v4 dropped glob support and callers only ever pass `['.']`.
     const workingTree = createWorkingTreeWatcher({
-      rootPath: this.rootPath,
+      rootPath,
       shouldIgnore: (p: string) => gitignored(p) || isExcludedPath(p),
       onPath: feed,
     });
 
     const active: ActiveWatch = { workingTree, gitWatchers: [], ingest };
     this.watches.set(token, active);
+    return { token, active, feed };
+  }
+
+  /** Shared teardown for a token registered via `createBase`, regardless of
+   *  whether it also picked up dedicated git/beads signal watchers. */
+  private unsubscribeOf(token: string): () => Promise<void> {
+    return async () => {
+      const w = this.watches.get(token);
+      if (!w) return;
+      this.watches.delete(token);
+      w.ingest.dispose();
+      for (const gw of w.gitWatchers) {
+        try {
+          gw.close();
+        } catch {
+          /* already closed */
+        }
+      }
+      await w.workingTree.close();
+    };
+  }
+
+  subscribe(_globs: string[], handler: WatchHandler): WatchSubscription {
+    const { token, active, feed } = this.createBase(this.rootPath, 'local-watch', handler);
 
     // `.git` non-recursive: top-level rewrites (HEAD on branch switch, packed-refs
     // on `git pack-refs`). We forward every filename and let the shared policy
@@ -136,23 +173,58 @@ export class LocalWatchManager {
       // No `.beads/` directory; non-beads workspace. That's fine.
     }
 
-    return {
-      token,
-      unsubscribe: async () => {
-        const w = this.watches.get(token);
-        if (!w) return;
-        this.watches.delete(token);
-        w.ingest.dispose();
-        for (const gw of w.gitWatchers) {
-          try {
-            gw.close();
-          } catch {
-            /* already closed */
-          }
-        }
-        await w.workingTree.close();
-      },
-    };
+    // `.git/worktrees` non-recursive directory watch: a linked worktree being
+    // added or removed (`git worktree add`/`remove`) changes this directory's
+    // own listing (a `<name>` entry appearing/disappearing). Deliberately NOT
+    // recursive — descending into each `<name>/` subdirectory would re-fire on
+    // every commit made INSIDE an already-known worktree (its own HEAD/index/
+    // logs churn), which is exactly the noise the shared policy's
+    // directory-level classification (`classifyWatchPath`) is built to reject.
+    // `.git/worktrees` usually does not exist until the first-ever worktree is
+    // added, so this watch commonly fails to attach at subscribe time (caught
+    // below) — the top-level `.git` watch above already covers that first
+    // creation (it's a new entry in `.git`'s own listing); this dedicated watch
+    // takes over for every worktree added/removed afterward within the same
+    // live session (local_repo_explorer-rc9n).
+    try {
+      const w = fsWatch(
+        join(this.rootPath, '.git', 'worktrees'),
+        { persistent: true },
+        (_event, filename) => {
+          feed(filename ? `.git/worktrees/${filename}` : '.git/worktrees');
+        },
+      );
+      w.on('error', () => {
+        /* .git/worktrees/ removed / watcher closed; ignore */
+      });
+      active.gitWatchers.push(w);
+    } catch {
+      // No `.git/worktrees/` yet (repo has never had a linked worktree).
+    }
+
+    return { token, unsubscribe: this.unsubscribeOf(token) };
+  }
+
+  /**
+   * Subscribe to filesystem changes rooted at a SPECIFIC worktree path,
+   * independent of `subscribe()`'s project-root-rooted watch — the mechanism
+   * behind `WorkspaceProvider.subscribeWorktreeWatch` (see that method's doc
+   * comment in `../types.ts` for the full working-tree-only contract).
+   * Emits paths relative to `worktreePath`, NOT `this.rootPath`. Deliberately
+   * does NOT add the dedicated `.git`/`.git/refs`/`.beads`/`.git/worktrees`
+   * signal watchers `subscribe()` adds above: a linked worktree's own `.git`
+   * is a plain FILE (a `gitdir:` pointer into the primary worktree's
+   * `.git/worktrees/<name>`, not a directory), so those git-state/beads
+   * signal watches are meaningless here — the project's PRIMARY `subscribe()`
+   * watch (shared repo state) already covers them. Still excludes
+   * `.git`/`.beads`/`node_modules` SEGMENTS from the working-tree mechanism
+   * itself (the same `excludedSegments` derivation `createBase` always
+   * applies), so an edit under the worktree's own `.git`-pointer-adjacent
+   * paths or a `node_modules` tree is not walked.
+   */
+  subscribeWorktree(worktreePath: string, handler: WatchHandler): WatchSubscription {
+    const { token } = this.createBase(worktreePath, 'local-watch-wt', handler);
+    return { token, unsubscribe: this.unsubscribeOf(token) };
   }
 
   async closeAll(): Promise<void> {

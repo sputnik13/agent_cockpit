@@ -6,11 +6,18 @@
  * watch events and serving reads. A session ends only by explicit `close()` or
  * idle age-out (separate proposal).
  *
- * Session-owned watch lifecycle: each session owns exactly one watch
+ * Session-owned watch lifecycle: each session owns exactly one PRIMARY watch
  * subscription, started when it reaches `connected` and stopped when it ends.
  * Teardown fires on BOTH the provider's status->disconnected/failed transition
  * AND on eviction, because a plain `disconnect()` keeps the session in the map
  * and does NOT fire `onEviction` (the CLAUDE.md symmetric-teardown trap).
+ *
+ * A session may ALSO own at most one EXTRA, lazily-established watch rooted at
+ * the project's active worktree, IFF that worktree is external to the project
+ * root (local_repo_explorer-g1je) — see `setActiveWorktree`'s doc comment.
+ * This is never an eager fanout across every known worktree: a worktree's
+ * extra watch follows the active SELECTION, not the worktree LIST, mirroring
+ * this class's own "liveness is lazy" principle for sessions themselves.
  */
 import type {
   ConnectionSpec,
@@ -35,14 +42,33 @@ export interface SessionManagerDeps {
    * Forward a live session's watch events to the renderer, tagged with the
    * originating projectId. The session lifecycle owns one watch per live
    * session; this delivers its events (the renderer no longer drives
-   * watch.subscribe from its activeId effect).
+   * watch.subscribe from its activeId effect). `worktreePath` is present only
+   * for an event from the EXTRA active-external-worktree watch (see
+   * `setActiveWorktree`) — absent (undefined) for the primary watch's events,
+   * exactly as before this parameter was added.
    */
-  onWatch?: (projectId: string, event: WatchEvent) => void;
+  onWatch?: (projectId: string, event: WatchEvent, worktreePath?: string) => void;
   /**
    * Clock for the per-session activity tracker (injected for testable idle
    * aging-out). Defaults to `Date.now`.
    */
   now?: () => number;
+}
+
+/** Strip a trailing slash (except a bare `/`), for stable path comparison. */
+function stripTrailingSlash(p: string): string {
+  return p.length > 1 ? p.replace(/\/+$/, '') : p;
+}
+
+/**
+ * Whether `path` is EXTERNAL to `base` — neither `base` itself nor nested
+ * under it. Both must already be normalized (stripTrailingSlash) by the
+ * caller. Mirrors `FoldingView.tsx`'s `toRootRelativePath` classification of
+ * a worktree relative to the project root, applied here to decide whether the
+ * active worktree needs its OWN extra watch subscription at all.
+ */
+function isExternalPath(path: string, base: string): boolean {
+  return path !== base && !path.startsWith(`${base}/`);
 }
 
 export class SessionManager {
@@ -69,6 +95,22 @@ export class SessionManager {
    * exists per session at a time. Exposed size for the NFR1 test seam.
    */
   private watchSubs = new Map<string, { token: string; sub: WatchSubscription }>();
+  /**
+   * Per-session EXTRA watch subscription rooted at the active worktree, keyed
+   * by projectId — present only while that project's active worktree is
+   * EXTERNAL to the project root (see `setActiveWorktree`). At most one entry
+   * per project, mirroring `watchSubs`'s own per-session bound.
+   */
+  private worktreeWatchSubs = new Map<string, { path: string; token: string; sub: WatchSubscription }>();
+  /**
+   * Monotonic per-project call sequence for `setActiveWorktree`, guarding
+   * against an in-flight `subscribeWorktreeWatch` resolving after a NEWER
+   * call already changed the desired target (rapid worktree switching) — the
+   * worktree-watch analog of `startWatch`'s `sessions.get(projectId) !==
+   * provider` guard, extended to also cover a superseding call for the same
+   * still-live session.
+   */
+  private worktreeWatchSeq = new Map<string, number>();
   /** Per-session last-known connection state, so we only start a watch on the
    *  EDGE into `connected` and only tear down on the edge into a terminal
    *  state — not on every repeated status emission. */
@@ -102,7 +144,9 @@ export class SessionManager {
   /** Install (or replace) the watch-event forwarder after construction (mirrors
    *  setStatusListener: the IPC `send` does not exist at module-singleton build
    *  time). */
-  setWatchListener(onWatch: (projectId: string, event: WatchEvent) => void): void {
+  setWatchListener(
+    onWatch: (projectId: string, event: WatchEvent, worktreePath?: string) => void,
+  ): void {
     this.deps.onWatch = onWatch;
   }
 
@@ -147,11 +191,34 @@ export class SessionManager {
     }
   }
 
-  /** Stop the session's live watch if present. */
+  /**
+   * Stop the session's live watch(es) if present — BOTH the primary watch AND
+   * any extra active-worktree watch (local_repo_explorer-g1je). Folding the
+   * worktree-watch teardown in here (rather than requiring every caller to
+   * remember a second call) is what makes teardown symmetric everywhere this
+   * already runs: the status->disconnected/failed edge (`handleStatus`),
+   * `notifyEviction` (disconnect/reconnect/close/failed-connect), and
+   * `closeAll` — see this repo's CLAUDE.md symmetric-teardown invariant. Do
+   * NOT split this back into two independently-called teardown paths.
+   */
   private async stopWatch(projectId: string): Promise<void> {
     const entry = this.watchSubs.get(projectId);
+    if (entry) {
+      this.watchSubs.delete(projectId);
+      try {
+        await entry.sub.unsubscribe();
+      } catch {
+        /* best-effort teardown */
+      }
+    }
+    await this.stopWorktreeWatch(projectId);
+  }
+
+  /** Stop the session's extra active-worktree watch if present. */
+  private async stopWorktreeWatch(projectId: string): Promise<void> {
+    const entry = this.worktreeWatchSubs.get(projectId);
     if (!entry) return;
-    this.watchSubs.delete(projectId);
+    this.worktreeWatchSubs.delete(projectId);
     try {
       await entry.sub.unsubscribe();
     } catch {
@@ -159,9 +226,84 @@ export class SessionManager {
     }
   }
 
-  /** Number of live watch subscriptions (NFR1 test seam: assert exactly N). */
+  /**
+   * Tell the session which worktree is currently active for `projectId` — the
+   * renderer (`panelDataSync`, following `worktreeStore`'s selection) is the
+   * SINGLE driver of this; main has no other way to learn the selection and
+   * keeps no independent "desired worktree" cache of its own beyond the
+   * bookkeeping needed to (de)establish the subscription itself. Establishes
+   * a LAZY, at-most-ONE extra watch subscription rooted at `worktreePath`,
+   * IFF it is EXTERNAL to the project root (neither the root itself nor
+   * nested under it — a nested worktree's files are already observable
+   * through the primary root-rooted watch, so a second subscription there
+   * would be redundant). `worktreePath: null` (no worktree selected, or the
+   * selection is the root/nested-under-root) tears down any existing extra
+   * subscription and establishes nothing.
+   *
+   * Same-target calls are a no-op. A call for a session that is not currently
+   * live (no cached provider — e.g. a disconnected/not-yet-opened project)
+   * tears down any existing subscription but establishes nothing; a LATER
+   * `setActiveWorktree` call (once the session is live) re-evaluates from
+   * scratch, so a selection made before connect is not silently lost forever
+   * — but it IS the renderer's responsibility to re-send it (which
+   * `panelDataSync`'s transition-diff naturally does on the session's own
+   * connect-triggered `loadWorktrees`).
+   */
+  async setActiveWorktree(projectId: string, worktreePath: string | null): Promise<void> {
+    const normalizedNew = worktreePath ? stripTrailingSlash(worktreePath) : null;
+    const existing = this.worktreeWatchSubs.get(projectId);
+    if ((existing?.path ?? null) === normalizedNew) return; // already exactly this target (or already none)
+
+    const seq = (this.worktreeWatchSeq.get(projectId) ?? 0) + 1;
+    this.worktreeWatchSeq.set(projectId, seq);
+
+    // A new target always invalidates whatever worktree sub currently exists
+    // for this project — including "switch to a different external worktree"
+    // and "switch back to the root/nested" (which needs no sub at all).
+    await this.stopWorktreeWatch(projectId);
+
+    if (normalizedNew === null) return;
+
+    const spec = this.deps.loadSpec(projectId);
+    if (!spec) return; // unknown project; nothing to compare the target against
+    const base = stripTrailingSlash(spec.kind === 'local' ? spec.rootPath : spec.remotePath);
+    if (!isExternalPath(normalizedNew, base)) return; // root or nested-under-root: no extra watch needed
+
+    const provider = this.sessions.get(projectId);
+    if (!provider) return; // session not live; nothing to subscribe to yet
+
+    try {
+      const sub = await provider.subscribeWorktreeWatch(normalizedNew, (event) =>
+        this.deps.onWatch?.(projectId, event, normalizedNew),
+      );
+      // The session may have been evicted, or a NEWER setActiveWorktree call
+      // may have already superseded this one, while subscribeWorktreeWatch
+      // was in flight; if so, unsubscribe immediately rather than leaking a
+      // watcher or clobbering the newer call's own result.
+      const stillCurrent =
+        this.sessions.get(projectId) === provider && this.worktreeWatchSeq.get(projectId) === seq;
+      if (!stillCurrent) {
+        void sub.unsubscribe();
+        return;
+      }
+      this.worktreeWatchSubs.set(projectId, { path: normalizedNew, token: sub.token, sub });
+    } catch {
+      // Best-effort, mirrors startWatch: a provider that cannot subscribe
+      // (e.g. dropped mid-request) just has no live worktree feed until the
+      // next setActiveWorktree call re-attempts it.
+    }
+  }
+
+  /** Number of live PRIMARY watch subscriptions (NFR1 test seam: assert
+   *  exactly N). */
   watchSubCount(): number {
     return this.watchSubs.size;
+  }
+
+  /** Number of live EXTRA active-worktree watch subscriptions (test seam,
+   *  mirrors `watchSubCount`). */
+  worktreeWatchSubCount(): number {
+    return this.worktreeWatchSubs.size;
   }
 
   /**
@@ -193,6 +335,9 @@ export class SessionManager {
   private notifyEviction(projectId: string): void {
     void this.stopWatch(projectId);
     this.lastState.delete(projectId);
+    // Bounded bookkeeping cleanup (mirrors lastState.delete above): an
+    // evicted project's setActiveWorktree call sequence has no further use.
+    this.worktreeWatchSeq.delete(projectId);
     for (const l of this.evictionListeners) l(projectId);
   }
 
@@ -354,8 +499,15 @@ export class SessionManager {
     const all = [...this.sessions.values()];
     this.sessions.clear();
     this.activityAt.clear();
-    for (const id of [...this.watchSubs.keys()]) await this.stopWatch(id);
+    // Union of both watch maps' keys: a project can in principle hold an
+    // extra worktree-watch subscription with no primary watch sub (e.g. the
+    // primary subscribeWatch failed best-effort while setActiveWorktree still
+    // succeeded), so iterating watchSubs alone would leak that project's
+    // worktree watch on shutdown — stopWatch tears down both per project.
+    const watchProjectIds = new Set([...this.watchSubs.keys(), ...this.worktreeWatchSubs.keys()]);
+    for (const id of watchProjectIds) await this.stopWatch(id);
     this.lastState.clear();
+    this.worktreeWatchSeq.clear();
     for (const id of [...this.statusOff.keys()]) this.unwireStatus(id);
     this.activeId = null;
     await Promise.all(all.map((p) => p.disconnect()));

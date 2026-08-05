@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Panel, PanelHeader, PanelBody, EmptyState, Spinner } from '../ui';
 import { agentCockpit, useProjectsStore } from '../providerClient';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
+import { structuredFoldReadMaxBytes } from '@shared/settings';
 import { FindBar } from './FindBar';
 import { useFindInContent } from './findInContent';
 import { parsePatch } from './parsePatch';
 import { changedLinesFromPatch } from './hunkMap';
 import { DiffView } from './DiffView';
 import { RawFile, type RawFileConfirmation } from './RawFile';
+import { FoldingView } from './FoldingView';
 import { ImageCompare } from './ImageCompare';
 import { ImageView } from './ImageView';
 import { HtmlPreview } from './HtmlPreview';
@@ -52,15 +54,19 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   const cls = classOf(path);
   const activeId = useProjectsStore((s) => s.activeId);
   // RawFile's own `readFile` result (its EXISTING read, never a new one —
-  // see RawFile's `onBinaryConfirmed` doc comment), once known: text, or one
+  // see RawFile's `onBinaryConfirmed` doc comment), once known: text (now
+  // carrying `sizeBytes` too — see RawFileConfirmation's doc comment), or one
   // of the three non-text outcomes RawFile already distinguishes for its own
   // rendering (binary/too-large/missing), carrying whatever size RawFile
-  // already has. Two independent uses below:
+  // already has. Three independent uses below:
   //  - `confirmedBinary` (kind === 'binary' only) upgrades `cls` to
   //    'generic-binary' for the rest of this file's lifetime — the ONLY
-  //    reclassification signal, and what lets an Explorer-opened PDF (etc.)
-  //    land on the graceful placeholder instead of staying on Raw's terse
-  //    "Binary file (N)" line.
+  //    binary reclassification signal, and what lets an Explorer-opened PDF
+  //    (etc.) land on the graceful placeholder instead of staying on Raw's
+  //    terse "Binary file (N)" line.
+  //  - `oversizedStructured` (kind === 'text' on a json/yaml path, size over
+  //    the `structuredFoldMaxMb` setting) downgrades `cls` to 'text' — see
+  //    the `effectiveCls` comment below (local_repo_explorer-jp2f.4).
   //  - ALL non-'text' kinds feed DiffView's placeholder too (see
   //    `diffKnownReason`/`rawFileSize` below), so an unmodified/untracked
   //    binary file — whose diff patch carries no signal at all (parsePatch.ts's
@@ -68,7 +74,56 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   //    instead of "No textual diff for this file.".
   const [rawConfirmation, setRawConfirmation] = useState<RawFileConfirmation | null>(null);
   const confirmedBinary = rawConfirmation?.kind === 'binary';
-  const effectiveCls: ContentClass = confirmedBinary ? 'generic-binary' : cls;
+  // Structural-fold size threshold (MB), read live so a Preferences change
+  // takes effect on the very next confirmation — no remount needed.
+  const structuredFoldMaxMb = useSettingsStore((s) => s.settings.structuredFoldMaxMb);
+  // Read cap (bytes) for json/yaml text reads — keyed on the PURE path class
+  // `cls`, NEVER `effectiveCls`. This is load-bearing, not a style choice: once
+  // the degrade below fires, `view` switches from 'folding-view' to 'raw-file'.
+  // If that RawFile mount read with the DEFAULT (smaller) cap instead of this
+  // raised one, it would report 'too-large', which un-sets `oversizedStructured`
+  // (it requires `kind === 'text'`) — flipping `effectiveCls` back to json/yaml,
+  // remounting FoldingView, which reports 'text' again, degrading again: an
+  // infinite mount loop. Keying on `cls` gives the SAME file the SAME cap in
+  // every mode (folding, degraded-rendered, and Raw), so the state machine is
+  // stable. See `structuredFoldReadMaxBytes`'s doc comment (src/shared/
+  // settings.ts) for the cap formula. `undefined` for every non-json/yaml
+  // class, leaving the default read cap completely unchanged for them.
+  // Live-read: a Preferences change takes effect on the next read, same
+  // discipline as `structuredFoldMaxMb` above.
+  const structuredReadMaxBytes =
+    cls === 'json' || cls === 'yaml' ? structuredFoldReadMaxBytes(structuredFoldMaxMb) : undefined;
+  // An over-threshold json/yaml file whose bytes are CONFIRMED text degrades
+  // to 'text'. This mirrors `confirmedBinary` above and is why it lives HERE
+  // rather than in `classOf` (modeSwitcher.tsx): `classOf` is pure and
+  // path-only by design (see its module doc comment — "True binary-ness is
+  // instead resolved at RUNTIME, by the component that actually reads the
+  // file's bytes"), and a size threshold is exactly as unknowable from the
+  // path alone as binary-ness is — it can only be decided once RawFile's read
+  // reports a real `sizeBytes`. Guarding on `rawConfirmation?.kind ===
+  // 'text'` (rather than e.g. `!== 'binary'`) is deliberate: it is the ONLY
+  // confirmation kind whose size means "this really is parseable json/yaml
+  // text" — 'missing' carries no size at all, and an as-yet-unconfirmed
+  // `null` must not degrade either. Both are "unknown", and unknown is never
+  // treated as over-threshold.
+  const oversizedStructured =
+    (cls === 'json' || cls === 'yaml') &&
+    rawConfirmation?.kind === 'text' &&
+    rawConfirmation.sizeBytes > structuredFoldMaxMb * 1024 * 1024;
+  // `effectiveCls` is the runtime-aware value the render dispatch,
+  // wrappable, and findable all actually key off; `cls` stays the pure
+  // baseline. Ordered so `confirmedBinary` wins outright over the size
+  // degrade: a json/yaml-PATH file whose bytes turn out to be binary must
+  // still land on the binary placeholder, never the size-degraded text view.
+  // Neither reclassification perturbs `available`/`effectiveMode` below:
+  // CLASS_MODES (modeSwitcher.tsx) gives 'json'/'yaml'/'text' the identical
+  // 3-mode array, so the mode switcher never visibly changes across this
+  // degrade — only `view` (and therefore which component renders) does.
+  const effectiveCls: ContentClass = confirmedBinary
+    ? 'generic-binary'
+    : oversizedStructured
+      ? 'text'
+      : cls;
   // Resolve relative links in the viewed file against the file's own directory.
   const linkBase = useMemo(() => {
     const slash = path.lastIndexOf('/');
@@ -247,10 +302,21 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     setMode(m);
     void setSettings({ contentMode: m });
   };
-  const wrappable = view === 'diff-view' || view === 'raw-file';
+  const wrappable = view === 'diff-view' || view === 'raw-file' || view === 'folding-view';
   // ImageCompare, ImageView, and the sandboxed HTML iframe have no searchable
-  // text in the main DOM — none of them support find-in-file.
-  const findable = view === 'diff-view' || view === 'rendered-markdown' || view === 'raw-file';
+  // text in the main DOM — none of them support find-in-file. folding-view
+  // (FoldingView) DOES support find — this leaf's pass-through body renders
+  // the same full RawFile text as raw-file — but once the real folding view
+  // ships (local_repo_explorer-jp2f.5), find will only search
+  // currently-unfolded/rendered text: a folded (collapsed) region is not in
+  // the DOM, so a match inside it will not be found until that region is
+  // expanded. This is an accepted v1 limitation, documented here rather
+  // than silently surprising a future reader.
+  const findable =
+    view === 'diff-view' ||
+    view === 'rendered-markdown' ||
+    view === 'raw-file' ||
+    view === 'folding-view';
   const revision = `${effectiveMode}|${path}|${diff.kind}|${source.kind}`;
   const find = useFindInContent(contentRef, findOpen && findable ? findQuery : '', revision);
 
@@ -374,6 +440,29 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                 // `onBinaryConfirmed` prop.
                 onBinaryConfirmed={setRawConfirmation}
                 {...(baseline !== undefined ? { gitRef: baseline } : {})}
+                {...(structuredReadMaxBytes !== undefined ? { maxBytes: structuredReadMaxBytes } : {})}
+              />
+            )}
+
+            {view === 'folding-view' && (
+              <FoldingView
+                worktreePath={worktreePath}
+                filePath={path}
+                // Reachable only via json/yaml's Rendered cell
+                // (VIEW_DISPATCH in modeSwitcher.tsx), so effectiveCls is
+                // always 'json' or 'yaml' here; computed inline (not a
+                // hoisted const) so it is only ever evaluated on this
+                // branch.
+                format={effectiveCls === 'yaml' ? 'yaml' : 'json'}
+                wrap={wrapLines}
+                // The same sole runtime classification signal the
+                // `raw-file` branch above reports through — see the
+                // `rawConfirmation` doc comment above and RawFile's
+                // `onBinaryConfirmed` prop. FoldingView's temporary body
+                // forwards this straight to its inner RawFile.
+                onBinaryConfirmed={setRawConfirmation}
+                {...(baseline !== undefined ? { gitRef: baseline } : {})}
+                {...(structuredReadMaxBytes !== undefined ? { maxBytes: structuredReadMaxBytes } : {})}
               />
             )}
 

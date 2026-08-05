@@ -119,4 +119,40 @@ describe('useImageBytes', () => {
     rerender({ path: 'b.png', wt: '/wt' });
     expect(result.current.kind).toBe('loading');
   });
+
+  // Git-ref reads (local_repo_explorer-bn8a): the image-diff baseline preview
+  // passes `{ ref: baseline }` — the byte-safe counterpart to RawFile's
+  // `gitRef` prop, now threaded through this shared hook too.
+  it('threads an optional `ref` through to readFileBytes for a git-ref (baseline) read', async () => {
+    readFileBytes.mockResolvedValue({ bytesBase64: 'QkFTRQ==', sizeBytes: 4, exists: true, reason: null });
+    const { result } = renderHook(() => useImageBytes('a.png', '/wt', { ref: 'HEAD' }));
+    await waitFor(() => expect(result.current.kind).toBe('shown'));
+    expect(result.current).toEqual({ kind: 'shown', url: 'data:image/png;base64,QkFTRQ==' });
+    expect(readFileBytes).toHaveBeenCalledWith('a.png', { worktreePath: '/wt', ref: 'HEAD' });
+  });
+
+  it('omits `ref` from the call when not supplied (working-tree read, unchanged)', async () => {
+    readFileBytes.mockResolvedValue({ bytesBase64: 'AAAA', sizeBytes: 3, exists: true, reason: null });
+    renderHook(() => useImageBytes('a.png', '/wt'));
+    await waitFor(() => expect(readFileBytes).toHaveBeenCalledWith('a.png', { worktreePath: '/wt' }));
+  });
+
+  it('reason "missing" at a ref (e.g. an added file with no baseline version) -> absent, same as a deleted working-tree file', async () => {
+    readFileBytes.mockResolvedValue({ bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' });
+    const { result } = renderHook(() => useImageBytes('new.png', '/wt', { ref: 'HEAD' }));
+    await waitFor(() => expect(result.current).toEqual({ kind: 'absent' }));
+  });
+
+  it('re-fetches and resets to loading when `ref` changes (baseline pane tracking a different diff target)', async () => {
+    readFileBytes.mockResolvedValue({ bytesBase64: 'AAAA', sizeBytes: 3, exists: true, reason: null });
+    const { result, rerender } = renderHook(
+      ({ ref }: { ref?: string }) => useImageBytes('a.png', '/wt', { ref }),
+      { initialProps: { ref: 'HEAD' } },
+    );
+    await waitFor(() => expect(result.current.kind).toBe('shown'));
+
+    readFileBytes.mockImplementation(() => new Promise(() => {})); // never resolves
+    rerender({ ref: 'main' });
+    expect(result.current.kind).toBe('loading');
+  });
 });

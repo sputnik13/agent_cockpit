@@ -3,6 +3,8 @@ import {
   DEV_ENV_MODE_OPTIONS,
   FONT_FAMILY_OPTIONS,
   FONT_SIZE_OPTIONS,
+  STRUCTURED_FOLD_MAX_MB_MAX,
+  STRUCTURED_FOLD_MAX_MB_MIN,
   TERMINAL_BACKEND_OPTIONS,
   TERMINAL_RENDERER_OPTIONS,
   THEME_OPTIONS,
@@ -225,6 +227,21 @@ export function SettingsDialog(): JSX.Element {
             onChange={(e) =>
               void set({ devEnv: { ...settings.devEnv, memoryMaxMb: Number(e.target.value) } })
             }
+          />
+        </Field>
+        <Field
+          label="Structural fold max size (MB)"
+          help="Largest JSON/YAML file the Content panel will structurally fold. Above this size the file falls back to the plain syntax-highlighted line view. Default 10."
+        >
+          <input
+            type="number"
+            min={STRUCTURED_FOLD_MAX_MB_MIN}
+            max={STRUCTURED_FOLD_MAX_MB_MAX}
+            step={1}
+            aria-label="Structural fold max size (MB)"
+            className="w-20 rounded border border-dim bg-bg px-2 py-1 text-right text-[13px] text-fg"
+            value={settings.structuredFoldMaxMb ?? 10}
+            onChange={(e) => void set({ structuredFoldMaxMb: Number(e.target.value) })}
           />
         </Field>
       </div>

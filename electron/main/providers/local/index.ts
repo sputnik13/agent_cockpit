@@ -214,4 +214,7 @@ export class LocalProvider implements WorkspaceProvider {
   async subscribeWatch(globs: string[], handler: WatchHandler): Promise<WatchSubscription> {
     return this.watch.subscribe(globs, handler);
   }
+  async subscribeWorktreeWatch(worktreePath: string, handler: WatchHandler): Promise<WatchSubscription> {
+    return this.watch.subscribeWorktree(worktreePath, handler);
+  }
 }

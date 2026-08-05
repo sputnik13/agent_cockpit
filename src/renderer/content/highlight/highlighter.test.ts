@@ -17,6 +17,7 @@ const SNIPPETS: Record<LangId, string> = {
   html: '<div class="a">hi</div>',
   css: '.a { color: red; }',
   json: '{ "a": 1, "b": [true, null] }',
+  yaml: 'key: value\nlist:\n  - a\n  - b',
   shellscript: 'echo "$HOME"\nfor f in *; do :; done',
 };
 

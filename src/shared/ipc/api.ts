@@ -120,6 +120,20 @@ export interface RendererApi {
     ): Promise<string | null>;
   };
 
+  /**
+   * The one renderer -> main watch channel (watch is otherwise not
+   * renderer-driven — see channels.ts's module doc comment). `worktreeStore`
+   * is the sole owner of the active-worktree selection; this projects that
+   * selection to main so it can (de)establish the lazy, at-most-one-per-
+   * project active-external-worktree watch (`SessionManager.setActiveWorktree`,
+   * local_repo_explorer-g1je). The renderer owns no watch-subscription state
+   * of its own — it only forwards the selection on every transition,
+   * including to `null` (no worktree selected / project switch).
+   */
+  watch: {
+    setActiveWorktree(projectId: string, worktreePath: string | null): Promise<void>;
+  };
+
   terminal: {
     open(opts: TerminalOpenOptions): Promise<string>;
     write(terminalId: string, data: string): Promise<void>;

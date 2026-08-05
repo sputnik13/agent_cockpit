@@ -26,5 +26,12 @@
  *
  * Precedent for a single shared constant module: `TERMINAL_SCROLLBACK` in
  * `src/shared/tmux/scrollback.ts`.
+ *
+ * Cross-language mirror: the remote helper's `readFileBytes` RPC (Go, serves
+ * this primitive's git-`ref` branch — local_repo_explorer-bn8a) cannot import
+ * this TS constant, so `remote-helper/commands.go`'s `maxRefBytesCap` mirrors
+ * this SAME value (same pattern as that file's `binarySniffBytes` mirroring
+ * `looksBinary`'s bound). If this value ever changes, update that constant
+ * too — this file remains the single SOURCE OF TRUTH, not a second cap.
  */
 export const FILE_BYTES_CAP = 10 * 1024 * 1024;

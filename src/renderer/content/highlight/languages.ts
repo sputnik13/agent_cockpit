@@ -16,6 +16,7 @@ export type LangId =
   | 'html'
   | 'css'
   | 'json'
+  | 'yaml'
   | 'shellscript';
 
 interface LangEntry {
@@ -36,6 +37,7 @@ const ENTRIES: Record<LangId, LangEntry> = {
   html: { exts: ['html', 'htm'], load: () => import('@shikijs/langs/html') },
   css: { exts: ['css'], load: () => import('@shikijs/langs/css') },
   json: { exts: ['json'], load: () => import('@shikijs/langs/json') },
+  yaml: { exts: ['yaml', 'yml'], load: () => import('@shikijs/langs/yaml') },
   // One shell grammar (`shellscript`, aliases bash/sh/shell/zsh) covers all three.
   shellscript: { exts: ['sh', 'bash', 'zsh'], load: () => import('@shikijs/langs/shellscript') },
 };

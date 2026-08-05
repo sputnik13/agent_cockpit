@@ -16,8 +16,8 @@ import {
   encodeFrame,
   type RpcStream,
 } from './rpcClient';
-import { assembleChangeset, mapGitStatus, toFileReadResult } from './index';
-import type { ReadFileResult } from './rpcClient';
+import { assembleChangeset, mapGitStatus, toFileBytesResult, toFileReadResult } from './index';
+import type { ReadFileBytesResult, ReadFileResult } from './rpcClient';
 import { deriveWatchSpec } from '@shared/watch/policy';
 
 /**
@@ -143,6 +143,28 @@ describe('HelperRpcClient correlation', () => {
     expect(seen[0]!.cwd).toBeUndefined();
   });
 
+  it('readFile forwards maxBytes when provided, and omits it otherwise (local_repo_explorer-ftbq)', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const { stream } = fakeHelper((req) => {
+      if (req.method === 'readFile') {
+        seen.push(req.params);
+        return { content: 'raised-cap read', truncated: false, isBinary: false, sizeBytes: 42 };
+      }
+      return null;
+    });
+    const client = new HelperRpcClient(stream);
+    await client.readFile('data.json', { worktreePath: '/wt', maxBytes: 2 * 1024 * 1024 });
+    await client.readFile('data.json', { worktreePath: '/wt' });
+    expect(seen[0]).toMatchObject({
+      path: 'data.json',
+      worktreePath: '/wt',
+      maxBytes: 2 * 1024 * 1024,
+    });
+    // Omitted when not provided -- JSON framing drops the undefined field, so
+    // the helper falls back to its own default cap.
+    expect(seen[1]!.maxBytes).toBeUndefined();
+  });
+
   it('readFile surfaces the helper isBinary verdict + sizeBytes for both binary and text content (br r3s6)', async () => {
     // Mirrors electron/main/git/files.ts's looksBinary semantics on the wire: a
     // NUL byte in the content -> isBinary true; plain text -> false. The Go
@@ -182,6 +204,21 @@ describe('HelperRpcClient correlation', () => {
       isBinary: false,
       sizeBytes: 19,
     });
+  });
+
+  it('readFileBytes (git-ref binary-preview branch, br bn8a) forwards path/ref/cwd', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const { stream } = fakeHelper((req) => {
+      if (req.method === 'readFileBytes') {
+        seen.push(req.params);
+        return { bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: '' };
+      }
+      return null;
+    });
+    const client = new HelperRpcClient(stream);
+    const res = await client.readFileBytes('assets/logo.png', 'HEAD', '/repo');
+    expect(seen[0]).toEqual({ path: 'assets/logo.png', ref: 'HEAD', cwd: '/repo' });
+    expect(res).toEqual({ bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: '' });
   });
 
   it('getDiffBundle issues ONE call carrying cwd/path/baseline and returns the bundle', async () => {
@@ -307,6 +344,38 @@ describe('toFileReadResult (br r3s6 REJECT fix: content-nulling + true sizeBytes
     expect(result.sizeBytes).toBe(5_000_000);
   });
 
+  it('nulls content when truncated is true even though isBinary is false (local_repo_explorer-ftbq refuse-never-truncate fix)', () => {
+    // The Go helper's readFile now REFUSES (never truncates) a file over its
+    // effective cap (remote-helper/commands.go's handleReadFile), but
+    // `content` stays a plain, always-present `string` field on the wire (""
+    // when refused, never absent/null). Before this fix, only `isBinary`
+    // gated the null -- a refused TEXT (non-binary) file kept its (empty but
+    // non-null) content and would win the `content !== null` branch every
+    // consumer (RawFile.tsx, FoldingView.tsx) checks first, misrendering an
+    // empty file instead of the too-large placeholder.
+    const res: ReadFileResult = {
+      content: '',
+      truncated: true,
+      isBinary: false,
+      sizeBytes: 12_582_912, // 12 MiB -- over the effective cap
+    };
+    const result = toFileReadResult(res);
+    expect(result.content).toBeNull();
+    expect(result.truncated).toBe(true);
+    expect(result.isBinary).toBe(false);
+    expect(result.sizeBytes).toBe(12_582_912);
+  });
+
+  it('a successful (non-truncated, non-binary) read is never nulled — sanity companion to the refuse-never-truncate fix above', () => {
+    const res: ReadFileResult = {
+      content: 'well under the cap',
+      truncated: false,
+      isBinary: false,
+      sizeBytes: 19,
+    };
+    expect(toFileReadResult(res).content).toBe('well under the cap');
+  });
+
   it('degrades isBinary to false against a stale helper build missing the field (never trusts the static type at runtime)', () => {
     // A pre-br-r3s6 helper's response has no isBinary/sizeBytes fields at all;
     // cast past the static type to model that wire shape precisely.
@@ -338,6 +407,52 @@ describe('toFileReadResult (br r3s6 REJECT fix: content-nulling + true sizeBytes
     const result = toFileReadResult(malformed);
     expect(result.isBinary).toBe(false);
     expect(result.content).toBe('text');
+  });
+});
+
+describe('toFileBytesResult (git-ref binary-preview branch, br bn8a)', () => {
+  // RemoteProvider has no transport-injection seam (same precedent as
+  // toFileReadResult above), so this pure adapter is exported specifically to
+  // make the readFileBytes RPC response's translation directly unit-testable.
+
+  it('passes present bytes through, mapping the RPC\'s "" reason sentinel to reason: null', () => {
+    const res: ReadFileBytesResult = { bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: '' };
+    expect(toFileBytesResult(res)).toEqual({ bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: null });
+  });
+
+  it('a 0-byte blob is present (bytesBase64: ""), not absent — reason drives the branch, never bytesBase64 truthiness', () => {
+    const res: ReadFileBytesResult = { bytesBase64: '', sizeBytes: 0, exists: true, reason: '' };
+    expect(toFileBytesResult(res)).toEqual({ bytesBase64: '', sizeBytes: 0, exists: true, reason: null });
+  });
+
+  it('maps reason "missing" (path absent at ref) to a null-bytes result, exists false', () => {
+    const res: ReadFileBytesResult = { sizeBytes: 0, exists: false, reason: 'missing' };
+    expect(toFileBytesResult(res)).toEqual({ bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' });
+  });
+
+  it('maps reason "too-large" to a null-bytes refusal carrying the true blob size, exists true', () => {
+    const res: ReadFileBytesResult = { sizeBytes: 12_582_912, exists: true, reason: 'too-large' };
+    expect(toFileBytesResult(res)).toEqual({
+      bytesBase64: null,
+      sizeBytes: 12_582_912,
+      exists: true,
+      reason: 'too-large',
+    });
+  });
+
+  it('degrades an unrecognized/malformed reason to "missing" (refuse) rather than passing it through — `exists` still reflects the wire value independently', () => {
+    const malformed = { sizeBytes: 0, exists: true, reason: 'weird-future-value' } as unknown as ReadFileBytesResult;
+    expect(toFileBytesResult(malformed)).toEqual({
+      bytesBase64: null,
+      sizeBytes: 0,
+      exists: true,
+      reason: 'missing',
+    });
+  });
+
+  it('degrades sizeBytes to 0 against a response missing the field (never trusts the static type at runtime)', () => {
+    const stale = { bytesBase64: 'Zm9v', exists: true, reason: '' } as unknown as ReadFileBytesResult;
+    expect(toFileBytesResult(stale).sizeBytes).toBe(0);
   });
 });
 

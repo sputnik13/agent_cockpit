@@ -18,6 +18,7 @@ import {
   createTerminalWindow,
   isHiddenWindow,
   nudgeClientSize,
+  nudgePaneRows,
   pushClientSize,
   releaseControlSession,
   resetControlSession,
@@ -318,6 +319,7 @@ export function ControlTerminalPanel(): JSX.Element {
         if (!pid || pid !== projectId || !win) return;
         void paneRegistry.hardRecoverTab(pid, win).catch(() => {});
         nudgeClientSize(hostRef.current);
+        nudgePaneRows(pid, win);
         logDiagnostic(
           'info',
           'control-terminal',
@@ -359,16 +361,27 @@ export function ControlTerminalPanel(): JSX.Element {
   };
   const target = activePaneId ?? '';
 
-  // Two-tier in-place tab refresh. Both repaint every pane from xterm's OWN
-  // buffer (no remount) and force a real client resize round-trip
+  // Three-tier in-place tab refresh. Both click modes repaint every pane from
+  // xterm's OWN buffer (no remount) and force a real client resize round-trip
   // (`nudgeClientSize`) so tmux actually re-emits %output and SIGWINCHes the
   // apps — a same-size push is a tmux no-op, which is why a plain repaint rarely
   // fixed reflow/size desync. The size round-trip starts SYNCHRONOUSLY so it
-  // targets the project active at CLICK time. `hard` (shift-click) additionally
-  // re-seeds normal-screen panes from capture-pane for deep desync; alternate-
-  // screen panes are left to the resize round-trip's redraw (re-seeding a live
-  // TUI would runaway-scroll — gated inside hardRecoverTab). Emits a structured
-  // diagnostic entry — no buffer/screen dump.
+  // targets the project active at CLICK time. `nudgePaneRows(projectId,
+  // windowId)` runs immediately after as the third tier — a per-pane
+  // absolute-height resize-pane round-trip — because tmux's layout algorithm
+  // propagates a same-axis ±1 row/col client resize to only the FIRST child of
+  // a split, so a stacked (top/bottom) split's non-first panes never received
+  // the SIGWINCH that makes them visually redraw until this tier was added.
+  // The immediately-after placement is load-bearing: rAF callbacks run in
+  // registration order and the command channel is FIFO, so it guarantees the
+  // per-pane commands execute only after the client-level shrink+restore
+  // completes. `hard` (shift-click) additionally re-seeds normal-screen panes
+  // from capture-pane for deep desync; alternate-screen panes are left to the
+  // resize round-trips' redraw (re-seeding a live TUI would runaway-scroll —
+  // gated inside hardRecoverTab), now backed by tier 3's per-pane SIGWINCH too,
+  // not just tier 2's (which reaches only the first pane). Emits a structured
+  // diagnostic entry — no buffer/screen dump. Full mechanism: see CLAUDE.md
+  // "Control-mode tab refresh is three-tier".
   const refreshActiveTab = (hard: boolean): void => {
     const projectId = activeId;
     const windowId = currentWindow;
@@ -380,6 +393,7 @@ export function ControlTerminalPanel(): JSX.Element {
       paneRegistry.recoverTab(projectId, windowId);
     }
     nudgeClientSize(hostRef.current);
+    nudgePaneRows(projectId, windowId);
     const sizes = ids.map((id) => {
       const s = paneRegistry.getPaneTermSize(projectId, id);
       return s ? `${id}:${s.cols}x${s.rows}` : `${id}:?`;

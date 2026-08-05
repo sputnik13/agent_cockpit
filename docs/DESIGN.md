@@ -91,14 +91,16 @@ surfaces.
    debounced, pausable) emits `evtWatch`, which the renderer uses to refetch the
    changeset and beads graph for the active worktree.
 5. `ChangesPanel` lists files (status badges, filter/search). Selecting one
-   loads it into `ContentViewer`, which classifies the file (markdown/html/image/text)
-   and offers the uniform **Diff / Rendered / Raw** modes for that class (see
-   ARCHITECTURE "Content Modes & Bounded Binary-Preview Reads"): Diff is a
-   unified diff via `parsePatch` (for images, the before/after compare),
-   Rendered is the nicest presentation — rendered Markdown with
-   `mapHunksToBlocks` changed-block callouts (with inline Mermaid + Graphviz
-   diagrams), sandboxed HTML preview, highlighted code, or the working-tree
-   image — and Raw is plain text.
+   loads it into `ContentViewer`, which classifies the file
+   (markdown/html/image/text/json/yaml) and offers the uniform **Diff /
+   Rendered / Raw** modes for that class (see ARCHITECTURE "Content Modes &
+   Bounded Binary-Preview Reads"): Diff is a unified diff via `parsePatch`
+   (for images, the before/after compare), Rendered is the nicest
+   presentation — rendered Markdown with `mapHunksToBlocks` changed-block
+   callouts (with inline Mermaid + Graphviz diagrams), sandboxed HTML
+   preview, highlighted code, structurally-folded JSON/YAML (see
+   ARCHITECTURE "Content Panel Structural Folding (JSON/YAML)"), or the
+   working-tree image — and Raw is plain text.
 6. The user marks reviewed state, leaves notes (`notes:create`), and the
    since-seen queue separates "changed now" from "already reviewed".
 
@@ -150,7 +152,7 @@ the tree (VS Code Remote-inspired thin client).
    `chmod +x`, launches it on an exec channel, and handshakes. A protocol-version
    mismatch re-provisions and relaunches once, else hard-fails.
 4. `RemoteTerminalManager.open` runs `tmux -L agent-cockpit new-session -A -s
-   agent-cockpit-terminal-<projectId>-<key>` over a PTY shell channel
+agent-cockpit-terminal-<projectId>-<key>` over a PTY shell channel
    (attach-or-create, on a dedicated socket). The agent runs inside tmux.
 5. Read surfaces call helper RPC methods (`gitStatus`, `gitDiff`,
    `listWorktrees`, `readFile`, `stat`, `watch`). Beads are read by fetching
@@ -233,7 +235,7 @@ tracked in `migrations(version)`):
 - `layouts(scope, json, updated_at)` — `scope` is `global` or
   `project:<id>`; per-project Dockview layout overrides the global default.
 - `agent_cockpit_projects(id, label, kind, connection_json, created_at,
-  last_active_at, sort_order, run_command)` — the cockpit project registry;
+last_active_at, sort_order, run_command)` — the cockpit project registry;
   `kind` is `local`|`remote`, `connection_json` stores the full
   `ConnectionSpec`, `sort_order` is the user-controlled tab order (migration
   `0010`), and `run_command` is the Run panel command (nullable, migration
@@ -241,13 +243,13 @@ tracked in `migrations(version)`):
 - `agent_cockpit_active_project(singleton, id)` — single-row pointer (CHECK
   `singleton = 0`) to the active project id.
 - `agent_cockpit_notes(id, project_id, target_kind, target_id, body, created_at,
-  updated_at, line, anchor_text)` — local review notes; `target_kind` is one of
+updated_at, line, anchor_text)` — local review notes; `target_kind` is one of
   `project|worktree|file|hunk|block|bead`. `line` (nullable, 1-based) and
   `anchor_text` (nullable, migration `0012`) make a note a **line-anchored
   comment**: `target_kind='file'`, `target_id=<repo-relative path>`, `line=<file
-  line>`, and `anchor_text` is a snapshot of that line's text. The Content panel
+line>`, and `anchor_text` is a snapshot of that line's text. The Content panel
   renders these inline (see "Content panel line notes") and flags a note as
-  *outdated* when the live line text drifts from the snapshot. A NULL `line`
+  _outdated_ when the live line text drifts from the snapshot. A NULL `line`
   keeps the prior project/file-level note. Markdown export emits `path:line`.
 
 The earlier v1 tables (`projects`, `review_state`, `notes`, `review_passes`,
@@ -345,10 +347,10 @@ The provider seam realizes the primary flows as follows:
     / `{ paneId, w, h, x, y }` tree; an output [codec](../src/shared/tmux/codec.ts)
     and hex `send-keys` builder; and [command builders](../src/shared/tmux/commands.ts)
     for structure/size/input operations. The parser accepts `string |
-    Uint8Array` but the data path must feed it raw bytes — see the raw-byte
+Uint8Array` but the data path must feed it raw bytes — see the raw-byte
     invariant in [docs/ARCHITECTURE.md](ARCHITECTURE.md#terminal-lifecycle-decoupling-invariant).
   - **Host control-session manager** owns one `tmux -L agent-cockpit -CC
-    new-session -A -s agent-cockpit-<token>` connection per project. `<token>`
+new-session -A -s agent-cockpit-<token>` connection per project. `<token>`
     is the per-machine project id by default, or — when the optional
     `deterministicSessionNames` setting is on — a sha of the project root
     (`sessionKey(root)`, [sessionKey.ts](../electron/main/providers/sessionKey.ts)),
@@ -361,9 +363,9 @@ The provider seam realizes the primary flows as follows:
     runs the same protocol over the SSH shell channel and resyncs after
     reconnect. Commands are sequenced FIFO and tagged so tmux's `%begin`/`%end`
     correlates replies; input goes back as `send-keys -t %<pane> -H
-    <hex-pairs>` to avoid quoting pitfalls.
+<hex-pairs>` to avoid quoting pitfalls.
   - **IPC bridge.** The host exposes `tmuxControl:open|close|command|input|
-    resize|capture-pane` request channels and forwards parsed notifications on
+resize|capture-pane` request channels and forwards parsed notifications on
     a single `evt:tmux` push channel ([src/shared/ipc/channels.ts](../src/shared/ipc/channels.ts)).
   - **Renderer state.** [`tmuxStore`](../src/renderer/tmux/tmuxStore.ts) is a
     zustand reducer keyed by `(projectId)` (single `activeProjectId`, slice in
@@ -385,32 +387,56 @@ The provider seam realizes the primary flows as follows:
     reparents the registry container into the current panel host; tabs are
     driven from `%window-add`/`%window-close`/`%window-renamed`, and split
     layouts from `%layout-change`. Pane focus tracks
-    `%window-pane-changed`/`%session-window-changed`. Tab labels prefer the
-    SCREEN-style title (`\ek...\e\\`, extracted by
-    [`extractScreenTitle`](../src/renderer/tmux/extractScreenTitle.ts)) over
-    the window name when the running program sets one.
-  - **In-place tab refresh (two tiers).** The tab toolbar refresh control has two
-    modes (`refreshActiveTab(hard)`). Both repaint every pane from xterm's OWN
-    buffer (`recoverTab` — refit + glyph-atlas rebuild + `term.refresh()`, never a
-    dispose/remount) and then force a real client resize round-trip
-    (`nudgeClientSize`: shrink one row, restore next frame). The round-trip is the
-    key fix for size/reflow desync: tmux only re-emits `%output` (and SIGWINCHes
-    the pane apps) when the client size actually CHANGES, so a same-size push is a
-    no-op — which is why a plain repaint rarely fixed mis-wrapped output. The
-    resize starts **synchronously** at click time so it targets the project active
-    then; the next-frame restore is guarded on `activeProjectId` so a fast project
-    switch never resizes the wrong project. **Shift-click** is a *hard refresh*
-    (`hardRecoverTab`): one `list-panes` round-trip reads each pane's
-    `#{alternate_on}`, then panes positively on the NORMAL screen are
-    destructively re-seeded from `capture-pane` (`reseedPane` — clear + re-write,
-    reusing the latin1 re-encode seed path) for deep desync, while alternate-screen
-    panes (a live TUI) get only the non-destructive repaint and rely on the resize
-    round-trip's redraw — re-seeding them would runaway-scroll. Safe default
-    (`mayReseed`): re-seed ONLY when positively normal-screen; unknown /
-    query-failed / alternate fall back to repaint. A structured diagnostic entry
-    (project/window/pane ids, sizes, layout, `trigger=manual-refresh|hard-refresh`)
-    is logged — no buffer dump. Both modes work identically on local and remote
-    (`capturePane`/`resizeClient`/`command` exist on both transports).
+    `%window-pane-changed`/`%session-window-changed`. Tab labels are the tmux
+    window name — stable because `automatic-rename` is globally off, set via
+    `rename-window` (to the cwd basename at creation, or by the user via
+    double-click) — falling back to the 1-based tab index when the window is
+    unnamed. The SCREEN-style title (`\ek...\e\\`, extracted and stripped by
+    [`extractScreenTitle`](../src/renderer/tmux/extractScreenTitle.ts)) is
+    shown only in the tab's hover tooltip; it is never promoted to the label.
+    See CLAUDE.md "Control-mode window titles are stable & cockpit-owned".
+  - **In-place tab refresh (three tiers).** The tab toolbar refresh control has
+    two click modes (`refreshActiveTab(hard)`), and both run all three tiers.
+    Tier 1 repaints every pane from xterm's OWN buffer (`recoverTab` — refit +
+    glyph-atlas rebuild + `term.refresh()`, never a dispose/remount). Tier 2
+    forces a real client resize round-trip (`nudgeClientSize`: shrink one row
+    from tmux's own current window-layout size, restore that exact captured
+    value next frame — captured once at click time, never recomputed) — the
+    key fix for size/reflow desync: tmux only re-emits `%output` (and
+    SIGWINCHes the pane apps) when the client size actually CHANGES, so a
+    same-size push is a no-op, which is why a plain repaint rarely fixed
+    mis-wrapped output. The resize starts **synchronously** at click time so
+    it targets the project active then; the next-frame restore is guarded on
+    `activeProjectId` so a fast project switch never resizes the wrong
+    project. Tier 3 (`nudgePaneRows`) is a per-pane
+    absolute-height `resize-pane` round-trip (shrink one row, brief
+    server-side delay, restore) for every leaf pane in the active window's
+    layout: it exists because tmux's layout algorithm propagates a same-axis
+    ±1 row/col client resize (tier 2) to only the FIRST child of a split, so a
+    stacked (top/bottom) split's non-first panes never got a SIGWINCH from
+    tier 2 alone. `nudgePaneRows` is skipped (zero commands sent) for a
+    **zoomed** window and for a window with **fewer than 2** layout leaves —
+    both already fully covered by tier 2 — and, per leaf, for any pane with
+    **height < 2**. It MUST be called **immediately after** `nudgeClientSize`:
+    both defer to one `requestAnimationFrame`, rAF callbacks fire in
+    registration order, and the command channel's FIFO ordering then
+    guarantees the per-pane commands execute only after the client-level
+    shrink+restore completes. **Shift-click** is a _hard refresh_
+    (`hardRecoverTab`, tiers 1+2+3 plus a gated re-seed): one `list-panes`
+    round-trip reads each pane's `#{alternate_on}`, then panes positively on
+    the NORMAL screen are destructively re-seeded from `capture-pane`
+    (`reseedPane` — clear + re-write, reusing the latin1 re-encode seed path)
+    for deep desync, while alternate-screen panes (a live TUI) get only the
+    non-destructive repaint, now backed by tier 3's per-pane SIGWINCH
+    (previously only tier 2's first-pane-only SIGWINCH) — re-seeding them
+    would still runaway-scroll. Safe default (`mayReseed`): re-seed ONLY when
+    positively normal-screen; unknown / query-failed / alternate fall back to
+    repaint. A structured diagnostic entry (project/window/pane ids, sizes,
+    layout, `trigger=manual-refresh|hard-refresh`) is logged — no buffer dump.
+    All three tiers work identically on local and remote
+    (`capturePane`/`resizeClient`/`command` exist on both transports). Full
+    mechanism, root cause, and the single-flight/ordering guardrails: see
+    CLAUDE.md "Control-mode tab refresh is three-tier".
   - **New-split focus.** A split issues `split-window … -P -F '#{pane_id}'` and
     records the reply's pane id as a pending-active pane; the active-pane
     resolution prefers it once it appears in `layout`, moving **both** the visual
@@ -487,6 +513,7 @@ The provider seam realizes the primary flows as follows:
   node/row in any view — or any column — selects it). The view flag persists per
   project in `localStorage`. The views are read-only navigation; beads mutation
   lives only in `TaskDetail` (comments / add-child / lifecycle).
+
 - **Bead lifecycle states & transitions.** What an agent picks up is driven by
   `br ready`, defined by `br` as **`open` AND unblocked AND not-deferred** — so
   **only `open` is ever ready**. `br`'s `Status` is a JSON-Schema enum of eight
@@ -495,11 +522,10 @@ The provider seam realizes the primary flows as follows:
   advisory and **any free-text status validates** (`br update --status done`
   succeeds). `--status` only refuses `closed`/`tombstone`, forcing `br close` /
   `br delete`. The cockpit supports the canonical set in three buckets:
-
   - **Ready-eligible:** `open` (shows in the workgraph as Ready only when
     unblocked and not deferred).
   - **Active / pending (not ready, returns to ready):** `in_progress` (claimed),
-    `blocked` (open with unresolved blocking deps — normally *derived* from
+    `blocked` (open with unresolved blocking deps — normally _derived_ from
     `br dep`, not hand-set), `deferred` (snoozed until a date), `draft` (captured
     but not ready to start), `pinned` (special/sticky).
   - **Terminal (done):** `closed`, `tombstone`.
@@ -535,12 +561,13 @@ The provider seam realizes the primary flows as follows:
   `graphSelectors.ts` (`deriveState`), aligned to this set: `closed`/`tombstone` →
   `done` (terminal, hidden by default); stored `blocked` → red; `deferred` →
   `Deferred`; `draft` → `Draft`; `in_progress` → its state; **only `status ===
-  'open'`** reaches `Ready` (and only when unblocked — else `dep_blocked`/
+'open'`** reaches `Ready` (and only when unblocked — else `dep_blocked`/
   `child_blocked`); everything else — `pinned` and any free-text value (e.g. an
   agent's `done`/`completed`) → **`unknown` ("Other status", warn tone)**: never
   Ready, and not hidden as terminal, so the bad status is visible and gets fixed
   rather than silently treated as done (it still blocks dependents in `br`). All
   states except `done` are visible by default in the workgraph filter.
+
 - **Sessions.** `SessionsDialog` is a management modal (opened from a Sessions
   button in the Terminal panel header, mirroring Manage Projects — not a dock
   panel) that lists `tmux` sessions on the cockpit socket via `sessions:list` and
@@ -566,12 +593,12 @@ The provider seam realizes the primary flows as follows:
     non-recursive for `HEAD`/`packed-refs` events; (3) a native Node `fs.watch`
     on `.git/refs` recursive. The working-tree watcher is platform-split: on
     **macOS/Windows** it is a single OS-level recursive `fs.watch(root,
-    {recursive:true})` (FSEvents / ReadDirectoryChangesW) — one handle for the
+{recursive:true})` (FSEvents / ReadDirectoryChangesW) — one handle for the
     whole subtree, no upfront tree walk, no per-file FD; on **Linux** it is
     chokidar, because Linux has no recursive inotify (`fs.watch({recursive:true})`
     is emulated per-directory and cannot prune `node_modules` before adding
     watches, so chokidar's `ignored`-pruned descent adds fewer inotify watches).
-    The whole-tree *coverage* (tracked + untracked, so new files are caught) is
+    The whole-tree _coverage_ (tracked + untracked, so new files are caught) is
     required for the Changes panel; the per-FD cost on macOS was only chokidar
     v4's walk-and-watch-per-dir implementation, removed by the native path. Both
     paths apply the same `gitignore + excluded-segment` predicate (the native
@@ -599,7 +626,7 @@ The provider seam realizes the primary flows as follows:
     setting (`src/shared/settings.ts`) reveals them. The changeset is complete in
     main — surfacing is a renderer display concern.
   - **Diff-target selector**: a toolbar `Select` in `ChangesPanel` lets the user choose
-    between *Working tree vs HEAD* (default) and *Branch point (vs `<parentRef>`)*.
+    between _Working tree vs HEAD_ (default) and _Branch point (vs `<parentRef>`)_.
     The branch-point target uses `getChangeset` / `getFileDiff` with the resolved
     `mergeBase` SHA as the `baseline` param — the same baseline param already consumed
     by both the local and remote providers. The resolved `parentRef` is shown in the
@@ -620,9 +647,12 @@ The provider seam realizes the primary flows as follows:
     `(projectId, category)` to the right `byProject` slice.
 - **Content viewer.** `ContentViewer` dispatches through the single (class, mode) → component
   table in `modeSwitcher.tsx` (uniform Diff/Rendered/Raw modes per content class; runtime
-  generic-binary reclassification — see ARCHITECTURE "Content Modes & Bounded Binary-Preview
-  Reads"): `DiffView` (`parsePatch`), `markdown.tsx`, `mermaid.tsx`/`graphviz.tsx`
-  (inline diagrams), `RawFile` (highlighted Rendered / plain Raw), `ImageCompare`/`ImageView`
+  generic-binary AND oversized-json/yaml reclassification — see ARCHITECTURE "Content Modes &
+  Bounded Binary-Preview Reads" and "Content Panel Structural Folding (JSON/YAML)"): `DiffView`
+  (`parsePatch`), `markdown.tsx`, `mermaid.tsx`/`graphviz.tsx`
+  (inline diagrams), `RawFile` (highlighted Rendered / plain Raw), `FoldingView` (json/yaml
+  source-mapped structural folding — see "JSON/YAML source-mapped structural folding" below),
+  `ImageCompare`/`ImageView`
   (bytes via the capped `readFileBytes` primitive), and the shared `BinaryPlaceholder`. The Markdown renderer runs one whole-document
   unified pass (`remark-parse` → `remark-gfm` → `remark-rehype` →
   `rehype-highlight` → a local safe-link/image transform → `rehype-stringify`)
@@ -634,7 +664,7 @@ The provider seam realizes the primary flows as follows:
   sentinel `<div data-mermaid-id="…">` / `<div data-graphviz-id="…">`
   placeholders, then substituted with `MermaidFrame` / `GraphvizFrame` React
   components at render time. Both render to SVG (mermaid in `securityLevel:
-  'strict'`, using the **ELK** layout engine by default — `@mermaid-js/layout-elk`,
+'strict'`, using the **ELK** layout engine by default — `@mermaid-js/layout-elk`,
   dynamically imported with mermaid — for cleaner, crossing-minimized routing on
   flowcharts/state diagrams, overridable per-diagram via frontmatter
   `config.layout`; graphviz via the bundled, inlined `@hpcc-js/wasm-graphviz`),
@@ -666,19 +696,19 @@ The provider seam realizes the primary flows as follows:
   content shown visually inside a **sandboxed `blob:` iframe**: the file text gets a restrictive CSP `<meta>`
   injected as its first `<head>` child (`injectPreviewCsp` →
   `default-src 'none'; img-src data:; style-src 'unsafe-inline' data:; font-src
-  data:; script-src 'unsafe-inline'`), is wrapped in a `Blob` →
+data:; script-src 'unsafe-inline'`), is wrapped in a `Blob` →
   `URL.createObjectURL` (revoked on unmount/source change), and loaded into an
   `iframe sandbox=""` (deny-all, opaque origin, **never** `allow-same-origin`).
   v1 is **static-only** — scripts do not run: `sandbox=""` denies them, and even
   a widened `allow-scripts` sandbox would be blocked by the app's global CSP
   response header (`security.ts` `onHeadersReceived` stamps `script-src 'self'
-  'wasm-unsafe-eval'` on the blob document, and the browser enforces the
+'wasm-unsafe-eval'` on the blob document, and the browser enforces the
   header∩meta intersection). Interactive scripts are a scoped v2 follow-up (see
   ARCHITECTURE "Untrusted repository content"). Binary/too-large/missing files
   degrade to a notice; find-in-file is disabled (content lives in the sandboxed
   frame).
 - **Explorer.** `ExplorerPanel` lazily lists directories via `provider.listDir(dirPath,
-  base)` and feeds file selections to the shared content viewer. Its worktree dropdown
+base)` and feeds file selections to the shared content viewer. Its worktree dropdown
   uses the shared `worktreeSelectOptions` builder (`"<workspace> - <branch>"`, primary
   first) plus one Explorer-only `Root (/)` entry. Root browsing is held in
   `explorerStore.rootBrowse` (Explorer-local, never the shared `activeWorktree`, so
@@ -795,7 +825,7 @@ line-bearing descendant under the pointer — so a note targets an exact source
 line (one list item, one table row), not just the block. Clicking it opens an
 inline composer, and existing notes for the file render beneath their line/block
 as a [LineNoteThread](../src/renderer/notes/LineNoteThread.tsx) (body, timestamp,
-delete, and an *outdated* badge); in Rendered each thread is labeled
+delete, and an _outdated_ badge); in Rendered each thread is labeled
 `L<line>: <source snippet>` so its anchor is explicit. A note is anchored to the
 file's **current line number** — the new-file line in Diff (deleted lines are not
 commentable), the file line in Raw, the hovered sub-block's source line in
@@ -804,6 +834,104 @@ Rendered — so a note added in one view appears in the others. Persistence is t
 (whitespace-trimmed) to flag drift. Both views read the active project's notes
 from `notesStore` (one source) and write via `addLineNote`; the project Notes
 panel surfaces the same notes with a `path:line` label and Markdown export.
+
+### JSON/YAML source-mapped structural folding
+
+**Why source-mapped folding, not an object-explorer widget.** The user's
+explicit design constraint (parent issue local_repo_explorer-jp2f) was:
+"parse to understand structure but map it back to the file so content isn't
+lost ... the purpose here is purely for display purposes." This ruled out
+`react-json-view-lite`/`@uiw/react-json-view` and any similar library that
+takes a pre-parsed JS value and renders its own key:value widget — those
+cannot preserve source formatting/comments/anchors/key-order/number-precision,
+and are the wrong tool for a "parse only for structure" constraint. The
+chosen approach instead extracts source-RANGE boundaries only (see
+ARCHITECTURE "Content Panel Structural Folding (JSON/YAML)" for the model
+itself) and never builds a value graph, so a folded view is always a literal
+slice of the original text.
+
+**Why `jsonc-parser` and `yaml`'s Document layer.** `jsonc-parser` is the
+same library VS Code itself uses for JSON folding/outline; its `parseTree`
+produces a structure-only node tree (container nodes carry
+`offset`/`length`/`children`, never a `value`) and already tolerates JSONC
+(comments, trailing commas) with zero extra work. `yaml`'s Document layer
+(`parseDocument`/`parseAllDocuments`) exposes each node's `range`
+character-offset tuple without ever resolving aliases or building the
+`.toJS()` value graph — exactly the fold-boundary primitive needed. Neither
+was hand-rolled: a hand-written YAML structural scanner risks missing real
+corner cases (block scalars, multiline flow collections, document markers)
+that a maintained library already solves, and the lower CST/Composer/lexer
+layer was deliberately left as a fallback only for if the Document layer's
+ranges ever proved insufficiently granular (they did not).
+
+**Why structured-clone safety matters.** The worker/cache delivery
+(ARCHITECTURE "Worker/cache delivery") sends a `FoldModel` across a Web
+Worker `postMessage` boundary, and `structuredClone` throws on a cycle. A
+resolved YAML alias graph (what `.toJS()` would produce) is exactly the shape
+a cycle would take — an anchor referenced back through its own aliases. The
+range-only design is what avoids ever constructing that graph in the first
+place, not a defensive check bolted on afterward; it is verified by a
+`structuredClone` round-trip test per fixture.
+
+**Why the threshold is a `ContentViewer`-side degrade, not a `classOf`
+branch, and a separate setting from `FILE_BYTES_CAP`.** This mirrors the
+EXISTING binary-detection reclassification mechanism exactly (`effectiveCls`
+— see ARCHITECTURE "Generic-binary is a RUNTIME reclassification") rather
+than inventing a second one, because a file's byte size, like its
+binary-ness, is only knowable once a real read has happened — `classOf`
+stays pure and path-only by design. It is a separate setting from
+`FILE_BYTES_CAP` because the two gate different read paths for different
+reasons: `FILE_BYTES_CAP` bounds a byte TRANSFER (binary preview);
+`structuredFoldMaxMb` bounds a PARSE of already-read text — a materially
+more expensive operation, particularly for YAML. A measured timing pass on
+~10 MiB fixtures found JSON parses in roughly 220–300 ms but YAML in roughly
+4.3–4.9 SECONDS (~15–20x slower at the same byte size) under the single
+shared 10 MB default both formats currently use. This asymmetry means the
+shared threshold under-protects YAML specifically — a YAML file well under
+the limit can still take multiple seconds to fold on a slow machine even off
+the main thread (worker startup + postMessage latency + the parse itself). A
+lower or separate default threshold for YAML (or a loading-state UX for
+folds exceeding roughly a second) is a recorded POSSIBLE follow-up, not a
+commitment — it did not block either the JSON or YAML folding view leaf, and
+is recorded here so a future change does not need to rediscover it. The
+degrade this threshold gates is reachable via a dedicated per-read cap
+override (`structuredFoldReadMaxBytes`, src/shared/settings.ts — 2x the
+threshold, keyed on the pure path class so `Rendered`/degraded-`Rendered`/
+`Raw` all read at the SAME cap and never flip-flop; see ARCHITECTURE 'The two
+runtime reclassifications (one rule)' and `local_repo_explorer-ftbq`), landed
+as a separate, deliberately narrow fix on top of the threshold rationale
+above, which it preserves unchanged: the threshold's own value/bounds/default
+are exactly as designed here, only the previously-unreachable read path
+underneath it was corrected.
+
+Two product decisions, resolved with the user before implementation and not
+to be re-litigated:
+
+- **All YAML documents render, stacked.** A multi-document (`---`-separated)
+  YAML stream renders EVERY document, stacked vertically with a labelled
+  separator between consecutive ones — not just the first document as a v1
+  shortcut. Each document keeps file-global (not restarted) line numbering
+  and its own anchor scope.
+- **Badge + tooltip anchor/alias linkage.** A YAML anchor definition
+  (`&name`) and each of its aliases (`*name`) carry a small, always-visible
+  glyph badge with a Radix tooltip explaining the linkage, rather than a
+  plain-text-only indicator or no indicator at all. Each badge glyph is
+  deliberately chosen to carry the ONE number not already visible in the
+  surrounding source — a definition's badge shows its alias COUNT, an
+  alias's badge shows its definition's LINE number — so the badge's meaning
+  does not depend on the tooltip actually being triggered; the tooltip
+  elaborates, it is not the only source of meaning.
+
+Explicit v1 deferrals (carried over from the parent epic's scope; a future
+change must not silently widen into these): no collapse-all/expand-all
+toolbar affordance; no persistence of fold state across file switches or
+restarts; no click-to-jump or highlight-all-references on aliases; no
+edit-in-place; no folding in Diff mode; find-in-file searches unfolded text
+only.
+
+See ARCHITECTURE "Content Panel Structural Folding (JSON/YAML)" for the fold
+model, the worker/cache delivery, the view dispatch, and the runtime
+reclassification rule these decisions produced.
 
 ### Terminal & Workgraph Feature Batch
 
@@ -837,11 +965,11 @@ existing seams without new architecture (except the beads write surface, below).
   tree focus mode (`ancestorsOf` context path + `findTreeNode` subtree, filter
   suspended, collapse ignored) and a graph focus expansion that anchors on the
   focused node with `Infinity` hops via the existing `focusedSubgraph(graph, id,
-  hops)`. A shared banner lives in `BeadsPanel`; the state filter persists per
+hops)`. A shared banner lives in `BeadsPanel`; the state filter persists per
   project (`wg-filter`, written synchronously in the toggle to avoid a stale
   cross-project write). Related-bead rows route through the shared
   `beadsStore.select`, and a completed (terminal-status) blocker is struck through.
-- **Beads write surface.** See ARCHITECTURE → *Beads read/write split*: the `br`
+- **Beads write surface.** See ARCHITECTURE → _Beads read/write split_: the `br`
   CLI seam ([runner.ts](../electron/main/beads/runner.ts)) with shared argv
   builders, five provider methods (local `spawnSync` / remote `beadsExec` RPC),
   five IPC channels, store actions that reload the graph on success and return
@@ -851,7 +979,7 @@ existing seams without new architecture (except the beads write surface, below).
 ### Control-mode renderer (`PaneRenderer`)
 
 The concrete control-mode terminal is pluggable behind a `PaneRenderer` interface
-(see ARCHITECTURE → *Control-mode renderer boundary*); `controlPaneRegistry` keeps
+(see ARCHITECTURE → _Control-mode renderer boundary_); `controlPaneRegistry` keeps
 identity, the raw-byte sink, the seed, the reaper, and the cell cache, while the
 adapter owns only the terminal (byte write, input, fit/measure, repaint, theming,
 disposal). Two adapters:
@@ -904,7 +1032,7 @@ that gap without changing the logger core:
   `LogEntry.message` verbatim, so the "never log raw pane `%output`" rule is
   preserved upstream. Wired once in `whenReady`, right after `bootstrapPath()`.
 - **Native crash capture.** `crashReporter.start({ uploadToServer: false,
-  compress: true })` runs at main module load (before `app.whenReady`) so a native
+compress: true })` runs at main module load (before `app.whenReady`) so a native
   fault — e.g. a V8/cppgc fatal abort (`EXC_BREAKPOINT` / `brk 0`) that no JS
   handler can catch — is written as a minidump under `app.getPath('crashDumps')`.
   Dumps stay local (never uploaded); the resolved dump directory is logged once at

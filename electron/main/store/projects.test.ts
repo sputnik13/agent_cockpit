@@ -63,6 +63,7 @@ describeDb('cockpit projects store', () => {
     db.pragma('foreign_keys = ON');
     db.exec(migration('0008_agent_cockpit_projects'));
     db.exec(migration('0010_agent_cockpit_project_order'));
+    db.exec(migration('0011_agent_cockpit_run_command'));
   });
 
   afterEach(() => {

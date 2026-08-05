@@ -65,6 +65,30 @@ export interface ReadFileResult {
   sizeBytes: number;
 }
 
+/**
+ * Result of the `readFileBytes` RPC (local_repo_explorer-bn8a) — the
+ * git-ref branch of the binary-preview read primitive
+ * (`WorkspaceProvider.readFileBytes`). NEVER used for a working-tree read
+ * (that stays on SFTP via `readFileBytesOverTransport`); this method exists
+ * solely to serve a `ref`-bearing call.
+ */
+export interface ReadFileBytesResult {
+  /** Base64-encoded blob bytes. Go's encoding/json marshals a []byte struct
+   *  field as base64 automatically — byte-faithful, unlike readFile's
+   *  `content` (a `string` field, which corrupts invalid UTF-8 to U+FFFD at
+   *  the JSON boundary — see remote-helper/commands.go's handleReadFileBytes
+   *  doc comment and local_repo_explorer-r3s6). Absent (undefined) whenever
+   *  `reason` is non-empty (bytes refused/absent); present — possibly `''`
+   *  for a genuinely empty blob — when `reason` is `''`. */
+  bytesBase64?: string;
+  sizeBytes: number;
+  exists: boolean;
+  /** `''` means bytes are present (the TS adapter maps that to
+   *  `FileBytesResult.reason: null`); else mirrors
+   *  `FileBytesUnavailableReason` (`'missing' | 'too-large'`). */
+  reason: string;
+}
+
 export interface StatResult {
   exists: boolean;
   size: number;
@@ -300,19 +324,37 @@ export class HelperRpcClient {
 
   readFile(
     path: string,
-    opts?: { ref?: string; cwd?: string; worktreePath?: string },
+    opts?: { ref?: string; cwd?: string; worktreePath?: string; maxBytes?: number },
   ): Promise<ReadFileResult> {
-    // ref/cwd/worktreePath are omitted from the JSON when undefined, so the
-    // helper sees empty fields and reads the working tree at the project root
-    // (unchanged behavior). When set, `ref` reads at a git ref via `git show`
-    // (run in `cwd`), and `worktreePath` resolves a working-tree read against
-    // that worktree root instead of the project root.
+    // ref/cwd/worktreePath/maxBytes are omitted from the JSON when undefined,
+    // so the helper sees empty/zero fields and reads the working tree at the
+    // project root under its own default cap (unchanged behavior). When set,
+    // `ref` reads at a git ref via `git show` (run in `cwd`), `worktreePath`
+    // resolves a working-tree read against that worktree root instead of the
+    // project root, and `maxBytes` (local_repo_explorer-ftbq) raises the
+    // helper's read cap for this call — the helper clamps it to its own
+    // frame-size-bounded ceiling (remote-helper/commands.go's
+    // maxReadFileCapBytes) rather than trusting it verbatim.
     return this.call<ReadFileResult>('readFile', {
       path,
       ref: opts?.ref,
       cwd: opts?.cwd,
       worktreePath: opts?.worktreePath,
+      maxBytes: opts?.maxBytes,
     });
+  }
+
+  /**
+   * The git-ref branch of the binary-preview read primitive
+   * (`WorkspaceProvider.readFileBytes`) — the byte-safe counterpart to
+   * `readFile`'s ref branch above (local_repo_explorer-bn8a). `path` must
+   * already be repo-relative (POSIX) — callers pass it through
+   * `RemoteProvider`'s `repoRelative()`, mirroring `readFile`'s own
+   * ref-branch requirement. NEVER used for a working-tree (non-ref) read —
+   * that stays on SFTP via `readFileBytesOverTransport`.
+   */
+  readFileBytes(path: string, ref: string, cwd: string): Promise<ReadFileBytesResult> {
+    return this.call<ReadFileBytesResult>('readFileBytes', { path, ref, cwd });
   }
 
   stat(path: string): Promise<StatResult> {

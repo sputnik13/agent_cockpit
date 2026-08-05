@@ -232,6 +232,20 @@ export class FakeProvider implements WorkspaceProvider {
     };
   }
 
+  /** Stub mirroring `subscribeWatch` — shares the same `watchers` map (keyed
+   *  by its own unique token) so `emitWatch(paths, token)` can target either
+   *  subscription independently in tests. */
+  async subscribeWorktreeWatch(_worktreePath: string, handler: WatchHandler): Promise<WatchSubscription> {
+    const token = `fake-watch-wt-${++counter}`;
+    this.watchers.set(token, handler);
+    return {
+      token,
+      unsubscribe: async () => {
+        this.watchers.delete(token);
+      },
+    };
+  }
+
   /** Test helper: drive a watch event to all (or one) active subscription. */
   emitWatch(paths: string[], token?: string): void {
     const at = new Date().toISOString();

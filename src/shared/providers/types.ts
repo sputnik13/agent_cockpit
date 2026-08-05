@@ -136,14 +136,28 @@ export interface FileReadResult {
  *  when the path itself does not exist). */
 export type FileBytesUnavailableReason = 'missing' | 'too-large' | 'is-dir';
 
-/** Options for `readFileBytes`. Deliberately has NO `ref`: a git-object byte
- *  read is a different byte source than this primitive's fs/SFTP read and is
- *  not supported in v1 — see the method's doc comment for the rationale and
- *  its consequence for image-diff baseline previews. */
+/** Options for `readFileBytes`. `ref`, added by local_repo_explorer-bn8a, is
+ *  the byte-safe counterpart to `FileReadOptions.ref` — see the method's doc
+ *  comment for the full byte-source/routing rationale. */
 export interface FileBytesOptions {
   /** Resolve the path against this worktree root instead of the project root;
-   *  empty/absent = project root. */
+   *  empty/absent = project root. Also selects the git context (cwd) a `ref`
+   *  read resolves against, so a linked worktree on another branch reads that
+   *  branch's ref — mirrors every other worktree-aware provider read. */
   worktreePath?: string;
+  /** Read the file's bytes AT this git ref instead of the working tree —
+   *  serves the image-diff baseline preview (ImageCompare's "before" pane).
+   *  Local: `simpleGit.binaryCatFile`, the same plumbing `getFile`'s text-
+   *  preview ref branch already uses (electron/main/git/files.ts). Remote:
+   *  the helper's dedicated `readFileBytes` RPC (`git show ref:path`,
+   *  base64-encoded via a Go `[]byte` field — byte-faithful, unlike the
+   *  text-only `readFile` RPC's `string` field, which corrupts invalid UTF-8
+   *  to U+FFFD at the JSON boundary); NEVER SFTP (SFTP is filesystem-only —
+   *  it cannot serve a git-object read). A path absent at `ref` (e.g. an
+   *  added file, which has no baseline version) resolves
+   *  `{ exists: false, reason: 'missing' }`, exactly like a missing
+   *  working-tree path, rather than rejecting. */
+  ref?: string;
 }
 
 /**
@@ -297,15 +311,22 @@ export interface WorkspaceProvider {
    * this primitive never passes one and no caller may add one — that would
    * silently widen a documented repo-wide non-goal.
    *
-   * `ref` (reading content at a git ref) is NOT supported — omitted entirely
-   * from `FileBytesOptions`, not merely left undefined. A git-object read is a
-   * different byte source (git plumbing) than this primitive's fs/SFTP byte
-   * source, and shipping it now would force the remote path through either
-   * the forbidden text-only helper RPC or a new exec surface. Consequence for
-   * consumers: the image-diff "before (baseline)" side has no byte source
-   * from this primitive in v1 — the child issue that wires the Image content
-   * view must render an explicit "no baseline preview" placeholder there
-   * rather than faking it from a working-tree read.
+   * `ref` (reading content at a git ref instead of the working tree) IS
+   * supported (added by local_repo_explorer-bn8a) — see
+   * `FileBytesOptions.ref`'s doc comment for the byte-source/routing detail
+   * (local: git plumbing via simpleGit; remote: a dedicated helper RPC,
+   * NEVER SFTP — SFTP is filesystem-only and cannot serve a git-object read;
+   * and never the text-only `readFile` RPC either, whose `string` field
+   * corrupts invalid UTF-8 at the JSON boundary). A `ref` read applies the
+   * SAME size gate and refuse-never-truncate contract as the working-tree
+   * path above (still `FILE_BYTES_CAP`, still no partial bytes) — this is an
+   * ADDITION to the v1 contract, not a rework of it. Consequence for
+   * consumers: the image-diff "before (baseline)" pane (ImageCompare) now has
+   * a real byte source for every add/modify/delete/rename status — a path
+   * absent at `ref` (an added file, which has no baseline version) resolves
+   * `{ exists: false, reason: 'missing' }` exactly like a missing
+   * working-tree path, which callers fold into the same "absent" rendering
+   * rather than a separate case.
    *
    * `opts.worktreePath` behaves exactly like every other provider read: base
    * = `worktreePath || project root`; an already-absolute `path` passes
@@ -342,4 +363,30 @@ export interface WorkspaceProvider {
 
   // Watch
   subscribeWatch(globs: string[], handler: WatchHandler): Promise<WatchSubscription>;
+  /**
+   * Subscribe to filesystem changes rooted at a SPECIFIC worktree path,
+   * independent of the project's primary `subscribeWatch` subscription
+   * (which stays rootPath/remotePath-scoped and structurally cannot observe
+   * a worktree outside its own subtree). Establishes a lazy, per-project,
+   * at-most-one extra watch for the ACTIVE external worktree
+   * (`SessionManager.setActiveWorktree`, local_repo_explorer-g1je) — never
+   * an eager fanout across every known worktree.
+   *
+   * Working-tree-only semantics: unlike `subscribeWatch`, this does NOT emit
+   * `.git`/`.beads` git-state/beads signal events for the worktree checkout.
+   * A linked worktree's own `.git` is a plain FILE (a `gitdir:` pointer into
+   * the primary worktree's `.git/worktrees/<name>`, not a real `.git`
+   * directory), so those signals are meaningless there — the project's
+   * PRIMARY `subscribeWatch` subscription already covers git/beads state,
+   * which is shared repo-wide across every worktree.
+   *
+   * Paths delivered by the returned subscription's `WatchEvent.paths` are
+   * relative to `worktreePath`, NOT the project root — callers must not
+   * conflate them with `subscribeWatch`'s root-relative paths. Consumers
+   * that fan these events out further (e.g. the `evt:watch` IPC payload) are
+   * expected to tag them with `worktreePath` so downstream matching (diff
+   * cache, FoldingView's read cache) can tell a worktree-relative batch
+   * apart from a root-relative one.
+   */
+  subscribeWorktreeWatch(worktreePath: string, handler: WatchHandler): Promise<WatchSubscription>;
 }

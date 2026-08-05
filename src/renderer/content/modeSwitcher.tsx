@@ -44,8 +44,25 @@ import type { ContentKind } from './selectionStore';
  * reuse those SAME components (`'diff-view'`/`'raw-file'`), not new ones —
  * reclassification only changes mode AVAILABILITY/DEFAULT (drops Raw;
  * defaults to Diff), never which component renders the content.
+ *
+ * JSON/YAML classification (`isJsonPath`/`isYamlPath`, following the same
+ * extension-set pattern as `isMarkdownPath`/`isHtmlPath`/`isImagePath`):
+ * `.json` AND `.jsonc` both classify as `'json'` — jsonc-parser (the parser
+ * the eventual structural folding view builds on; see
+ * local_repo_explorer-jp2f.1) parses JSONC (JSON-with-comments and trailing
+ * commas) natively, so there is no grammar mismatch to hide. `.json5`
+ * deliberately does NOT classify as `'json'` — it is a materially different,
+ * richer grammar (unquoted keys, single-quoted strings, more trailing-comma
+ * positions, etc.) that jsonc-parser does not parse; a `.json5` file falls
+ * through to `'text'`, unchanged from today. (Separately, and not this
+ * module's concern: Shiki's `json` highlight-language entry — see
+ * highlight/languages.ts — only recognizes the `.json` extension today, so a
+ * `.jsonc` file's Rendered view is unhighlighted plain text, exactly as
+ * before this class existed; extending that grammar mapping is a later,
+ * independent change.) `.yaml`/`.yml` both classify as `'yaml'` — no
+ * comparable variant-extension question there.
  */
-export type ContentClass = 'markdown' | 'html' | 'image' | 'text' | 'generic-binary';
+export type ContentClass = 'markdown' | 'html' | 'image' | 'text' | 'json' | 'yaml' | 'generic-binary';
 
 /** The three uniform modes every class projects into (availability varies by
  *  class; see {@link modesFor}). Presentation differs per class — Rendered is
@@ -57,6 +74,8 @@ export type ContentMode = 'diff' | 'rendered' | 'raw';
 const MARKDOWN_EXT = new Set(['.md', '.markdown', '.mdx']);
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
 const HTML_EXT = new Set(['.html', '.htm']);
+const JSON_EXT = new Set(['.json', '.jsonc']);
+const YAML_EXT = new Set(['.yaml', '.yml']);
 
 function extOf(path: string): string {
   const dot = path.lastIndexOf('.');
@@ -75,6 +94,17 @@ export function isHtmlPath(path: string): boolean {
   return HTML_EXT.has(extOf(path));
 }
 
+/** `.json` and `.jsonc` both classify as JSON; `.json5` deliberately does
+ *  not — see the module doc comment. */
+export function isJsonPath(path: string): boolean {
+  return JSON_EXT.has(extOf(path));
+}
+
+/** `.yaml` and `.yml` both classify as YAML. */
+export function isYamlPath(path: string): boolean {
+  return YAML_EXT.has(extOf(path));
+}
+
 /** Pure, path-only content-type classification. See the module doc comment
  *  for why an unrecognized extension classifies as `'text'` rather than
  *  `'generic-binary'`. */
@@ -82,6 +112,8 @@ export function classOf(path: string): ContentClass {
   if (isMarkdownPath(path)) return 'markdown';
   if (isHtmlPath(path)) return 'html';
   if (isImagePath(path)) return 'image';
+  if (isJsonPath(path)) return 'json';
+  if (isYamlPath(path)) return 'yaml';
   return 'text';
 }
 
@@ -94,6 +126,10 @@ const CLASS_MODES: Record<ContentClass, ContentMode[]> = {
   markdown: ['diff', 'rendered', 'raw'],
   html: ['diff', 'rendered', 'raw'],
   text: ['diff', 'rendered', 'raw'],
+  // json/yaml are text-like — identical availability to `text` (see
+  // VIEW_DISPATCH below for the one presentation difference: Rendered).
+  json: ['diff', 'rendered', 'raw'],
+  yaml: ['diff', 'rendered', 'raw'],
   image: ['diff', 'rendered'],
   'generic-binary': ['diff', 'rendered'],
 };
@@ -168,7 +204,8 @@ export type ViewKind =
   | 'html-preview' // HtmlPreview (sandboxed iframe)
   | 'raw-file' // RawFile
   | 'image-compare' // ImageCompare (before/after)
-  | 'image-view'; // ImageView (single current image, fit to panel)
+  | 'image-view' // ImageView (single current image, fit to panel)
+  | 'folding-view'; // FoldingView — the Rendered presentation for source-mapped structural folding (json/yaml); see FoldingView.tsx
 
 const VIEW_DISPATCH: Record<ContentClass, Record<ContentMode, ViewKind>> = {
   markdown: { diff: 'diff-view', rendered: 'rendered-markdown', raw: 'raw-file' },
@@ -179,6 +216,26 @@ const VIEW_DISPATCH: Record<ContentClass, Record<ContentMode, ViewKind>> = {
   // Rendered, false for Raw) that decides whether Shiki tokenization runs at
   // all. See RawFile's doc comment for the settled Rendered/Raw distinction.
   text: { diff: 'diff-view', rendered: 'raw-file', raw: 'raw-file' },
+  // json/yaml (both rows identical): Diff and Raw deliberately reuse the
+  // SAME existing components as `text` above (DiffView / RawFile) —
+  // unchanged from today's behavior, back when both extensions still
+  // classified as `'text'`. Rendered is the ONE new cell this leaf
+  // introduces: FoldingView, the settled seam for source-mapped structural
+  // folding (see FoldingView.tsx's doc comment). This leaf's FoldingView
+  // body is a deliberately temporary pass-through to RawFile (highlight
+  // on), so Rendered's steady-state OUTPUT is unchanged too (same
+  // Shiki-highlighted line view, same Wrap/find/line-note behavior) — only
+  // the dispatch PATH is new. One real consequence: unlike `text` above
+  // (where Rendered and Raw share this SAME 'raw-file' cell, so toggling
+  // between them just flips a prop on one persistent RawFile instance),
+  // json/yaml's Rendered and Raw are now DIFFERENT cells — toggling between
+  // them unmounts one component and mounts the other, so RawFile
+  // re-reads the file each time Rendered is (re)entered. This is accepted
+  // for this temporary seam (see the issue's Guardrails); the real folding
+  // view (local_repo_explorer-jp2f.5, which replaces this body) will have
+  // its own state model regardless.
+  json: { diff: 'diff-view', rendered: 'folding-view', raw: 'raw-file' },
+  yaml: { diff: 'diff-view', rendered: 'folding-view', raw: 'raw-file' },
   // Diff is the before/after visual compare (ImageCompare — the
   // "type-appropriate comparison" for images; see the epic's settled
   // end-state mapping). Rendered is the single current-image view

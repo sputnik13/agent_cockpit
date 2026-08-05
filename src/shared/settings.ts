@@ -147,6 +147,16 @@ export interface AppSettings {
    */
   wrapLines: boolean;
   /**
+   * Largest JSON/YAML file (MB) the Content panel will structurally fold.
+   * Above this size the file falls back to the plain syntax-highlighted line
+   * view (ContentViewer's `effectiveCls` degrade) instead of the structural
+   * fold view — folding a very large document is the more expensive
+   * presentation. Default 10. Bounds: `STRUCTURED_FOLD_MAX_MB_MIN`/`_MAX`.
+   * Name and bounds are PINNED (see local_repo_explorer-jp2f.4) so the
+   * folding-view leaves that consume it all agree — do not rename.
+   */
+  structuredFoldMaxMb: number;
+  /**
    * Last explicitly-chosen Content panel mode (Diff/Rendered/Raw), remembered
    * globally across files and projects so opening a new file seeds the mode
    * switcher from it instead of always recomputing the per-class default.
@@ -175,6 +185,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   tmuxFormatSubscriptions: false,
   workgraphColumnsSoftCap: 2,
   wrapLines: false,
+  structuredFoldMaxMb: 10,
   contentMode: null,
 };
 
@@ -187,6 +198,51 @@ export const WORKGRAPH_COLUMNS_SOFT_CAP_MAX = 6;
 
 /** Floor for the dev-env memory cap (MB). Below this a tmux server can't run. */
 export const DEV_ENV_MEMORY_MIN_MB = 256;
+
+/**
+ * Bounds for `structuredFoldMaxMb` (MB). Name and bounds PINNED here — see
+ * the field's doc comment on `AppSettings`.
+ */
+export const STRUCTURED_FOLD_MAX_MB_MIN = 1;
+export const STRUCTURED_FOLD_MAX_MB_MAX = 100;
+
+/**
+ * Read-cap override (bytes) for a json/yaml-classed file read, derived from
+ * the live `structuredFoldMaxMb` setting — passed as `FileReadOptions.maxBytes`
+ * (`src/shared/providers/types.ts`) by ContentViewer.tsx for json/yaml paths
+ * ONLY, threaded into both RawFile.tsx and FoldingView.tsx (local_repo_explorer-
+ * ftbq). Exists because the underlying text-read cap
+ * (`electron/main/git/files.ts`'s `DEFAULT_MAX_BYTES`, 256 KiB) is smaller than
+ * `STRUCTURED_FOLD_MAX_MB_MIN` (1 MB): without an override, EVERY file large
+ * enough to ever exceed the fold threshold is refused by the read cap first, so
+ * the structural-fold size degrade (ContentViewer's `oversizedStructured`,
+ * which needs a CONFIRMED-text `sizeBytes` to compare against the threshold)
+ * can never observe a successful over-threshold read and can never fire.
+ *
+ * The cap is 2x the threshold, deliberately STRICTLY GREATER than it: the cap
+ * must exceed the threshold so `sizeBytes > structuredFoldMaxMb * 1024 * 1024`
+ * can actually be observed true for a SUCCESSFUL (non-refused) read — a cap
+ * exactly equal to the threshold would make every over-threshold file refuse
+ * at the read layer before the degrade's own size comparison ever runs,
+ * reproducing the same unreachable-degrade bug this function fixes. 2x gives a
+ * full threshold-width band, `(T, 2T]`, over which the degrade is observable
+ * (a file at exactly `T` bytes still folds — see `oversizedStructured`'s
+ * strict `>`), and it scales with the user's own setting rather than a fixed
+ * constant.
+ *
+ * Bounded only by the setting's own `STRUCTURED_FOLD_MAX_MB_MAX` (100 MB) —
+ * worst case 200 MiB, and only if the user explicitly configures the maximum.
+ * The remote path clamps this further to a 12 MiB effective cap inside the Go
+ * helper (`remote-helper/commands.go`'s `maxReadFileCapBytes`, an RPC
+ * frame-size constraint this function does not need to know about) — this
+ * function is transport-agnostic and always returns the same value.
+ *
+ * A pure function of the setting value alone — no I/O, no clamping beyond the
+ * multiply (the setting itself is already clamped by `normalizeSettings`).
+ */
+export function structuredFoldReadMaxBytes(structuredFoldMaxMb: number): number {
+  return structuredFoldMaxMb * 2 * 1024 * 1024;
+}
 
 export interface SelectOptionDef {
   value: string;
@@ -292,6 +348,18 @@ export function normalizeSettings(input: unknown): AppSettings {
     typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap >= WORKGRAPH_COLUMNS_SOFT_CAP_MIN
       ? Math.min(Math.floor(rawCap), WORKGRAPH_COLUMNS_SOFT_CAP_MAX)
       : DEFAULT_SETTINGS.workgraphColumnsSoftCap;
+  // Structural-fold max size (MB): same clamp shape as the columns soft cap
+  // above — a finite number >= MIN clamps (floored) to MAX; anything else
+  // (non-number, NaN, Infinity, < MIN, or missing) falls back to the
+  // default. Deliberate asymmetry, mirrored exactly from workgraphColumnsSoftCap:
+  // a too-SMALL value falls back to the DEFAULT rather than clamping up to MIN.
+  const rawFoldMaxMb = o.structuredFoldMaxMb;
+  const structuredFoldMaxMb =
+    typeof rawFoldMaxMb === 'number' &&
+    Number.isFinite(rawFoldMaxMb) &&
+    rawFoldMaxMb >= STRUCTURED_FOLD_MAX_MB_MIN
+      ? Math.min(Math.floor(rawFoldMaxMb), STRUCTURED_FOLD_MAX_MB_MAX)
+      : DEFAULT_SETTINGS.structuredFoldMaxMb;
   return {
     theme,
     fontFamily,
@@ -309,6 +377,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     tmuxFormatSubscriptions,
     workgraphColumnsSoftCap,
     wrapLines,
+    structuredFoldMaxMb,
     contentMode,
   };
 }

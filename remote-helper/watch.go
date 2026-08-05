@@ -38,7 +38,7 @@ func defaultWatchSpec() watchSpec {
 	return watchSpec{
 		NeverRecurse:         []string{"node_modules"},
 		DirectoryGranularity: []string{".git", ".beads"},
-		GitStateSignals:      []string{".git/HEAD", ".git/packed-refs", ".git/refs"},
+		GitStateSignals:      []string{".git/HEAD", ".git/packed-refs", ".git/refs", ".git/worktrees"},
 		BeadsSignals:         []string{".beads/beads.db", ".beads/issues.jsonl"},
 		DebounceMs:           200,
 	}
@@ -357,8 +357,15 @@ func (w *watcher) stop() {
 // watched at the directory level (so signal files like .git/HEAD and
 // .beads/issues.jsonl are seen) without descending into their heavy/churny
 // subtrees — except .git/refs, which is watched recursively for branch/tag
-// changes. node_modules and gitignored subtrees are pruned (EMFILE avoidance).
-// projectRoot is the repository root used for gitignore-relative paths.
+// changes, and .git/worktrees, which is watched at ITS OWN directory level
+// only (a linked worktree being added/removed changes that directory's own
+// listing) without descending into any individual worktree's metadata dir —
+// otherwise a routine commit made inside an already-known worktree (which
+// rewrites its own .git/worktrees/<name>/HEAD, /index, /logs/HEAD, …) would
+// spam a watch event on every commit, not just on add/remove
+// (local_repo_explorer-rc9n). node_modules and gitignored subtrees are pruned
+// (EMFILE avoidance). projectRoot is the repository root used for
+// gitignore-relative paths.
 func addWatchesWithSpec(fsw *fsnotify.Watcher, root, projectRoot string, spec watchSpec, gi *gitignore.GitIgnore) error {
 	neverRecurse := toSet(spec.NeverRecurse)
 	dg := toSet(spec.DirectoryGranularity)
@@ -395,6 +402,10 @@ func addWatchesWithSpec(fsw *fsnotify.Watcher, root, projectRoot string, spec wa
 				if rel == ".git/refs" || strings.HasPrefix(rel, ".git/refs/") {
 					_ = fsw.Add(path)
 					return nil
+				}
+				if rel == ".git/worktrees" {
+					_ = fsw.Add(path)
+					return filepath.SkipDir // per-worktree metadata (HEAD/index/logs) excluded
 				}
 				return filepath.SkipDir // objects, logs, hooks, info, …
 			}

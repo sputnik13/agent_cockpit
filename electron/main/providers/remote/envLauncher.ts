@@ -63,7 +63,7 @@ export function systemdScopeWrap(
     // cgroup-wide group kill) and KEEP the scope + tmux server running. Without
     // it, systemd's default scope OOMPolicy marks the scope `failed` and tears
     // the whole server down — every session/pane on the host dies, not just the
-    // runaway. Validated on s13-xeon (oom_kill>0, oom_group_kill=0, scope active).
+    // runaway. Validated on a systemd-enabled Linux host (oom_kill>0, oom_group_kill=0, scope active).
     `-p OOMPolicy=continue ` +
     // `env -u …` denies the tmux SERVER the systemd user bus so a systemd-enabled
     // tmux cannot move each new pane into its own uncapped `tmux-spawn-*.scope`

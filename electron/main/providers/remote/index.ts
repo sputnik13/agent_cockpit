@@ -31,6 +31,7 @@ import type {
   DiffBundle,
   FileBytesOptions,
   FileBytesResult,
+  FileBytesUnavailableReason,
   FileReadOptions,
   FileReadResult,
   ProjectKind,
@@ -51,7 +52,7 @@ import type { RemoteTransport } from './transportTypes';
 import { writeStreamToDest } from '../exportWrite';
 import { FILE_BYTES_CAP } from '@shared/providers/fileBytesCap';
 import { RemoteHelperLauncher, type LaunchedHelper } from './helper';
-import type { GitStatusEntry, HelperRpcClient, ReadFileResult } from './rpcClient';
+import type { GitStatusEntry, HelperRpcClient, ReadFileBytesResult, ReadFileResult } from './rpcClient';
 import { beadsArgs, beadsErrorMessage, parseComments, parseCreatedId } from '../../beads/runner';
 import { RemoteTerminalManager } from './tmux';
 import { RemoteTmuxControlManager, type ControlChannel } from './tmuxControl';
@@ -181,17 +182,23 @@ function stripRemoteFileUri(input: string): string {
 
 /**
  * The remote byte source for the bounded binary-preview read primitive
- * (`WorkspaceProvider.readFileBytes`). Exported (alongside `mapGitStatus`/
- * `assembleChangeset` above) so it is directly unit-testable against a fake
- * transport — `RemoteProvider` has no transport-injection seam (it always
- * builds its transport via `createRemoteTransport()`), so this is the only
- * way to exercise the SFTP byte-read path without a live SSH host.
+ * (`WorkspaceProvider.readFileBytes`) — the WORKING-TREE (non-`ref`) branch
+ * only. Exported (alongside `mapGitStatus`/`assembleChangeset` above) so it is
+ * directly unit-testable against a fake transport — `RemoteProvider` has no
+ * transport-injection seam (it always builds its transport via
+ * `createRemoteTransport()`), so this is the only way to exercise the SFTP
+ * byte-read path without a live SSH host.
  *
  * Deliberately goes over `RemoteTransport` SFTP (`stat` + `createReadStream`),
  * NEVER the helper RPC's `readFile` (text-only, hard-capped at 2 MiB) — see
  * the `WorkspaceProvider.readFileBytes` doc comment for the full rationale.
  * Stats first and refuses (metadata only) when missing/dir/over-cap, exactly
  * like `localReadFileBytes`; never passes a `{start,end}` range.
+ *
+ * A `ref`-bearing call NEVER reaches this function — SFTP is filesystem-only
+ * and cannot serve a git-object read; `RemoteProvider.readFileBytes` routes
+ * that case through the helper's dedicated `readFileBytes` RPC instead (see
+ * `toFileBytesResult` below, local_repo_explorer-bn8a).
  *
  * NOTE: a successful read opens TWO SFTP sessions (stat ends its own channel;
  * then `createReadStream` opens and releases a second on `'close'`/`'error'`)
@@ -221,6 +228,37 @@ export async function readFileBytesOverTransport(
 }
 
 /**
+ * Adapt a helper `readFileBytes` RPC response (the git-`ref` branch of the
+ * binary-preview read primitive — local_repo_explorer-bn8a) into the
+ * `FileBytesResult` contract. Exported (alongside `toFileReadResult`/
+ * `readFileBytesOverTransport` above) for the same reason: `RemoteProvider`
+ * has no transport-injection seam, so this pure adapter is the only way to
+ * exercise the ref-read response shape without a live SSH host + a helper
+ * build new enough to serve this RPC.
+ *
+ * `reason` is validated against the known set (plus the RPC's own `''` =
+ * "bytes present" sentinel) rather than cast blindly, so a malformed/future
+ * wire value degrades to `'missing'` (refuse) instead of silently passing an
+ * unrecognized reason through. `bytesBase64`/`sizeBytes` are read defensively
+ * (not trusted at their static type), matching `toFileReadResult`'s existing
+ * degrade-gracefully precedent for a response from a build that predates a
+ * field.
+ */
+export function toFileBytesResult(res: ReadFileBytesResult): FileBytesResult {
+  const sizeBytes = typeof res.sizeBytes === 'number' ? res.sizeBytes : 0;
+  if (res.reason === '') {
+    return {
+      bytesBase64: typeof res.bytesBase64 === 'string' ? res.bytesBase64 : '',
+      sizeBytes,
+      exists: true,
+      reason: null,
+    };
+  }
+  const reason: FileBytesUnavailableReason = res.reason === 'too-large' ? 'too-large' : 'missing';
+  return { bytesBase64: null, sizeBytes, exists: res.exists === true, reason };
+}
+
+/**
  * Adapt a helper `readFile` RPC response into the `FileReadResult` contract,
  * mirroring `LocalProvider`'s null-content-when-binary rule (electron/main/
  * git/files.ts's `getFile`: `content: isBin ? null : buf.toString('utf8')`).
@@ -235,6 +273,20 @@ export async function readFileBytesOverTransport(
  * than failing) string always won the text branch and `isBinary` was never
  * consulted.
  *
+ * `content` is ALSO nulled when `truncated === true` (local_repo_explorer-
+ * ftbq — a separate, genuinely load-bearing fix from the `isBinary` one
+ * above, found while wiring the `maxBytes` read-cap override): the Go helper
+ * now refuses (never truncates) a file over its effective cap — see
+ * remote-helper/commands.go's `handleReadFile` — but `content` is still a
+ * plain, always-present `string` field on the wire (`""` when refused, never
+ * absent), so without this OR clause a refused-but-non-null `content` would
+ * win the same `content !== null` branch every consumer checks first, and a
+ * refuse (empty content, `truncated: true`) would misrender as a genuinely
+ * empty FILE rather than the "too large to preview inline" placeholder. This
+ * mirrors local's `getFile` exactly, whose working-tree branch already
+ * returns `content: null` together with `truncated: true` — refuse-never-
+ * truncate, never a partial/truncated string silently served as complete.
+ *
  * `sizeBytes` comes from the helper's own stat/blob-length, never derived
  * from `content` — computing it via `Buffer.byteLength` over a possibly
  * U+FFFD-mangled string would inflate the reported size for binary content
@@ -248,13 +300,14 @@ export async function readFileBytesOverTransport(
  */
 export function toFileReadResult(res: ReadFileResult): FileReadResult {
   const isBinary = res.isBinary === true;
+  const truncated = res.truncated === true;
   const sizeBytes =
     typeof res.sizeBytes === 'number'
       ? res.sizeBytes
       : Buffer.byteLength(res.content ?? '', 'utf8');
   return {
-    content: isBinary ? null : res.content,
-    truncated: res.truncated,
+    content: isBinary || truncated ? null : res.content,
+    truncated,
     isBinary,
     sizeBytes,
   };
@@ -604,8 +657,15 @@ export class RemoteProvider implements WorkspaceProvider {
     // worktree (`cwd = base`). Without a ref, read the working-tree file resolved
     // against the worktree base, forwarding worktreePath so the helper honors it.
     const res = opts?.ref
-      ? await this.rpc().readFile(this.repoRelative(path), { ref: opts.ref, cwd: base })
-      : await this.rpc().readFile(this.resolveIn(base, path), { worktreePath: opts?.worktreePath });
+      ? await this.rpc().readFile(this.repoRelative(path), {
+          ref: opts.ref,
+          cwd: base,
+          maxBytes: opts?.maxBytes,
+        })
+      : await this.rpc().readFile(this.resolveIn(base, path), {
+          worktreePath: opts?.worktreePath,
+          maxBytes: opts?.maxBytes,
+        });
     return toFileReadResult(res);
   }
   async stat(path: string): Promise<StatResult> {
@@ -645,10 +705,19 @@ export class RemoteProvider implements WorkspaceProvider {
     const relPath = insideProject ? (rel === '' ? '.' : rel) : null;
     return { exists: st.exists, isDir: st.isDir, insideProject, relPath, absPath };
   }
-  // Bounded binary-preview read, over SFTP (never the helper RPC — see
-  // readFileBytesOverTransport's doc comment and the WorkspaceProvider one).
+  // Bounded binary-preview read. Working-tree (no `ref`): over SFTP, never
+  // the helper RPC (see readFileBytesOverTransport's doc comment and the
+  // WorkspaceProvider one). `ref` set (local_repo_explorer-bn8a): SFTP is
+  // filesystem-only and cannot serve a git-object read, so this routes
+  // through the helper's dedicated readFileBytes RPC instead — repoRelative()
+  // gives `git show` the repo-relative POSIX pathspec it expects, mirroring
+  // readFile's own ref branch below.
   async readFileBytes(path: string, opts?: FileBytesOptions): Promise<FileBytesResult> {
     const base = opts?.worktreePath || this.spec.remotePath;
+    if (opts?.ref) {
+      const res = await this.rpc().readFileBytes(this.repoRelative(path), opts.ref, base);
+      return toFileBytesResult(res);
+    }
     return readFileBytesOverTransport(this.transport, this.resolveIn(base, path));
   }
 
@@ -741,13 +810,21 @@ export class RemoteProvider implements WorkspaceProvider {
   // the shared watch policy (deriveWatchSpec) and pushes raw signal paths; we
   // feed them through the same ingest pipeline as the local provider so both
   // transports emit identical canonical events.
-  async subscribeWatch(_globs: string[], handler: WatchHandler): Promise<WatchSubscription> {
+  /**
+   * Shared implementation for both `subscribeWatch` (rooted at the project's
+   * `remotePath`) and `subscribeWorktreeWatch` (rooted at an arbitrary
+   * worktree path) — the Go helper's `watch.subscribe` RPC already supports
+   * multiple concurrent subscriptions, each with its own `Cwd` and `token`
+   * (see `remote-helper/watch.go`'s `watchSubscribeParams`), so a second,
+   * independently-rooted subscription needs no helper changes at all.
+   */
+  private async subscribeAt(cwd: string, handler: WatchHandler): Promise<WatchSubscription> {
     const rpc = this.rpc();
     const token = randomUUID();
     const ingest = createWatchIngest((canonical) => {
       handler({ token, paths: canonical.paths.map((p) => p.rel), at: canonical.at });
     });
-    await rpc.watchSubscribe(this.spec.remotePath, token, deriveWatchSpec(), (data) => {
+    await rpc.watchSubscribe(cwd, token, deriveWatchSpec(), (data) => {
       ingest.feed(data.paths);
     });
     return {
@@ -757,5 +834,26 @@ export class RemoteProvider implements WorkspaceProvider {
         await rpc.watchUnsubscribe(token);
       },
     };
+  }
+
+  async subscribeWatch(_globs: string[], handler: WatchHandler): Promise<WatchSubscription> {
+    return this.subscribeAt(this.spec.remotePath, handler);
+  }
+
+  /**
+   * See `WorkspaceProvider.subscribeWorktreeWatch`'s doc comment for the
+   * working-tree-only contract. The helper applies the SAME derived
+   * `WatchSpec` regardless of root — there is no `.git`/`.beads` special-
+   * casing to add or omit on the Go side. The "no signal events for a
+   * worktree checkout" property falls out naturally rather than needing one:
+   * `watch.go`'s `shouldEmit` only classifies a path as a git-state/beads
+   * signal when it matches an EXACT signal path/prefix (`.git/HEAD`,
+   * `.git/refs`, `.beads/beads.db`, …), and a linked worktree's own `.git`
+   * is a plain pointer FILE (not a directory), so those nested paths never
+   * exist under a worktree root at all — there is nothing for
+   * `matchesSignal` to ever match.
+   */
+  async subscribeWorktreeWatch(worktreePath: string, handler: WatchHandler): Promise<WatchSubscription> {
+    return this.subscribeAt(worktreePath, handler);
   }
 }

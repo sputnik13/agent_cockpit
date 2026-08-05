@@ -19,9 +19,19 @@ export interface HubWatchEvent {
   /** The project the event originated from (every live session emits its own
    *  watch events; the tag was always on the wire, now carried through). */
   projectId: string;
+  /**
+   * The worktree `paths` are relative to, when this batch came from the
+   * EXTRA active-external-worktree watch (local_repo_explorer-g1je) rather
+   * than the project's primary root-rooted watch. Absent for the primary
+   * watch's events, whose `paths` stay project-root-relative exactly as
+   * before this field existed. Passed through unchanged — the hub's own
+   * category classification is unaffected by it.
+   */
+  worktreePath?: string;
   /** Distinct categories present in this event. */
   categories: WatchCategory[];
-  /** Repo-relative POSIX paths that classified into a category. */
+  /** Repo-relative (or, when `worktreePath` is set, worktree-relative) POSIX
+   *  paths that classified into a category. */
   paths: string[];
   at: string;
 }
@@ -40,7 +50,11 @@ interface Listener {
 const listeners = new Set<Listener>();
 let detach: (() => void) | null = null;
 
-function handleRaw(e: { projectId?: string; event?: { paths?: string[]; at?: string } }): void {
+function handleRaw(e: {
+  projectId?: string;
+  worktreePath?: string;
+  event?: { paths?: string[]; at?: string };
+}): void {
   const rawPaths = e.event?.paths ?? [];
   const paths: string[] = [];
   const categories = new Set<WatchCategory>();
@@ -53,6 +67,7 @@ function handleRaw(e: { projectId?: string; event?: { paths?: string[]; at?: str
   if (categories.size === 0) return;
   const event: HubWatchEvent = {
     projectId: e.projectId ?? '',
+    worktreePath: e.worktreePath,
     categories: [...categories],
     paths,
     at: e.event?.at ?? '',

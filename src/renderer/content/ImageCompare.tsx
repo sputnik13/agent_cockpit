@@ -1,5 +1,5 @@
 import { ImagePaneBody } from './ImagePaneBody';
-import { useImageBytes, type ImageDisplayState } from './useImageBytes';
+import { useImageBytes, type ImagePaneState } from './useImageBytes';
 
 interface ImageCompareProps {
   worktreePath: string;
@@ -11,30 +11,29 @@ interface ImageCompareProps {
 /**
  * Image "Diff" mode: the before/after visual compare.
  *
- * BASELINE-SIDE DECISION (settled; recorded on
- * local_repo_explorer-content-mode-uniform-diff-rendered-sx0i.4 as a bead
- * comment — do not re-litigate): `.1`'s `readFileBytes` shipped with NO
- * git-`ref` support in v1 (`FileBytesOptions` has no `ref` field at all, and
- * the IPC handler whitelists only `{ worktreePath }` at the boundary — see
- * `WorkspaceProvider.readFileBytes`'s doc comment in
- * src/shared/providers/types.ts). So the "before" (baseline) pane has NO byte
- * source whatsoever in this version — this is OPTION (A) from the issue's
- * contract: render an explicit, honest `'no-baseline-preview'` state on that
- * side rather than attempting a read that cannot succeed, and never faking it
- * with the working-tree image (that would silently show identical
- * before/after images, which is worse than admitting the gap). The "after"
- * (working-tree) side has a real byte source and genuinely renders via
- * `useImageBytes`/`readFileBytes`.
+ * BASELINE-SIDE DECISION — HISTORY (settled by
+ * local_repo_explorer-content-mode-uniform-diff-rendered-sx0i.4; lifted by
+ * local_repo_explorer-bn8a — do not re-litigate either decision): `.1`
+ * shipped `readFileBytes` with NO git-`ref` support in v1, so `.4` made the
+ * "before" (baseline) pane an explicit, hardcoded `'no-baseline-preview'`
+ * state rather than attempting a read that could not succeed. `bn8a` lifted
+ * that constraint — `readFileBytes` now supports `ref` on both transports
+ * (local: `simpleGit.binaryCatFile`; remote: the helper's dedicated
+ * `readFileBytes` RPC, never SFTP or the text-only `readFile` RPC) — so the
+ * "before" pane now shares `useImageBytes`/`ImagePaneBody` with the "after"
+ * pane exactly, passing `{ ref: baseline }` instead of being hardcoded. A
+ * path absent at the baseline ref (an added file) resolves to the SAME
+ * `'absent'` state a deleted working-tree file already used — no new state,
+ * never faked from the working-tree image.
  *
- * `previousPath` (`oldPath ?? filePath`) is preserved from the pre-existing
- * component's shape (deleted/renamed files keep working the same way for
- * PATH RESOLUTION), even though no read is ever attempted against it now — it
- * still surfaces in the "Before" label so a rename's old name stays visible.
+ * `previousPath` (`oldPath ?? filePath`) is the path the "before" pane reads
+ * (a rename's OLD name, so the baseline read targets where the content
+ * actually lived) and what the "Before" label surfaces.
  */
 export function ImageCompare({ worktreePath, baseline, filePath, oldPath }: ImageCompareProps): JSX.Element {
   const previousPath = oldPath ?? filePath;
   const after = useImageBytes(filePath, worktreePath);
-  const before: ImageDisplayState = { kind: 'no-baseline-preview' };
+  const before = useImageBytes(previousPath, worktreePath, { ref: baseline });
 
   return (
     <div style={{ display: 'flex', gap: 12, padding: 12, overflow: 'auto', height: '100%' }}>
@@ -54,7 +53,7 @@ function ImagePane({
   alt,
 }: {
   label: string;
-  state: ImageDisplayState;
+  state: ImagePaneState;
   alt: string;
 }): JSX.Element {
   return (

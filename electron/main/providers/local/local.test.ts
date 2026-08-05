@@ -7,11 +7,12 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { FILE_BYTES_CAP } from '@shared/providers/fileBytesCap';
 import { LocalProvider } from './index';
 import { localListDir, localReadFile } from './reads';
@@ -253,6 +254,75 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
 
       git(repo, ['worktree', 'remove', '--force', linked]);
     });
+
+    // Git-ref branch (local_repo_explorer-bn8a) — serves the image-diff
+    // baseline preview via simpleGit.binaryCatFile, the same plumbing
+    // getFile's text-preview ref branch already uses.
+    describe('ref (git-object read at a baseline; local_repo_explorer-bn8a)', () => {
+      it('reads bytes at a git ref, byte-identical after base64 decode — NOT the working-tree bytes', async () => {
+        const baselineBuf = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]);
+        writeFileSync(join(repo, 'photo.png'), baselineBuf);
+        git(repo, ['add', 'photo.png']);
+        git(repo, ['commit', '-q', '-m', 'add photo']);
+        // Modify the working tree AFTER committing — the ref read must still
+        // return the COMMITTED bytes, proving it reads the git object, not
+        // whatever currently sits on disk.
+        writeFileSync(join(repo, 'photo.png'), Buffer.from([0xff, 0xff, 0xff]));
+
+        const p = new LocalProvider('proj', repo);
+        const res = await p.readFileBytes('photo.png', { ref: 'HEAD' });
+        expect(res.reason).toBeNull();
+        expect(res.exists).toBe(true);
+        expect(res.sizeBytes).toBe(baselineBuf.length);
+        expect(Buffer.from(res.bytesBase64!, 'base64').equals(baselineBuf)).toBe(true);
+      });
+
+      it('refuses an over-cap file at a ref with metadata only, never a truncated prefix (same guardrail as the non-ref path)', async () => {
+        const big = Buffer.alloc(FILE_BYTES_CAP + 1);
+        writeFileSync(join(repo, 'big.bin'), big);
+        git(repo, ['add', 'big.bin']);
+        git(repo, ['commit', '-q', '-m', 'add big file']);
+
+        const p = new LocalProvider('proj', repo);
+        const res = await p.readFileBytes('big.bin', { ref: 'HEAD' });
+        expect(res).toEqual({
+          bytesBase64: null,
+          sizeBytes: FILE_BYTES_CAP + 1,
+          exists: true,
+          reason: 'too-large',
+        });
+      });
+
+      it('resolves "missing" (never rejects) for a path absent at the given ref — e.g. an added file with no baseline version', async () => {
+        // new.txt exists in the WORKING TREE (beforeEach's untracked file) but
+        // was never committed, so it is absent at HEAD.
+        const p = new LocalProvider('proj', repo);
+        const res = await p.readFileBytes('new.txt', { ref: 'HEAD' });
+        expect(res).toEqual({ bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' });
+      });
+
+      it("a ref read resolves against a linked worktree's own branch (worktreePath selects the git context, not just the fs base)", async () => {
+        const linked = mkdtempSync(join(tmpdir(), 'cockpit-bytes-ref-linked-'));
+        rmSync(linked, { recursive: true, force: true });
+        git(repo, ['worktree', 'add', '-q', '-b', 'wt-ref-branch', linked]);
+        const buf = Buffer.from('branch-only-bytes\n');
+        writeFileSync(join(linked, 'branch-only.bin'), buf);
+        git(linked, ['add', 'branch-only.bin']);
+        git(linked, ['commit', '-q', '-m', 'branch-only commit']);
+
+        const p = new LocalProvider('proj', repo);
+        const inWt = await p.readFileBytes('branch-only.bin', { worktreePath: linked, ref: 'HEAD' });
+        expect(inWt.reason).toBeNull();
+        expect(Buffer.from(inWt.bytesBase64!, 'base64').equals(buf)).toBe(true);
+
+        // The primary repo's HEAD never had this file — proves the read
+        // actually used the linked worktree's branch, not the main repo's.
+        const inRoot = await p.readFileBytes('branch-only.bin', { ref: 'HEAD' });
+        expect(inRoot.reason).toBe('missing');
+
+        git(repo, ['worktree', 'remove', '--force', linked]);
+      });
+    });
   });
 
   it('detects beads and loads the task graph (jsonl source)', async () => {
@@ -355,6 +425,66 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     expect(gitEvent).toBe(true);
   });
 
+  it('detects a linked worktree being added via the .git/worktrees directory watch (local_repo_explorer-rc9n)', async () => {
+    // Pre-create one worktree BEFORE subscribing, so `.git/worktrees` already
+    // exists at watch-subscribe time — the common real-world case (an agent
+    // harness cd's into an EXISTING worktree). This exercises the dedicated
+    // `.git/worktrees` watch itself, not just the top-level `.git` watch's
+    // fallback coverage of the very first worktree ever created in a repo.
+    const wt1 = mkdtempSync(join(tmpdir(), 'cockpit-wt1-'));
+    rmSync(wt1, { recursive: true, force: true });
+    git(repo, ['worktree', 'add', '-q', '-b', 'wt-detect-1', wt1]);
+
+    const p = new LocalProvider('proj', repo);
+    const paths: string[] = [];
+    const sub = await p.subscribeWatch(['.'], (e) => paths.push(...e.paths));
+    // fs.watch on macOS uses FSEvents which has a small attach delay.
+    await new Promise((r) => setTimeout(r, 400));
+
+    const wt2 = mkdtempSync(join(tmpdir(), 'cockpit-wt2-'));
+    rmSync(wt2, { recursive: true, force: true });
+    git(repo, ['worktree', 'add', '-q', '-b', 'wt-detect-2', wt2]);
+
+    await new Promise((r) => setTimeout(r, 800));
+    await sub.unsubscribe();
+
+    expect(paths.some((pth) => pth.includes('.git/worktrees'))).toBe(true);
+
+    git(repo, ['worktree', 'remove', '--force', wt1]);
+    git(repo, ['worktree', 'remove', '--force', wt2]);
+  });
+
+  it('does not refresh on churn inside an already-known worktree\'s own metadata (.git/worktrees/<name>/HEAD)', async () => {
+    const wt1 = mkdtempSync(join(tmpdir(), 'cockpit-wt-noise-'));
+    rmSync(wt1, { recursive: true, force: true });
+    git(repo, ['worktree', 'add', '-q', '-b', 'wt-noise', wt1]);
+    // git names the `.git/worktrees/<name>` administrative dir after the
+    // worktree's own path basename, NOT the branch name (verified against a
+    // throwaway repo) — discover the real name rather than assuming.
+    const wtName = basename(wt1);
+    expect(existsSync(join(repo, '.git', 'worktrees', wtName, 'HEAD'))).toBe(true);
+
+    const p = new LocalProvider('proj', repo);
+    const paths: string[] = [];
+    const sub = await p.subscribeWatch(['.'], (e) => paths.push(...e.paths));
+    await new Promise((r) => setTimeout(r, 400));
+
+    // Rewrite the worktree's OWN HEAD directly — what a commit made inside it
+    // does (real shape verified against a throwaway repo: HEAD/ORIG_HEAD/
+    // index/logs/HEAD all live under .git/worktrees/<name>/). Routine
+    // per-commit churn, not a worktree-set change, must not wake the panel.
+    writeFileSync(
+      join(repo, '.git', 'worktrees', wtName, 'HEAD'),
+      'ref: refs/heads/wt-noise\n',
+    );
+    await new Promise((r) => setTimeout(r, 600));
+    await sub.unsubscribe();
+
+    expect(paths.some((pth) => pth.includes('.git/worktrees'))).toBe(false);
+
+    git(repo, ['worktree', 'remove', '--force', wt1]);
+  });
+
   it('emits a workgraph refresh on .beads/beads.db change via the directory watch (no per-file FD)', async () => {
     mkdirSync(join(repo, '.beads'), { recursive: true });
     writeFileSync(join(repo, '.beads', 'beads.db'), 'v1');
@@ -384,5 +514,102 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     await new Promise((r) => setTimeout(r, 600));
     await sub.unsubscribe();
     expect(paths.some((pth) => pth.includes('.br_history'))).toBe(false);
+  });
+
+  describe('subscribeWorktreeWatch (active-external-worktree watch; local_repo_explorer-g1je)', () => {
+    let linked: string;
+
+    beforeEach(() => {
+      // A SIBLING/EXTERNAL worktree — created OUTSIDE `repo` (a mkdtemp dir,
+      // never nested under it), the common `git worktree add ../foo` shape
+      // this bead adds coverage for (as opposed to the ALREADY-covered
+      // nested-under-root shape exercised by the other worktree tests above).
+      linked = mkdtempSync(join(tmpdir(), 'cockpit-wt-external-'));
+      rmSync(linked, { recursive: true, force: true });
+      git(repo, ['worktree', 'add', '-q', '-b', 'wt-external', linked]);
+    });
+
+    afterEach(() => {
+      git(repo, ['worktree', 'remove', '--force', linked]);
+    });
+
+    it('emits paths relative to the WORKTREE root, not the project root, and stops after unsubscribe', async () => {
+      const p = new LocalProvider('proj', repo);
+      const paths: string[] = [];
+      const sub = await p.subscribeWorktreeWatch(linked, (e) => paths.push(...e.paths));
+      await new Promise((r) => setTimeout(r, 250));
+
+      writeFileSync(join(linked, 'wt-only.txt'), 'v1\n');
+      await new Promise((r) => setTimeout(r, 500));
+      // Worktree-relative ('wt-only.txt'), never prefixed with any segment of
+      // `repo`'s own path or `linked`'s own absolute path.
+      expect(paths).toContain('wt-only.txt');
+      expect(paths.some((pth) => pth.includes(repo))).toBe(false);
+      expect(paths.some((pth) => pth.startsWith(linked))).toBe(false);
+
+      await sub.unsubscribe();
+      const before = paths.length;
+      writeFileSync(join(linked, 'wt-only.txt'), 'v2\n');
+      await new Promise((r) => setTimeout(r, 400));
+      expect(paths.length).toBe(before);
+    });
+
+    it("honors the WORKTREE's own .gitignore, not the project root's", async () => {
+      // A pattern present ONLY in the worktree's own .gitignore — proves the
+      // filter is built from `createGitignoreFilter(worktreePath)`, not the
+      // root's, since the root has no .gitignore excluding this name at all.
+      writeFileSync(join(linked, '.gitignore'), 'wt-ignored.txt\n');
+
+      const p = new LocalProvider('proj', repo);
+      const paths: string[] = [];
+      const sub = await p.subscribeWorktreeWatch(linked, (e) => paths.push(...e.paths));
+      await new Promise((r) => setTimeout(r, 250));
+
+      writeFileSync(join(linked, 'wt-ignored.txt'), 'v1\n');
+      writeFileSync(join(linked, 'wt-tracked.txt'), 'v1\n');
+      await new Promise((r) => setTimeout(r, 600));
+      await sub.unsubscribe();
+
+      expect(paths).toContain('wt-tracked.txt');
+      expect(paths.some((pth) => pth.includes('wt-ignored.txt'))).toBe(false);
+    });
+
+    it('excludes node_modules (the standard NEVER_RECURSE segment) inside the worktree', async () => {
+      mkdirSync(join(linked, 'node_modules'), { recursive: true });
+
+      const p = new LocalProvider('proj', repo);
+      const paths: string[] = [];
+      const sub = await p.subscribeWorktreeWatch(linked, (e) => paths.push(...e.paths));
+      await new Promise((r) => setTimeout(r, 250));
+
+      writeFileSync(join(linked, 'node_modules', 'pkg.js'), 'v1\n');
+      writeFileSync(join(linked, 'wt-real.txt'), 'v1\n');
+      await new Promise((r) => setTimeout(r, 600));
+      await sub.unsubscribe();
+
+      expect(paths).toContain('wt-real.txt');
+      expect(paths.some((pth) => pth.includes('node_modules'))).toBe(false);
+    });
+
+    it('does not emit .git-signal-shaped events for the worktree (a linked worktree\'s .git is a pointer FILE, not a directory)', async () => {
+      // Sanity check on the design's stated property: a linked worktree's own
+      // `.git` is a plain file (`gitdir: ...`), so there is no `.git/HEAD` or
+      // `.git/refs` UNDER the worktree root to ever emit as git-state signal
+      // shapes in the first place — subscribeWorktree deliberately adds no
+      // dedicated signal watchers, and this asserts nothing resembling one
+      // shows up even from the plain working-tree mechanism.
+      expect(existsSync(join(linked, '.git'))).toBe(true);
+      expect(statSync(join(linked, '.git')).isDirectory()).toBe(false);
+
+      const p = new LocalProvider('proj', repo);
+      const paths: string[] = [];
+      const sub = await p.subscribeWorktreeWatch(linked, (e) => paths.push(...e.paths));
+      await new Promise((r) => setTimeout(r, 250));
+      writeFileSync(join(linked, 'wt-real.txt'), 'v1\n');
+      await new Promise((r) => setTimeout(r, 600));
+      await sub.unsubscribe();
+
+      expect(paths.some((pth) => pth.startsWith('.git'))).toBe(false);
+    });
   });
 });

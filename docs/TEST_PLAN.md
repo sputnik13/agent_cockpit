@@ -106,7 +106,7 @@ panels never touch a real transport.
 - **Control-mode scrollback single-source** (`src/shared/tmux`):
   `capturePane(id, { startLine: TERMINAL_SCROLLBACK })` emits `-S -N` and an
   omitted `startLine` preserves the no-`-S` form; the local opener sets `-g
-  history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
+history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
 - **Changes surface filter**: `isHiddenFromChanges` hides `.git/**` and
   `.beads/**` when `showAll = false`; reveals them when `showAll = true`;
   non-hidden working-tree paths pass through in both modes.
@@ -157,6 +157,43 @@ panels never touch a real transport.
   shapes, disabled states, clipboard/download actions, transient feedback) in
   `rowMenu.test.tsx`, with panel wiring in `changes.test.tsx` /
   `explorer.test.tsx`.
+- **JSON/YAML structural folding** (`src/renderer/content/folding/`,
+  `foldingRows.ts`): the fold model — source-slice region boundaries, sort
+  order, single-line-container exclusion, JSONC tolerance (comments, trailing
+  commas), total error recovery (malformed input never throws), multi-document
+  offsets and per-document anchor scope, block-scalar header/end ranges,
+  backward anchor-token scanning, `offsetToLine`/naive-split agreement, a
+  `structuredClone` round-trip per fixture, and the grep-pinned guardrail that
+  the model code never calls a full-value parse/resolve API
+  (`.toJS()`/`JSON.parse`/`yaml.parse`/etc.) in `foldModel.test.ts`,
+  `jsonFold.test.ts`, `yamlFold.test.ts`; the row projection — the
+  hide/suffix rule, overlap defense, document grouping, and the
+  `lastTouchedLine` regressions against real `yamlFoldModel` output (a
+  document-boundary `---` marker preserved, a block scalar's fold row
+  correctly anchored) in `foldingRows.test.ts`; the worker client — cache
+  hit/miss/eviction and all worker-failure fallback paths (construction
+  failure, `postMessage` throw, `onerror`, an error reply) in
+  `foldClient.test.ts`; the hook — null-input short-circuit and the
+  stale-result guard in `useFoldModel.test.tsx`; settings normalization —
+  `structuredFoldMaxMb` clamping/defaulting, and the `structuredFoldReadMaxBytes`
+  read-cap-override formula (`local_repo_explorer-ftbq`) — in the settings
+  test suite; and `ContentViewer`'s dispatch + degrade — `folding-view`
+  dispatch for json/yaml, the over-threshold and at-threshold boundary, an
+  unknown/pending size never degrading, confirmed-binary taking precedence
+  over the size degrade, neither reclassification ever writing the persisted
+  `contentMode` setting, the raised `maxBytes` forwarded to `readFile` for
+  json/yaml paths only (never for markdown/text), and — across a
+  FoldingView→RawFile remount — every `readFile` call for the same selection
+  requesting the IDENTICAL `maxBytes` (the regression guard for keying the
+  cap on the pure path class, never `effectiveCls`), in
+  `content.test.tsx`/`modeSwitcher.test.ts`.
+- **FoldingView component** (`foldingView.test.tsx`, jsdom): collapse/expand
+  via click and keyboard (Enter/Space) with `aria-expanded` tracking state;
+  the folded placeholder chip's item count and prefix/suffix text; original
+  (never renumbered) line numbers and gutter alignment across the Wrap
+  toggle; the degrade notice for an unavailable/errored fold model; grouped
+  multi-document rendering (labelled regions and separators) versus the flat
+  single-document path; and anchor/alias badge rendering with tooltip text.
 
 ## Integration Scope
 
@@ -203,6 +240,20 @@ panels never touch a real transport.
   viewer update; switching to an already-connected project shows its current data
   immediately (no spinner) and never another project's data. The automated E2E
   harness is not yet wired; this flow is currently a manual smoke.
+- **Content-mode matrix** (`npm run verify:content-modes` /
+  [scripts/screenshots/verify-content-modes.mjs](../scripts/screenshots/verify-content-modes.mjs)):
+  builds and drives the real app via Playwright against rendered evidence for
+  the full (class × mode) matrix — see ARCHITECTURE "Content Modes & Bounded
+  Binary-Preview Reads"'s Regression Check for the harness's general shape.
+  This harness is the one that extends to the JSON/YAML structural-folding
+  surface (folding-view dispatch, collapse/expand against the real DOM,
+  multi-document stacking, anchor/alias badges, gutter alignment, and — since
+  `local_repo_explorer-ftbq` landed — the real threshold-degrade contract: a
+  file sized inside the raised read-cap band degrades to the plain
+  highlighted view with no fold toggles and its real content visible, while a
+  file sized genuinely above that cap still shows the too-large placeholder
+  with no fold toggles offered); the script itself is the source of truth for
+  its exact fixtures and assertions.
 
 ## Test Data
 

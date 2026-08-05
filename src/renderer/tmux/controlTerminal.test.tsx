@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 const api = vi.hoisted(() => {
@@ -267,5 +267,62 @@ describe('per-project view (no reset on switch)', () => {
     expect(selectActiveView(useTmuxStore.getState()).windowOrder).toEqual(['@2']);
     store.setActiveProject('proj-a');
     expect(selectActiveView(useTmuxStore.getState()).windowOrder).toEqual(['@1']);
+  });
+});
+
+// Wiring test for local_repo_explorer-bvni: proves the refresh toolbar button
+// actually issues the per-pane row-nudge command triples for a multi-leaf
+// split — not just that the isolated nudgePaneRows function is correct in
+// unit tests (covered separately in controlSession.test.ts).
+describe('refresh button issues the per-pane row-nudge on a multi-pane split (bvni wiring)', () => {
+  const tbSplit = (paneA: string, paneB: string): WindowState['layout'] => ({
+    type: 'split',
+    dir: 'tb',
+    w: 80,
+    h: 49,
+    x: 0,
+    y: 0,
+    children: [
+      { type: 'leaf', paneId: paneA, w: 80, h: 24, x: 0, y: 0 },
+      { type: 'leaf', paneId: paneB, w: 80, h: 24, x: 0, y: 25 },
+    ],
+  });
+
+  it('a normal-click refresh on a TB split sends the resize-pane/run-shell triple for BOTH panes', async () => {
+    const { container } = render(<ControlTerminalPanel />);
+    await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
+
+    act(() => {
+      setActiveSlice({
+        windowOrder: ['@0'],
+        windows: { '@0': { windowId: '@0', name: 'shell', layout: tbSplit('%0', '%1') } },
+        activeWindowId: '@0',
+        panes: {
+          '%0': { paneId: '%0', windowId: '@0' },
+          '%1': { paneId: '%1', windowId: '@0' },
+        },
+      });
+    });
+    // Both split panes must be mounted (each PaneXterm acquires on mount)
+    // before the refresh click, matching real usage.
+    await waitFor(() => expect(container.querySelectorAll('.ac-term').length).toBe(2));
+
+    api.tmuxControl.command.mockClear();
+    const btn = screen.getByRole('button', { name: /Refresh tab/ });
+    fireEvent.click(btn);
+
+    await waitFor(() => {
+      const nudgeCmds = api.tmuxControl.command.mock.calls
+        .map((c) => c[0] as string)
+        .filter((a) => a.startsWith('resize-pane') || a.startsWith('run-shell'));
+      expect(nudgeCmds).toEqual([
+        'resize-pane -t %0 -y 23',
+        'run-shell -d 0.05',
+        'resize-pane -t %0 -y 24',
+        'resize-pane -t %1 -y 23',
+        'run-shell -d 0.05',
+        'resize-pane -t %1 -y 24',
+      ]);
+    });
   });
 });

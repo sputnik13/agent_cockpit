@@ -8,7 +8,7 @@ import { useContentSelection } from './selectionStore';
 import { useNotesStore } from '../notes';
 import type { NoteRecord, ReviewTargetKind } from '@shared/ipc/channels';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
-import { DEFAULT_SETTINGS } from '@shared/settings';
+import { DEFAULT_SETTINGS, structuredFoldReadMaxBytes } from '@shared/settings';
 
 const { getFileDiff, getDiffBundle, readFile, readFileBytes, notesList, notesCreate } = vi.hoisted(() => ({
   getFileDiff: vi.fn(),
@@ -216,31 +216,65 @@ describe('ContentViewer', () => {
       expect(readFile).not.toHaveBeenCalled();
     });
 
-    it('Diff: before pane shows an honest no-baseline-preview message (never the old "(unavailable)"); after pane shows the real working-tree image', async () => {
-      readFileBytes.mockResolvedValue({ bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: null });
+    it('Diff: BOTH panes fetch and show real images (local_repo_explorer-bn8a) — before via a git-ref read, after via the working tree, never the old "(unavailable)"', async () => {
+      readFileBytes.mockImplementation((path: string, opts?: { worktreePath?: string; ref?: string }) =>
+        Promise.resolve(
+          opts?.ref
+            ? { bytesBase64: 'QkFTRQ==', sizeBytes: 4, exists: true, reason: null }
+            : { bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: null },
+        ),
+      );
       render(<ContentViewer selection={sel('assets/logo.png', { baseline: 'HEAD' })} />);
 
-      // Before (baseline) pane: readFileBytes has no `ref` support (see
-      // ImageCompare.tsx's doc comment) — the settled option (a) decision —
-      // so this pane never attempts a fetch and always shows this state.
-      await screen.findByText(/Baseline preview unavailable/);
+      // Before (baseline) pane: a real <img>, fetched via readFileBytes with
+      // the selection's baseline threaded through as `ref` — the git-ref-
+      // capable read this bead adds. The OLD hardcoded placeholder must never
+      // appear again.
+      const beforeImg = (await screen.findByAltText('Before (baseline)')) as HTMLImageElement;
+      expect(beforeImg.src).toBe('data:image/png;base64,QkFTRQ==');
+      expect(readFileBytes).toHaveBeenCalledWith('assets/logo.png', { worktreePath: '/wt', ref: 'HEAD' });
+      expect(screen.queryByText(/Baseline preview unavailable/)).not.toBeInTheDocument();
       expect(screen.queryByText('(unavailable)')).not.toBeInTheDocument();
 
-      // After (working tree) pane: a real <img> with a data: URL, fetched
-      // via readFileBytes with the selection's worktreePath.
-      const img = (await screen.findByAltText('After (working tree)')) as HTMLImageElement;
-      expect(img.tagName).toBe('IMG');
-      expect(img.src).toBe('data:image/png;base64,Zm9v');
+      // After (working tree) pane: unchanged — a real <img>, no ref.
+      const afterImg = (await screen.findByAltText('After (working tree)')) as HTMLImageElement;
+      expect(afterImg.tagName).toBe('IMG');
+      expect(afterImg.src).toBe('data:image/png;base64,Zm9v');
       expect(readFileBytes).toHaveBeenCalledWith('assets/logo.png', { worktreePath: '/wt' });
     });
 
-    it('a rename: the before-pane label surfaces the old path (oldPath ?? filePath shape preserved)', async () => {
+    it('a rename: the before-pane reads bytes from the OLD path at the baseline ref (oldPath ?? filePath), and the label surfaces it', async () => {
+      readFileBytes.mockResolvedValue({ bytesBase64: 'UkVE', sizeBytes: 3, exists: true, reason: null });
       render(
         <ContentViewer
           selection={sel('assets/new-name.png', { baseline: 'HEAD', oldPath: 'assets/old-name.png' })}
         />,
       );
       await screen.findByText(/was assets\/old-name\.png/);
+      await waitFor(() =>
+        expect(readFileBytes).toHaveBeenCalledWith('assets/old-name.png', { worktreePath: '/wt', ref: 'HEAD' }),
+      );
+      // The "after" (working-tree) pane still reads the NEW (current) path.
+      await waitFor(() =>
+        expect(readFileBytes).toHaveBeenCalledWith('assets/new-name.png', { worktreePath: '/wt' }),
+      );
+    });
+
+    it('an added-only file (no baseline): the before pane resolves to absent (git-show fails at the ref) rather than a fabricated image; the after pane shows the real image', async () => {
+      readFileBytes.mockImplementation((path: string, opts?: { ref?: string }) =>
+        Promise.resolve(
+          opts?.ref
+            ? { bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' }
+            : { bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: null },
+        ),
+      );
+      render(<ContentViewer selection={sel('assets/new.png', { baseline: 'HEAD' })} />);
+
+      // Before pane: reason "missing" at the ref maps to the SAME 'absent'
+      // state a deleted working-tree file already used — no new state.
+      await screen.findByText('Not present in the working tree.');
+      const afterImg = (await screen.findByAltText('After (working tree)')) as HTMLImageElement;
+      expect(afterImg.src).toBe('data:image/png;base64,Zm9v');
     });
 
     it('Rendered: ImageView shows the current image alone (same fetch/state machine as the Diff after-pane)', async () => {
@@ -265,16 +299,24 @@ describe('ContentViewer', () => {
       expect(container.querySelector('svg')).toBeNull();
     });
 
-    it('a deleted image: the after (working-tree) pane shows "not present"; the before pane still shows no-baseline-preview (v1 has no baseline byte source at all, regardless of file status)', async () => {
-      readFileBytes.mockResolvedValue({ bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' });
+    it('a deleted image: the after (working-tree) pane shows "not present"; the before (baseline) pane now shows the REAL baseline image (git-ref read) instead of the old blanket no-baseline-preview', async () => {
+      readFileBytes.mockImplementation((path: string, opts?: { ref?: string }) =>
+        Promise.resolve(
+          opts?.ref
+            ? { bytesBase64: 'UkVE', sizeBytes: 3, exists: true, reason: null }
+            : { bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' },
+        ),
+      );
       render(<ContentViewer selection={sel('assets/gone.png', { baseline: 'HEAD' })} />);
 
       await screen.findByText('Not present in the working tree.');
-      expect(screen.getByText(/Baseline preview unavailable/)).toBeInTheDocument();
+      const beforeImg = (await screen.findByAltText('Before (baseline)')) as HTMLImageElement;
+      expect(beforeImg.src).toBe('data:image/png;base64,UkVE');
+      expect(screen.queryByText(/Baseline preview unavailable/)).not.toBeInTheDocument();
       expect(screen.queryByText('(unavailable)')).not.toBeInTheDocument();
     });
 
-    it('over the preview cap: shows the actual size and points at Download', async () => {
+    it('over the preview cap: BOTH panes (working tree AND baseline ref) refuse with the actual size and point at Download — the ref path reuses the SAME FILE_BYTES_CAP, no separate/weaker cap', async () => {
       readFileBytes.mockResolvedValue({
         bytesBase64: null,
         sizeBytes: 12_582_912, // 12 MiB
@@ -282,23 +324,33 @@ describe('ContentViewer', () => {
         reason: 'too-large',
       });
       render(<ContentViewer selection={sel('assets/huge.png', { baseline: 'HEAD' })} />);
-      await screen.findByText(/too large to preview/);
-      expect(screen.getByText(/12\.0 MiB/)).toBeInTheDocument();
-      expect(screen.getByText(/Download/)).toBeInTheDocument();
+      const messages = await screen.findAllByText(/too large to preview/);
+      expect(messages).toHaveLength(2);
+      expect(screen.getAllByText(/12\.0 MiB/)).toHaveLength(2);
+      expect(screen.getAllByText(/Download/)).toHaveLength(2);
     });
 
-    it('unreadable: a read error renders the unreadable state (unrecognized-extension coverage lives in useImageBytes.test.ts, since classOf already filters image paths to recognized extensions before ContentViewer ever reaches ImageCompare/ImageView)', async () => {
+    it('unreadable: a read error renders the unreadable state on BOTH panes (unrecognized-extension coverage lives in useImageBytes.test.ts, since classOf already filters image paths to recognized extensions before ContentViewer ever reaches ImageCompare/ImageView)', async () => {
       readFileBytes.mockRejectedValue(new Error('boom'));
       render(<ContentViewer selection={sel('assets/broken.png', { baseline: 'HEAD' })} />);
-      await screen.findByText('Unable to preview this image.');
+      const messages = await screen.findAllByText('Unable to preview this image.');
+      expect(messages).toHaveLength(2);
     });
   });
 
   describe('text-like Rendered vs Raw split (RawFile `highlight` prop)', () => {
-    it.each([
-      { label: 'a TypeScript file', path: 'src/file.ts', content: 'const a = 1;' },
-      { label: 'a JSON file', path: 'data.json', content: '{ "a": 1 }' },
-    ])(
+    // NOTE: a JSON/YAML row no longer belongs in this table. Since this
+    // leaf gave json/yaml their own ContentClass with their OWN Rendered
+    // cell (VIEW_DISPATCH: rendered -> 'folding-view', raw -> 'raw-file' —
+    // two DIFFERENT ViewKinds, unlike 'text' where both share 'raw-file'),
+    // toggling Rendered<->Raw for a json/yaml file now unmounts/remounts a
+    // fresh RawFile each time instead of flipping a prop on one persistent
+    // instance — so the "from ONE read" invariant this table asserts is no
+    // longer true for json/yaml specifically (see modeSwitcher.tsx's
+    // VIEW_DISPATCH comment on the json/yaml rows for why this is accepted).
+    // The 'json/yaml classes (folding-view dispatch seam)' describe block
+    // below covers json/yaml's actual (updated) Rendered<->Raw behavior.
+    it.each([{ label: 'a TypeScript file', path: 'src/file.ts', content: 'const a = 1;' }])(
       '$label: Rendered shows highlighted token spans, Raw shows the same plain text, from ONE read',
       async ({ path, content }) => {
         readFile.mockResolvedValue({ content, truncated: false, isBinary: false, sizeBytes: content.length });
@@ -487,6 +539,301 @@ describe('ContentViewer', () => {
       fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
       expect(screen.getByText('why not 3?')).toBeInTheDocument();
       expect(readFile).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('json/yaml classes (folding-view dispatch seam — local_repo_explorer-jp2f.2)', () => {
+    it('a .json selection in Rendered mode dispatches to FoldingView ([data-testid="folding-view"] in the DOM); the same path in Raw mode does not', async () => {
+      const content = '{ "a": 1 }';
+      readFile.mockResolvedValue({ content, truncated: false, isBinary: false, sizeBytes: content.length });
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+
+      // A plain-file selection defaults to Raw (never an empty diff) — same
+      // default as today, since json still falls through defaultModeFor's
+      // text-like branch (see modeSwitcher.tsx).
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+      expect(screen.getByRole('tab', { name: 'Raw' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
+      await waitFor(() => expect(document.body.textContent).toContain(content));
+      // Wrap remains offered for json's Raw view (raw-file is, and always
+      // was, in `wrappable`).
+      expect(screen.getByRole('button', { name: 'Wrap' })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      await waitFor(() => expect(screen.getByTestId('folding-view')).toBeInTheDocument());
+      // FoldingView's temporary body still delegates to RawFile with
+      // highlight on — same Shiki token spans as before, just reached
+      // through the new dispatch path (modeSwitcher.tsx's VIEW_DISPATCH).
+      await waitFor(() => {
+        expect(
+          screen.getByTestId('folding-view').querySelectorAll('span[style*="color"]').length,
+        ).toBeGreaterThan(0);
+      });
+      expect(screen.getByTestId('folding-view').textContent).toContain(content);
+      // Wrap also remains offered for json's (new) Rendered view — 'folding-view'
+      // was added to `wrappable` alongside 'raw-file'.
+      expect(screen.getByRole('button', { name: 'Wrap' })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
+      await waitFor(() => expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument());
+      await waitFor(() => expect(document.body.textContent).toContain(content));
+    });
+
+    it('a .yaml selection: Diff still dispatches to DiffView (unaffected), Rendered dispatches to FoldingView', async () => {
+      const content = 'key: value\n';
+      readFile.mockResolvedValue({ content, truncated: false, isBinary: false, sizeBytes: content.length });
+      render(<ContentViewer selection={sel('config.yaml', { baseline: 'HEAD' })} />);
+
+      // A 'change' selection defaults to Diff — unchanged.
+      await waitFor(() =>
+        expect(getDiffBundle).toHaveBeenCalledWith('/wt', 'config.yaml', 'HEAD'),
+      );
+      expect(screen.getByRole('tab', { name: 'Diff' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      await waitFor(() => expect(screen.getByTestId('folding-view')).toBeInTheDocument());
+      expect(screen.getByTestId('folding-view')).toHaveAttribute('data-format', 'yaml');
+    });
+
+    it('a JSON-path file that RawFile confirms binary still reclassifies to generic-binary and gets the existing graceful placeholder — the folding-view dispatch is bypassed entirely once binary is confirmed (the confirmedBinary path is unaffected by the new json/yaml classes)', async () => {
+      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      const BINARY_DIFF = [
+        'diff --git a/data.json b/data.json',
+        'index 1234567..89abcde 100644',
+        'Binary files a/data.json and b/data.json differ',
+        '',
+      ].join('\n');
+      getDiffBundle.mockResolvedValue({ patch: BINARY_DIFF, oldContent: null, newContent: null });
+
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+
+      // Reclassifies from 'json' to 'generic-binary' exactly like any other
+      // extension (see the 'generic-binary reclassification' describe block
+      // below) — generic-binary's Rendered cell is 'raw-file', not
+      // 'folding-view', so FoldingView is never reached once binary-ness is
+      // confirmed.
+      await screen.findByText(/can't be compared line-by-line/);
+      expect(screen.getByRole('tab', { name: 'Diff' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.queryByRole('tab', { name: 'Raw' })).not.toBeInTheDocument();
+      expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('structural-fold size degrade (structuredFoldMaxMb — local_repo_explorer-jp2f.4)', () => {
+    const JSON_CONTENT = '{ "a": 1 }';
+
+    it('at the default threshold (10 MB), a small .json file still renders through folding-view in Rendered mode', async () => {
+      readFile.mockResolvedValue({
+        content: JSON_CONTENT,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: JSON_CONTENT.length,
+      });
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(document.body.textContent).toContain(JSON_CONTENT));
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      await waitFor(() => expect(screen.getByTestId('folding-view')).toBeInTheDocument());
+    });
+
+    it('with the threshold set small in the test store, a .json file whose confirmed size is OVER it degrades: Rendered dispatches to the plain raw-file view instead of folding-view, and the mode switcher still shows Diff/Rendered/Raw with Rendered active', async () => {
+      useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, structuredFoldMaxMb: 1 } });
+      const oversizeBytes = 2 * 1024 * 1024; // 2 MiB, over the 1 MB threshold
+      readFile.mockResolvedValue({
+        content: JSON_CONTENT,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: oversizeBytes,
+      });
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(document.body.textContent).toContain(JSON_CONTENT));
+      // local_repo_explorer-ftbq: the read that produced this confirmation must
+      // have requested the RAISED cap, not the default — this is the fix that
+      // makes the degrade below actually reachable against a real 256 KiB
+      // text-read cap (a mocked confirmation alone can't prove the real cap was
+      // used; this proves the call args, which is what the real read consults).
+      expect(readFile).toHaveBeenCalledWith('data.json', {
+        worktreePath: '/wt',
+        maxBytes: structuredFoldReadMaxBytes(1),
+      });
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      // Degraded: folding-view never mounts; the SAME raw-file view (already
+      // showing the content from the Raw tab) stays dispatched.
+      expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
+      expect(document.body.textContent).toContain(JSON_CONTENT);
+
+      // Mode switcher is unaffected by the degrade: still Diff/Rendered/Raw,
+      // Rendered active — only WHICH component renders changed.
+      expect(screen.getByRole('tab', { name: 'Diff' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tab', { name: 'Raw' })).toBeInTheDocument();
+
+      // Stable across further renders (no flip-flop): re-selecting the SAME
+      // mode a few times must not trigger another read or unmount the view.
+      fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
+      expect(document.body.textContent).toContain(JSON_CONTENT);
+      expect(readFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('with the threshold set small, a .json file whose confirmed size is AT the threshold (not over it) does not degrade — strictly-greater-than semantics', async () => {
+      useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, structuredFoldMaxMb: 1 } });
+      const atThresholdBytes = 1 * 1024 * 1024; // exactly 1 MiB, not > 1 MiB
+      readFile.mockResolvedValue({
+        content: JSON_CONTENT,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: atThresholdBytes,
+      });
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(document.body.textContent).toContain(JSON_CONTENT));
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      await waitFor(() => expect(screen.getByTestId('folding-view')).toBeInTheDocument());
+    });
+
+    it('an unknown size (readFile still pending, no confirmation yet) never degrades: Rendered still dispatches to folding-view', async () => {
+      useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, structuredFoldMaxMb: 1 } });
+      // Never resolves during this test -- rawConfirmation stays null
+      // (unknown), even though the threshold is small enough that almost
+      // any real file would exceed it.
+      readFile.mockReturnValue(new Promise<never>(() => {}));
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      expect(screen.getByTestId('folding-view')).toBeInTheDocument();
+    });
+
+    it('a confirmed-BINARY .json file reclassifies to generic-binary regardless of the fold threshold — the binary rule wins precedence over the size rule', async () => {
+      useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, structuredFoldMaxMb: 1 } });
+      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      const BINARY_DIFF = [
+        'diff --git a/data.json b/data.json',
+        'index 1234567..89abcde 100644',
+        'Binary files a/data.json and b/data.json differ',
+        '',
+      ].join('\n');
+      getDiffBundle.mockResolvedValue({ patch: BINARY_DIFF, oldContent: null, newContent: null });
+
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+
+      await screen.findByText(/can't be compared line-by-line/);
+      expect(screen.getByRole('tab', { name: 'Diff' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.queryByRole('tab', { name: 'Raw' })).not.toBeInTheDocument();
+      expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
+    });
+
+    it('a .ts file is unaffected by the fold threshold at any value — never dispatches to folding-view either way', async () => {
+      useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, structuredFoldMaxMb: 1 } });
+      const content = 'const a = 1;';
+      readFile.mockResolvedValue({
+        content,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: 5 * 1024 * 1024, // over the 1 MB threshold -- irrelevant for .ts
+      });
+      render(<ContentViewer selection={sel('src/file.ts', { kind: 'file' })} />);
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+      expect(screen.getByRole('tab', { name: 'Raw' })).toHaveAttribute('aria-selected', 'true');
+      // local_repo_explorer-ftbq regression guard: the maxBytes override is
+      // json/yaml-only — a non-json/yaml class (here 'text', via .ts) must read
+      // with NO maxBytes at all, leaving the default cap completely unchanged.
+      expect(readFile).toHaveBeenCalledWith('src/file.ts', { worktreePath: '/wt' });
+      expect((readFile.mock.calls[0]?.[1] as { maxBytes?: number } | undefined)?.maxBytes).toBeUndefined();
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
+      expect(document.body.textContent).toContain(content);
+    });
+
+    it('the degrade never writes contentMode: a selection that renders already-degraded (remembered mode "rendered", size already over threshold) with zero user interaction issues no `set` call at all', async () => {
+      const setSpy = vi.fn().mockResolvedValue(undefined);
+      useSettingsStore.setState({
+        settings: { ...DEFAULT_SETTINGS, contentMode: 'rendered', structuredFoldMaxMb: 1 },
+        set: setSpy,
+      });
+      const oversizeBytes = 2 * 1024 * 1024;
+      readFile.mockResolvedValue({
+        content: JSON_CONTENT,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: oversizeBytes,
+      });
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+
+      // The remembered 'rendered' mode seeds Rendered directly at mount (json
+      // offers 'rendered' -- see the seed logic above `mode`'s useState) --
+      // no click anywhere in this test.
+      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true');
+      await waitFor(() => expect(document.body.textContent).toContain(JSON_CONTENT));
+      // Degraded purely from the render-time effectiveCls derivation. This
+      // mount sequence is FoldingView first (an unconfirmed json/yaml
+      // selection always starts on folding-view — rawConfirmation is null
+      // until the read resolves), THEN a remount to raw-file once the degrade
+      // is confirmed — exactly the two-mount sequence the "key the read cap
+      // on cls, never effectiveCls" fix (structuredFoldReadMaxBytes's doc
+      // comment in settings.ts) exists to keep stable.
+      expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
+      // The automatic degrade must never itself persist anything -- it is a
+      // display correction, not a user choice (mirrors the existing
+      // effectiveMode reclassification-safety invariant for the binary case).
+      expect(setSpy).not.toHaveBeenCalled();
+
+      // CRITICAL correctness check (local_repo_explorer-ftbq): FoldingView's
+      // initial read AND RawFile's post-degrade read must both have requested
+      // the IDENTICAL maxBytes. If the cap were keyed on effectiveCls instead
+      // of the pure cls, RawFile's read (mounted only once effectiveCls had
+      // already flipped to 'text') would request maxBytes: undefined (the
+      // default, smaller cap) — which would refuse a real over-cap file,
+      // un-set oversizedStructured, flip effectiveCls back to json/yaml, and
+      // remount FoldingView in an infinite loop.
+      expect(readFile.mock.calls.length).toBeGreaterThanOrEqual(1);
+      const expectedMaxBytes = structuredFoldReadMaxBytes(1);
+      for (const call of readFile.mock.calls) {
+        expect((call[1] as { maxBytes?: number } | undefined)?.maxBytes).toBe(expectedMaxBytes);
+      }
+    });
+
+    it('refuses gracefully above the raised cap (R): a .json file whose read is REFUSED (not a successful oversized text read) shows the too-large placeholder and STAYS on folding-view — effectiveCls never degrades to text for a confirmation that isn\'t kind:"text"', async () => {
+      useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, structuredFoldMaxMb: 1 } });
+      // Above R = structuredFoldReadMaxBytes(1) = 2 MiB: a real read this large
+      // is REFUSED (content: null, truncated: true), never a successful
+      // over-threshold text read — this is what the boundary condition
+      // predicts for R+1 and above.
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: true,
+        isBinary: false,
+        sizeBytes: 5 * 1024 * 1024, // 5 MiB, over R (2 MiB)
+      });
+      render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+
+      // effectiveCls stays json/yaml (rawConfirmation.kind is 'too-large', not
+      // 'text', so oversizedStructured never fires): FoldingView stays
+      // mounted and shows ITS OWN too-large placeholder, never degrading to
+      // raw-file / never showing the fixture's own content.
+      await screen.findByText(/too large to preview inline/);
+      expect(screen.getByTestId('folding-view')).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain(JSON_CONTENT);
+
+      // Stable across further renders — no flip-flop toward the degraded
+      // view. FoldingView's cross-mount read cache is disabled under test
+      // (FoldingView.tsx's `readCacheDisabled` — see its doc comment), so
+      // toggling away and back genuinely remounts and re-reads; await each
+      // settle rather than asserting synchronously.
+      fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
+      await waitFor(() => expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument());
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      await screen.findByText(/too large to preview inline/);
+      expect(screen.getByTestId('folding-view')).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain(JSON_CONTENT);
     });
   });
 

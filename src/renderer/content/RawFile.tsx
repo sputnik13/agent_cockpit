@@ -4,18 +4,23 @@ import { useProjectsStore } from '../providerClient';
 import { resolveLanguage } from './highlight/languages';
 import { useHighlightedTokens } from './highlight/useHighlightedTokens';
 import { CodeLineTokens } from './highlight/CodeTokens';
-import { LineNoteGutter, LineNoteThread, lineNotesByLine, useNotesStore } from '../notes';
+import { lineNotesByLine, useNotesStore } from '../notes';
 import { BinaryPlaceholder } from './BinaryPlaceholder';
+import { CodeRow } from './CodeRow';
 
 /**
  * RawFile's classification of a path's bytes once its ONE `readFile` call
  * resolves — see the `onBinaryConfirmed` prop doc comment below. Mirrors this
- * component's own `state` kinds one-for-one (minus `'loading'`); `'text'`
- * carries no payload here — callers only need to know content IS text, never
- * the text itself.
+ * component's own `state` kinds one-for-one (minus `'loading'`). `'text'`
+ * carries `sizeBytes` too (local_repo_explorer-jp2f.4; previously no
+ * payload) — its first consumer is ContentViewer's structural-fold size
+ * degrade (`effectiveCls`), which needs a confirmed-text json/yaml file's
+ * size to decide whether it is over the `structuredFoldMaxMb` threshold,
+ * without a second read. A caller that only needs to know content IS text
+ * (not its size) can still ignore the field.
  */
 export type RawFileConfirmation =
-  | { kind: 'text' }
+  | { kind: 'text'; sizeBytes: number }
   | { kind: 'binary'; sizeBytes: number }
   | { kind: 'too-large'; sizeBytes: number }
   | { kind: 'missing' };
@@ -26,6 +31,17 @@ interface RawFileProps {
   /** Git ref to read the file at instead of the working tree. `ref` is a
    *  reserved React prop name, so this is exposed as `gitRef`. */
   gitRef?: string;
+  /**
+   * Read-cap override (bytes), forwarded verbatim as the read's
+   * `FileReadOptions.maxBytes`. Only ever set by ContentViewer, and only for a
+   * json/yaml-classed path (see `structuredFoldReadMaxBytes` in
+   * src/shared/settings.ts) — raises this read's cap above the default so the
+   * structural-fold size degrade can observe a confirmed-text file over the
+   * `structuredFoldMaxMb` threshold instead of always being refused first by
+   * the smaller default cap. `undefined` for every other class, leaving the
+   * default cap completely unchanged.
+   */
+  maxBytes?: number;
   /** Soft-wrap long lines instead of scrolling horizontally. */
   wrap?: boolean;
   /**
@@ -89,6 +105,7 @@ export function RawFile({
   worktreePath,
   filePath,
   gitRef,
+  maxBytes,
   wrap = false,
   highlight = true,
   onBinaryConfirmed,
@@ -103,8 +120,9 @@ export function RawFile({
 
   useEffect(() => {
     let active = true;
-    const opts: { ref?: string; worktreePath?: string } = { worktreePath };
+    const opts: { ref?: string; worktreePath?: string; maxBytes?: number } = { worktreePath };
     if (gitRef !== undefined) opts.ref = gitRef;
+    if (maxBytes !== undefined) opts.maxBytes = maxBytes;
     void window.api.provider.readFile(filePath, opts).then((r) => {
       if (!active) return;
       // Each branch reports the SAME classification via both the local
@@ -114,7 +132,7 @@ export function RawFile({
       // call, so the two can never drift out of sync.
       if (r.content !== null) {
         setState({ kind: 'text', content: r.content });
-        onBinaryConfirmed?.({ kind: 'text' });
+        onBinaryConfirmed?.({ kind: 'text', sizeBytes: r.sizeBytes });
       } else if (r.truncated) {
         setState({ kind: 'too-large', sizeBytes: r.sizeBytes });
         onBinaryConfirmed?.({ kind: 'too-large', sizeBytes: r.sizeBytes });
@@ -134,8 +152,12 @@ export function RawFile({
     // `onBinaryConfirmed` IS included: ContentViewer always passes its
     // `setConfirmedBinary` state setter directly, a stable reference across
     // renders, so listing it here satisfies exhaustive-deps without ever
-    // causing a spurious re-fetch.
-  }, [worktreePath, filePath, gitRef, onBinaryConfirmed]);
+    // causing a spurious re-fetch. `maxBytes` IS included — deliberately
+    // UNLIKE `highlight`/`wrap` above: a cap change (a live Preferences edit to
+    // `structuredFoldMaxMb`) can turn a previously-refused read into a
+    // successful one (or vice versa), so this must re-read rather than keep
+    // serving an outcome computed under the old cap.
+  }, [worktreePath, filePath, gitRef, maxBytes, onBinaryConfirmed]);
 
   switch (state.kind) {
     case 'loading':
@@ -173,10 +195,8 @@ export function RawFile({
 }
 
 /**
- * Renders the text case as per-line rows (line-number gutter + code) — the
- * single shared authoring site for the line-row/gutter/note markup used by
- * BOTH presentations (see the Content-panel gutter-alignment invariant in
- * CLAUDE.md: this is its one authoring site):
+ * Renders the text case as per-line rows (line-number gutter + code), used by
+ * BOTH presentations:
  *
  *  - Rendered (`highlight=true`): the nicest available presentation — progressive
  *    Shiki tokenization when the file extension maps to a supported language
@@ -191,7 +211,11 @@ export function RawFile({
  *    just entered intentionally instead of by an unresolved extension.
  *
  * Each line is a note anchor in both presentations: the gutter adds a note,
- * and existing notes render inline beneath the line as a {@link LineNoteThread}.
+ * and existing notes render inline beneath the line as a `LineNoteThread`.
+ * The actual row/gutter/note markup (and the Content-panel gutter-alignment
+ * invariant in CLAUDE.md) now lives in the shared {@link CodeRow} primitive —
+ * also consumed by FoldingView.tsx's `renderRow` — rather than being
+ * authored here; see CodeRow.tsx for the one authoring site.
  */
 function RawText({
   content,
@@ -252,47 +276,23 @@ function RawText({
         const lineNotes = notesByLine.get(lineNo) ?? [];
         const open = composing === lineNo;
         return (
-          // content-visibility:auto skips layout/paint of off-screen lines (a big
-          // file's dominant cost) while keeping them in the DOM, so find-in-file,
-          // wrap, and note anchors keep working. See DiffView ROW_CONTAINMENT.
-          <div key={i} style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 1.2em' }}>
-            {/* No-wrap: minWidth:max-content extends the row so long lines scroll
-                in the outer container while the shrink-0 gutter stays aligned.
-                Wrap: pre-wrap + the code span breaking long tokens (minWidth:0,
-                overflowWrap:anywhere) so lines wrap within the panel; the gutter
-                stays aligned with the first visual row. */}
-            <div
-              style={{
-                display: 'flex',
-                whiteSpace: wrap ? 'pre-wrap' : 'pre',
-                ...(wrap ? {} : { minWidth: 'max-content' }),
-              }}
-            >
-              <LineNoteGutter line={lineNo} hasNotes={lineNotes.length > 0} onAdd={setComposing} />
-              <span
-                style={{
-                  flex: '1 1 auto',
-                  paddingLeft: 8,
-                  ...(wrap ? { minWidth: 0, overflowWrap: 'anywhere' as const } : {}),
-                }}
-              >
-                {tokenLines?.[i] ? <CodeLineTokens line={tokenLines[i]} /> : text}
-              </span>
-            </div>
-            {(lineNotes.length > 0 || open) && (
-              <LineNoteThread
-                notes={lineNotes}
-                liveText={text}
-                composing={open}
-                onSubmit={(body) => {
-                  void addLineNote(filePath, lineNo, text, body);
-                  setComposing(null);
-                }}
-                onCancel={() => setComposing(null)}
-                onDelete={(id) => void removeNote(id)}
-              />
-            )}
-          </div>
+          <CodeRow
+            key={i}
+            line={lineNo}
+            wrap={wrap}
+            notes={lineNotes}
+            composing={open}
+            liveText={text}
+            onAddNote={setComposing}
+            onSubmitNote={(body) => {
+              void addLineNote(filePath, lineNo, text, body);
+              setComposing(null);
+            }}
+            onCancelNote={() => setComposing(null)}
+            onDeleteNote={(id) => void removeNote(id)}
+          >
+            {tokenLines?.[i] ? <CodeLineTokens line={tokenLines[i]} /> : text}
+          </CodeRow>
         );
       })}
     </div>

@@ -29,23 +29,24 @@ export function mimeForImagePath(path: string): string | null {
 
 /**
  * The renderable state of a single image pane/view — shared by ImageCompare's
- * "after" (working-tree) pane and the standalone single-image Rendered view
- * (ImageView.tsx), the two call sites that actually fetch bytes via
- * `useImageBytes` below. ImageCompare's "before" (baseline) pane never reaches
- * this hook: it has no byte source in v1 (`readFileBytes` has no `ref` — see
- * its doc comment in src/shared/providers/types.ts) and is hardcoded by its
- * caller to `'no-baseline-preview'` instead. See ImageCompare.tsx's doc
- * comment for the full BASELINE-SIDE DECISION rationale.
+ * "before" (baseline, git-`ref` read) AND "after" (working-tree) panes, and
+ * the standalone single-image Rendered view (ImageView.tsx). All three fetch
+ * bytes via `useImageBytes` below, the "before" pane passing `{ ref }`
+ * (local_repo_explorer-bn8a lifted the earlier v1 constraint — `readFileBytes`
+ * had no `ref` support, so that pane was hardcoded to a distinct
+ * `'no-baseline-preview'` state; see ImageCompare.tsx's doc comment for the
+ * history — the state no longer exists).
  *
- * `'absent'` is this hook's realization of what the issue's contract calls
- * "absent-at-baseline (an added file)": since the baseline pane can never
- * fetch at all (immediately above), that state is only actually reachable via
- * a REAL read — which only ever happens for the WORKING-TREE side. In
- * practice it fires for a DELETED file's "after" pane (`readFileBytes`
- * resolves `{ exists: false, reason: 'missing' }`), the mirror image of the
- * "added" case. Named generically (`'absent'`, not `'…-at-baseline'`) because
- * nothing about it is baseline-specific — it is exactly RawFile's `'missing'`
- * case, one level up (image bytes instead of text).
+ * `'absent'` realizes what the issue's contract calls "absent-at-baseline (an
+ * added file)": a `ref` read whose path does not exist at that ref (an added
+ * file has no baseline version) resolves `{ exists: false, reason: 'missing' }`
+ * exactly like a missing working-tree path, so it lands here too — the SAME
+ * state, not a separate one. It also still fires for a DELETED file's "after"
+ * pane (the mirror image). Named generically (`'absent'`, not
+ * `'…-at-baseline'`) because nothing about it is baseline-specific — it is
+ * exactly RawFile's `'missing'` case, one level up (image bytes instead of
+ * text), and its rendered text ("Not present in the working tree.") is
+ * deliberately pane-position-neutral now that either pane can reach it.
  */
 export type ImagePaneState =
   | { kind: 'loading' }
@@ -54,17 +55,11 @@ export type ImagePaneState =
   | { kind: 'too-large'; sizeBytes: number }
   | { kind: 'unreadable' };
 
-/** `ImagePaneState` plus the baseline-only variant — the full type either
- *  pane in ImageCompare, or the single ImageView pane, can be in. Split from
- *  `ImagePaneState` because only a hook-driven (fetching) pane can be in any
- *  of THOSE states; `'no-baseline-preview'` is assigned directly by a caller
- *  that never calls `useImageBytes` at all. */
-export type ImageDisplayState = ImagePaneState | { kind: 'no-baseline-preview' };
-
 /**
- * Fetch `path`'s bytes from the WORKING TREE (no `ref` — see
- * `FileBytesOptions`'s doc comment) via `window.api.provider.readFileBytes`,
- * and reduce the result to a renderable {@link ImagePaneState}.
+ * Fetch `path`'s bytes via `window.api.provider.readFileBytes` — the WORKING
+ * TREE by default, or AT a git ref when `opts.ref` is supplied (the
+ * image-diff baseline preview; local_repo_explorer-bn8a) — and reduce the
+ * result to a renderable {@link ImagePaneState}.
  *
  * Byte-to-`<img>` mechanism: builds a `data:` URL rather than a `Blob` +
  * `URL.createObjectURL`. The bytes arrive as base64 already (the IPC reply
@@ -72,15 +67,16 @@ export type ImageDisplayState = ImagePaneState | { kind: 'no-baseline-preview' }
  * build with no extra Blob/object-URL indirection — and, load-bearingly, a
  * `data:` URL needs NO revocation: there is no browser-held resource to leak,
  * so this hook's cleanup exists ONLY to guard against a stale response
- * landing after `path`/`worktreePath` change or unmount (the `active` flag
- * below), never to release anything. Do not add a revocation effect here.
+ * landing after `path`/`worktreePath`/`ref` change or unmount (the `active`
+ * flag below), never to release anything. Do not add a revocation effect here.
  *
  * Branches on `reason` (never on `bytesBase64` truthiness) per
  * `FileBytesResult`'s documented contract, so a legitimately empty (0-byte)
  * image file is not misread as absent.
  */
-export function useImageBytes(path: string, worktreePath: string): ImagePaneState {
+export function useImageBytes(path: string, worktreePath: string, opts?: { ref?: string }): ImagePaneState {
   const [state, setState] = useState<ImagePaneState>({ kind: 'loading' });
+  const ref = opts?.ref;
 
   useEffect(() => {
     let active = true;
@@ -97,7 +93,7 @@ export function useImageBytes(path: string, worktreePath: string): ImagePaneStat
     }
 
     void window.api.provider
-      .readFileBytes(path, { worktreePath })
+      .readFileBytes(path, { worktreePath, ref })
       .then((r) => {
         if (!active) return;
         switch (r.reason) {
@@ -130,7 +126,7 @@ export function useImageBytes(path: string, worktreePath: string): ImagePaneStat
     return () => {
       active = false;
     };
-  }, [path, worktreePath]);
+  }, [path, worktreePath, ref]);
 
   return state;
 }

@@ -57,4 +57,46 @@ describe('DiffBundleCache', () => {
     expect(c.get('p1', '/wt', 'f0.ts', 'HEAD')).toBeUndefined(); // evicted (cap 64)
     expect(c.get('p1', '/wt', 'f69.ts', 'HEAD')?.patch).toBe('69'); // newest kept
   });
+
+  describe('worktreePath-tagged invalidation (active-external-worktree watch; local_repo_explorer-g1je)', () => {
+    it('a worktreePath-tagged batch drops only entries stored for that SAME worktree, matching by path', () => {
+      const c = new DiffBundleCache();
+      c.set('p1', '/sibling-wt', 'a.ts', 'HEAD', bundle('sibling-A'));
+      c.set('p1', '/repo', 'a.ts', 'HEAD', bundle('root-A')); // same file NAME, different worktree
+      c.onWatch('p1', ['a.ts'], '/sibling-wt');
+      expect(c.get('p1', '/sibling-wt', 'a.ts', 'HEAD')).toBeUndefined(); // invalidated
+      expect(c.get('p1', '/repo', 'a.ts', 'HEAD')?.patch).toBe('root-A'); // untouched — different worktree
+    });
+
+    it('a worktreePath-tagged batch never cross-matches an entry for a DIFFERENT worktree, even with an identical changed-path name', () => {
+      const c = new DiffBundleCache();
+      c.set('p1', '/repo', 'a.ts', 'HEAD', bundle('root-A'));
+      c.onWatch('p1', ['a.ts'], '/sibling-wt'); // tagged for a worktree with no cached entries at all
+      expect(c.get('p1', '/repo', 'a.ts', 'HEAD')?.patch).toBe('root-A'); // untouched
+    });
+
+    it('a worktreePath-tagged batch never clears the whole project on a git-state-shaped path (the active-external-worktree watch never emits git-state signals)', () => {
+      const c = new DiffBundleCache();
+      c.set('p1', '/sibling-wt', 'a.ts', 'HEAD', bundle('sibling-A'));
+      c.set('p1', '/sibling-wt', 'b.ts', 'HEAD', bundle('sibling-B'));
+      // Even a git-HEAD-shaped path, if it somehow arrived tagged, must be
+      // treated as an ordinary changed path (matched by exact membership),
+      // never as a project-wide clear signal — that branch is reserved for
+      // UNTAGGED batches only.
+      c.onWatch('p1', ['.git/HEAD'], '/sibling-wt');
+      expect(c.get('p1', '/sibling-wt', 'a.ts', 'HEAD')?.patch).toBe('sibling-A'); // untouched
+      expect(c.get('p1', '/sibling-wt', 'b.ts', 'HEAD')?.patch).toBe('sibling-B'); // untouched
+    });
+
+    it('an UNTAGGED batch (worktreePath omitted) keeps its existing untouched-by-worktree-identity behavior — matches by path alone, regardless of stored worktreePath', () => {
+      const c = new DiffBundleCache();
+      c.set('p1', '/repo', 'a.ts', 'HEAD', bundle('root-A'));
+      c.set('p1', '/repo/.worktrees/nested', 'a.ts', 'HEAD', bundle('nested-A'));
+      c.onWatch('p1', ['a.ts']); // no worktreePath arg at all — the primary watch's shape
+      // Byte-for-byte pre-g1je behavior: an untagged batch matches by path
+      // alone, dropping BOTH entries regardless of their own worktreePath.
+      expect(c.get('p1', '/repo', 'a.ts', 'HEAD')).toBeUndefined();
+      expect(c.get('p1', '/repo/.worktrees/nested', 'a.ts', 'HEAD')).toBeUndefined();
+    });
+  });
 });

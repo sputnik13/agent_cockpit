@@ -11,6 +11,7 @@ export type {
   DirEntry,
   FileBytesOptions,
   FileBytesResult,
+  FileBytesUnavailableReason,
   FileReadOptions,
   FileReadResult,
   LocalConnectionSpec,

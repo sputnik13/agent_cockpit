@@ -9,7 +9,7 @@ narrow preload bridge, and a capability-bearing main process. It drives a CLI
 coding agent against one active repository — local or remote over SSH — and
 presents review surfaces around it — read-only except beads edits via task
 detail. The organizing principle is the
-**`WorkspaceProvider` seam**: the renderer addresses the *active provider*
+**`WorkspaceProvider` seam**: the renderer addresses the _active provider_
 through typed IPC and never knows whether the project is local or remote.
 
 The durable architectural boundaries are:
@@ -67,21 +67,21 @@ The durable architectural boundaries are:
 
 ## Major Components and Responsibilities
 
-| Component | Process | Responsibility |
-|-----------|---------|----------------|
-| `WorkspaceProvider` | shared type | The transport seam: lifecycle, terminal, git, fs, beads, watch. Every live session stays fully active (no suspend/resume). |
-| `LocalProvider` | main | Local backing: simple-git/fs/beads reads, chokidar watch, node-pty terminal, local tmux control-mode (`-CC`) session manager. |
-| `RemoteProvider` | main | SSH backing: pluggable `RemoteTransport` (ssh2 default) behind a factory, Go-helper RPC reads, tmux-over-ssh terminal, remote tmux control-mode session manager with reconnect/resync. |
-| `RemoteTransport` / `Ssh2Transport` | main | Provider transport boundary: the only seam that touches `ssh2`; `Ssh2Transport` is the default implementation (host-key verified). |
-| `sessionReaper` | main | Periodic remote-only idle aging-out: the first main-process timer; ends idle remote sessions via the shared `SessionManager.close` teardown. |
-| Shared tmux protocol (`src/shared/tmux/`) | shared | Pure parser/codec/layout/command builders for tmux control mode — `%begin`/`%end`/`%error` reply correlation, `%output` decode, window-layout-string parsing, hex `send-keys` encoding. Consumed by both host managers. |
-| `ProviderRegistry` | main | Builds a provider from `{ projectId, spec }`. |
-| `SessionManager` | main | At most one provider per project; one `activeId`. All live sessions stay fully active (background-live); owns the per-session watch lifecycle and the idle-activity tracker. |
-| Provider IPC bridge | main | Typed handlers routing renderer calls to the active provider + SQLite store; forwards push events; validates inputs. |
-| SQLite store | main | App-local persistence (projects + order + run command, layouts, notes, since-seen, settings). |
-| tmux session inventory | main | Lists/kills sessions on the `agent-cockpit` socket for the Sessions panel. |
-| Remote helper | remote host | Go static binary serving read RPC + fs-watch over the SSH exec channel. |
-| Renderer shell/workspace/panels | renderer | App shell, top project tab strip, Dockview workspace, xterm terminal + Run panel, read-only review panels, zustand stores. |
+| Component                                 | Process     | Responsibility                                                                                                                                                                                                          |
+| ----------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WorkspaceProvider`                       | shared type | The transport seam: lifecycle, terminal, git, fs, beads, watch. Every live session stays fully active (no suspend/resume).                                                                                              |
+| `LocalProvider`                           | main        | Local backing: simple-git/fs/beads reads, chokidar watch, node-pty terminal, local tmux control-mode (`-CC`) session manager.                                                                                           |
+| `RemoteProvider`                          | main        | SSH backing: pluggable `RemoteTransport` (ssh2 default) behind a factory, Go-helper RPC reads, tmux-over-ssh terminal, remote tmux control-mode session manager with reconnect/resync.                                  |
+| `RemoteTransport` / `Ssh2Transport`       | main        | Provider transport boundary: the only seam that touches `ssh2`; `Ssh2Transport` is the default implementation (host-key verified).                                                                                      |
+| `sessionReaper`                           | main        | Periodic remote-only idle aging-out: the first main-process timer; ends idle remote sessions via the shared `SessionManager.close` teardown.                                                                            |
+| Shared tmux protocol (`src/shared/tmux/`) | shared      | Pure parser/codec/layout/command builders for tmux control mode — `%begin`/`%end`/`%error` reply correlation, `%output` decode, window-layout-string parsing, hex `send-keys` encoding. Consumed by both host managers. |
+| `ProviderRegistry`                        | main        | Builds a provider from `{ projectId, spec }`.                                                                                                                                                                           |
+| `SessionManager`                          | main        | At most one provider per project; one `activeId`. All live sessions stay fully active (background-live); owns the per-session watch lifecycle and the idle-activity tracker.                                            |
+| Provider IPC bridge                       | main        | Typed handlers routing renderer calls to the active provider + SQLite store; forwards push events; validates inputs.                                                                                                    |
+| SQLite store                              | main        | App-local persistence (projects + order + run command, layouts, notes, since-seen, settings).                                                                                                                           |
+| tmux session inventory                    | main        | Lists/kills sessions on the `agent-cockpit` socket for the Sessions panel.                                                                                                                                              |
+| Remote helper                             | remote host | Go static binary serving read RPC + fs-watch over the SSH exec channel.                                                                                                                                                 |
+| Renderer shell/workspace/panels           | renderer    | App shell, top project tab strip, Dockview workspace, xterm terminal + Run panel, read-only review panels, zustand stores.                                                                                              |
 
 ## Runtime Topology and Flows
 
@@ -191,7 +191,7 @@ flowchart TB
 - **Host-key verification:** `Ssh2Transport` verifies the host key against the
   user's `known_hosts` (ssh2 `hostVerifier`), closing the prior silent-accept MITM
   gap; a mismatch surfaces as a typed `RemoteTransportError` with `phase:
-  'hostkey'`. `hostKeyPolicy` is part of the `connect` options contract so any
+'hostkey'`. `hostKeyPolicy` is part of the `connect` options contract so any
   future transport satisfies the same verification. Auth (privateKey from
   `identityPath`, else SSH agent) is a transport responsibility behind `connect`.
 - **Selection seam:** `createRemoteTransport()` (`transportFactory.ts`) resolves
@@ -224,7 +224,7 @@ pre-connected on boot; a never-visited project is not connected. Per-session dat
 is **resident in memory until the session ends**, and a session ends only by
 **explicit kill** (`SessionManager.close`) or by **idle aging-out** (the remote-only
 reaper below) — losing focus never ends a session. This is the concurrency and
-resource model: cost grows with the number of *live* sessions (one watch
+resource model: cost grows with the number of _live_ sessions (one watch
 subscription each, no per-session polling), bounded by explicit kill plus aging-out.
 
 Provider reads are addressable by `projectId` (`providerFor(projectId?)` —
@@ -316,7 +316,7 @@ stateDiagram-v2
   off per-session status + watch events (never `activeId` alone). No parallel
   connection truth — and no `suspend()`/`resume()` — may be reintroduced.
 - **Status is wired before connect.** `SessionManager` subscribes to provider
-  status in `open()` *before* calling `connect()`, so the first
+  status in `open()` _before_ calling `connect()`, so the first
   `connecting → connected` transition is never dropped (the wire-after-connect
   ordering left the UI stuck on the `disconnected` fallback).
 - **Disconnect = teardown, reconnect = rebuild.** On `disconnected`, the terminal
@@ -370,7 +370,11 @@ connection status; it is driven off a **channel-attach epoch**.
   for the active project — `hardRecoverTab` (capture-pane re-seed of normal-screen
   panes, so content missed during the drop is recovered; alt-screen TUIs are gated
   to a repaint only, no runaway scroll) plus a `nudgeClientSize` resize round-trip
-  that makes tmux re-emit `%output` and SIGWINCH the pane apps.
+  that makes tmux re-emit `%output` and SIGWINCH the pane apps, plus a
+  `nudgePaneRows` per-pane absolute-height round-trip (sent immediately after
+  `nudgeClientSize`, same ordering contract as the toolbar refresh) so every pane
+  of a multi-pane stacked split redraws, not just the first — see CLAUDE.md
+  "Control-mode tab refresh is three-tier" for the full mechanism.
 - **Per-project teardown.** `resetControlSession(projectId)` clears only that
   project's lifecycle and **keeps** the shared `evt:tmux` subscription and that
   project's `channelEpoch`, so disconnecting one project never clobbers another
@@ -405,8 +409,8 @@ empty-state flash, keyboard lag, and cross-project output bleed).
   - control-mode (`-CC`) panes →
     [`controlPaneRegistry`](../src/renderer/tmux/controlPaneRegistry.ts), keyed by
     `(projectId, paneId)`.
-  Each xterm renders into a detached container that is **reparented** into the
-  current panel host; React views attach/detach, they do not create/dispose.
+    Each xterm renders into a detached container that is **reparented** into the
+    current panel host; React views attach/detach, they do not create/dispose.
 - **Per-project tmux view state is namespaced by `projectId`**
   ([`tmuxStore`](../src/renderer/tmux/tmuxStore.ts): `byProject` + a single
   `activeProjectId`). The tmux pane id (`%0`) repeats across each project's
@@ -459,15 +463,17 @@ empty-state flash, keyboard lag, and cross-project output bleed).
 ### Workgraph Relationship & State Model (beads_rust) (invariant)
 
 #### Summary
+
 The workgraph normalizes beads issues into `BeadsIssue[]` + `BeadsDep[]` and
 derives every rendered state from one pure module
 ([src/renderer/beads/graphSelectors.ts](../src/renderer/beads/graphSelectors.ts)).
 List, Tree, Graph, and TaskDetail are pure derivations of it.
 
 #### Details
+
 - **Dependency direction (authoritative).** A normalized edge is
-  `BeadsDep { from = issue_id, to = depends_on_id, type }`. beads_rust stores a
-  dependency as *`issue_id` depends on `depends_on_id`*, so for a `blocks` edge
+  `BeadsDep { from = issue_id, to = depends_on_id, type }`. beads*rust stores a
+  dependency as *`issue_id` depends on `depends_on_id`\_, so for a `blocks` edge
   **`to` blocks `from`** (`from` is the blocked/dependent node). An issue is
   dep-blocked iff it is the `from` of a `blocks` edge whose `to` is non-terminal.
   `parent-child` edges are `{from = child, to = parent}` — structural hierarchy,
@@ -477,7 +483,7 @@ List, Tree, Graph, and TaskDetail are pure derivations of it.
   and `deleted` identically as done (tombstones are also filtered at the read
   layer in `electron/main/beads/normalize.ts`).
 - **Three kinds of "blocked", one `deriveState`.** Precedence `done >
-  blocked(flag) > in_progress > dep_blocked > child_blocked > ready`:
+blocked(flag) > in_progress > dep_blocked > child_blocked > ready`:
   - `blocked` — stored `status === 'blocked'` (a deliberate flag) → **red**,
     urgent, sorted first.
   - `dep_blocked` — derived from an open `blocks` dependency → **yellow**,
@@ -485,11 +491,11 @@ List, Tree, Graph, and TaskDetail are pure derivations of it.
   - `child_blocked` — derived: a parent/epic with ≥1 open child (the epic↔child
     reverse-block, app-derived; beads_rust does **not** auto-block epics) →
     **yellow**, informational.
-  Only the flag is red; both derived reasons are yellow and sort below the
-  actionable in_progress/ready groups. `openBlockerCount`/`openChildCount` expose
-  the derived reasons as independent secondary badges so a node whose primary
-  state masks another reason still surfaces it. Colors map to existing Solarized
-  tones (red=removed, green=added, blue=accent, yellow=warn, muted=neutral).
+    Only the flag is red; both derived reasons are yellow and sort below the
+    actionable in_progress/ready groups. `openBlockerCount`/`openChildCount` expose
+    the derived reasons as independent secondary badges so a node whose primary
+    state masks another reason still surfaces it. Colors map to existing Solarized
+    tones (red=removed, green=added, blue=accent, yellow=warn, muted=neutral).
 - **Graph view** ([graphLayout.ts](../src/renderer/beads/graphLayout.ts))
   traverses both `blocks` and `parent-child` edges and returns typed edges
   (`blocks`, `parent-child`, and the derived `reverse-block` = an open child of
@@ -521,7 +527,7 @@ List, Tree, Graph, and TaskDetail are pure derivations of it.
   (argv only, no shell): local via `runBr` (`spawnSync`), remote via the helper
   **`beadsExec`** RPC (formerly `beadsQuery`, renamed once writes started flowing
   through it). Five IPC channels (`provider:beads-{close,reopen,comment,create,
-  list-comments}`) carry these; the renderer store reloads the graph on a
+list-comments}`) carry these; the renderer store reloads the graph on a
   successful mutation and surfaces `br`'s own message inline on failure. This is
   the one app-IPC repository-mutation path (REQUIREMENTS NFR-2).
 - **Control-mode renderer boundary (`PaneRenderer`).** The control-mode pane
@@ -593,14 +599,14 @@ List, Tree, Graph, and TaskDetail are pure derivations of it.
   client codec (`HelperRpcClient`) is decoupled from ssh2.
 - **Trust boundaries:**
 
-| Boundary | Trusted? | Notes |
-|----------|----------|-------|
-| Renderer code | No | No Node/FS; receives only typed payloads. |
-| Preload | Yes (small) | Forwards typed IPC; no business logic. |
-| Main process | Yes | Owns providers, PTY/SSH, SQLite, dialogs, watchers. |
-| Repository content (Markdown/Mermaid/bytes) | No | Sanitized + sandboxed iframe; large/binary degrade. |
-| Remote helper | Constrained | RPC over SSH: file/git/beads reads plus the `beadsExec` `br`-CLI write seam (argv only, no shell); capped frame size. |
-| App-local SQLite | Yes | Under `userData/`, never inside any repo. |
+| Boundary                                    | Trusted?    | Notes                                                                                                                 |
+| ------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------- |
+| Renderer code                               | No          | No Node/FS; receives only typed payloads.                                                                             |
+| Preload                                     | Yes (small) | Forwards typed IPC; no business logic.                                                                                |
+| Main process                                | Yes         | Owns providers, PTY/SSH, SQLite, dialogs, watchers.                                                                   |
+| Repository content (Markdown/Mermaid/bytes) | No          | Sanitized + sandboxed iframe; large/binary degrade.                                                                   |
+| Remote helper                               | Constrained | RPC over SSH: file/git/beads reads plus the `beadsExec` `br`-CLI write seam (argv only, no shell); capped frame size. |
+| App-local SQLite                            | Yes         | Under `userData/`, never inside any repo.                                                                             |
 
 ## Filesystem Watch Subsystem
 
@@ -625,11 +631,17 @@ watches and how paths are classified. It has no Node dependencies and is
 importable by both main and renderer.
 
 Key exports:
+
 - `WatchCategory = 'working-tree' | 'git-state' | 'beads'` — the three event
   classes panels subscribe by.
 - `classifyWatchPath(relPath): WatchCategory | null` — the one place that maps
   a repo-relative path to a category, or `null` when excluded. Encodes:
-  - `git-state`: `.git/HEAD`, `.git/packed-refs`, `.git/refs/**`.
+  - `git-state`: `.git/HEAD`, `.git/packed-refs`, `.git/refs/**`, plus
+    `.git/worktrees` and exactly one entry below it (`.git/worktrees/<name>` —
+    a linked worktree being added/removed). Unlike `.git/refs/**`, this is
+    depth-BOUNDED at directory level: `.git/worktrees/<name>/HEAD` and other
+    paths nested inside a worktree's own metadata dir stay noise, so a routine
+    commit made inside an already-known worktree doesn't spam a refresh.
   - `beads`: `.beads/beads.db`, `.beads/issues.jsonl` (never `-wal`/`-shm`/`.lock`
     → WAL self-feed suppressed at the policy level).
   - `working-tree`: everything else not excluded.
@@ -650,8 +662,8 @@ Key exports:
 - **`LocalWatchProvider`** (refactor of
   [`electron/main/providers/local/watch.ts`](../electron/main/providers/local/watch.ts)):
   chokidar for the working tree + targeted `fs.watch` for git-state and beads
-  signals. The *what* (exclusions, signal paths) comes from the `WatchSpec`, not
-  inline regexes. Mechanism-safety invariants are enforced here as *how*:
+  signals. The _what_ (exclusions, signal paths) comes from the `WatchSpec`, not
+  inline regexes. Mechanism-safety invariants are enforced here as _how_:
   directory-granularity for `.git`/`.beads` (no per-file descent, no FD pin on
   `beads.db`), gitignore + `node_modules` pruning (EMFILE avoidance).
 - **`RemoteWatchProvider`** (`remote/index.ts` + `rpcClient.ts`): sends the
@@ -660,6 +672,19 @@ Key exports:
   own `excludedDirs` and watches/filters per the received spec.
   `node_modules` + gitignore pruning remain as mechanism concerns in Go.
 - Both providers emit raw `(path, op)` events upward to Layer 3.
+- **Second, worktree-rooted subscription** (`WorkspaceProvider.subscribeWorktreeWatch`,
+  local_repo_explorer-g1je): both mechanisms also expose a second entry point
+  rooted at an arbitrary worktree path instead of the project root — a
+  working-tree-only mechanism (no `.git`/`.beads` signal watchers, since a
+  linked worktree's own `.git` is a pointer FILE, not a directory). Local
+  reuses the SAME `createBase` scaffolding as the primary watch (own
+  `excludedSegments`, own `createGitignoreFilter(worktreePath)`); remote reuses
+  the SAME `watch.subscribe` RPC with a different `cwd`/`token` — the helper
+  already supports multiple concurrent, independently-rooted subscriptions, so
+  no Go changes were needed. See "Active-external-worktree watch" under
+  [Worktree-Aware Reads & Shared Selection](#worktree-aware-reads--shared-selection-invariant)
+  for the full design (when it is established, at most how many, and how its
+  events are tagged).
 
 **Important operational note:** After changing `remote-helper/*.go`, the dist
 binary must be rebuilt (`remote-helper/build.sh`) and the app restarted so the
@@ -682,14 +707,24 @@ renderer-side path classification that previously duplicated logic across stores
 ### Layer 4 — Dispatch (central hub)
 
 - **Main** forwards `CanonicalWatchEvent` over a single `evt:watch` IPC carrying
-  `categories`.
+  `categories`, plus an optional `worktreePath` (`WatchPushEvent.worktreePath`)
+  — present only for a batch from the second, worktree-rooted subscription
+  (local_repo_explorer-g1je); absent for the primary root-rooted watch's
+  events, exactly as before this field existed.
 - **Renderer** hub (`src/renderer/watch/hub.ts`): subscribers register
   `{ interest: WatchCategory[], onEvent }`. The hub routes canonical events only
   to matching subscribers — panels do not re-implement path filtering.
+  `worktreePath` passes through unchanged on `HubWatchEvent`; classification
+  is unaffected by it.
   - Changes store → `interest: ['working-tree', 'git-state']` (git-state →
-    relist worktrees; working-tree → refresh changeset).
+    relist worktrees; working-tree → refresh changeset — unconditionally, so a
+    tagged event costs at most one harmless extra refresh; `refresh()` itself
+    always reads whichever worktree is CURRENTLY active).
   - Beads store → `interest: ['beads']`.
   - Explorer → `interest: ['working-tree']`.
+  - Content panel's FoldingView read cache → `interest: ['working-tree']`,
+    matching tagged/untagged events against a discriminated per-entry target
+    (see the worktree-watch subsection linked below).
 - **Changes surface filter:** `ChangesPanel` applies `isHiddenFromChanges(rel, { showAll })`
   from the shared policy to the changeset rows for display, keyed off the
   `showAllChanges` setting (`src/shared/settings.ts`). The changeset stays
@@ -729,6 +764,7 @@ The Changes view supports two selectable diff targets, toggled by a toolbar `Sel
 
 `resolveBranchPoint(worktreePath, projectId?)` is a first-class method on `WorkspaceProvider`
 ([`src/shared/providers/types.ts`](src/shared/providers/types.ts)):
+
 - **Local**: `electron/main/git/branchPoint.ts` — runs `git rev-parse --abbrev-ref @{upstream}`,
   then `git symbolic-ref refs/remotes/origin/HEAD`, then tries `origin/main`/`origin/master`
   in order; then runs `git merge-base HEAD <parentRef>`.
@@ -757,6 +793,7 @@ an incorrect result.
 
 `changesStore` ([`src/renderer/changes/changesStore.ts`](src/renderer/changes/changesStore.ts))
 extends each `ChangesSlice` with:
+
 - `target: 'head' | 'branchPoint'` — the selected diff target (default `'head'`).
 - `branchPoint: BranchPoint | null | undefined` — the last resolved branch point
   (`undefined` = not in branchPoint mode; `null` = no parent resolvable).
@@ -856,6 +893,158 @@ before (project-root reads). Covered by the linked-worktree case in
 `electron/main/providers/local/local.test.ts`, the `remote-helper` `*WorktreePath`
 Go tests, and `worktreeStore.test.ts`.
 
+### Active-external-worktree watch (lazy, at most one; local_repo_explorer-g1je)
+
+The worktree-parametrized read surface above makes a sibling/external linked
+worktree's files READABLE. Observing EDITS to those files — so the Content
+panel's cache and the Changes panel refresh on an external change, the same
+way they already do for the primary worktree — needs filesystem watch
+coverage, which the primary watch (rootPath/remotePath-scoped) structurally
+cannot provide: it can never see outside its own subtree.
+
+**Problem.** Before this bead, a file in a worktree NESTED under the project
+root was covered (the primary watch sees it; `FoldingView`'s cache converts
+its path to root-relative — local_repo_explorer-w5x0), but a
+SIBLING/EXTERNAL worktree (the common `git worktree add ../foo` shape) was
+not observable by any watch mechanism at all. `toWatchTarget` (formerly
+`toRootRelativePath`) in
+[`src/renderer/content/FoldingView.tsx`](../src/renderer/content/FoldingView.tsx)
+correctly recognized this and returned an unmatchable target — but nothing
+could ever match it, because nothing watched it.
+
+**Design decision — lazy, at most one, follows the SELECTION not the LIST.**
+Rejected: an eager watch per known worktree (unbounded N × recursive
+watchers, especially costly for a large/`node_modules`-heavy checkout — the
+bead's own cost guardrail). Chosen: a per-project, at-most-ONE extra watch
+subscription, established ONLY while the project's ACTIVE worktree is
+EXTERNAL (neither the root nor nested under it — a nested worktree is
+already covered by the primary watch, so a second subscription there would
+be redundant). A worktree's extra watch follows the active SELECTION, not
+the worktree LIST — the same "liveness is lazy" principle this app already
+applies to sessions themselves.
+
+```mermaid
+flowchart LR
+  WS["worktreeStore<br/>activeWorktree selection"]
+  PDS["panelDataSync<br/>(renderer)"]
+  IPC["watch:set-active-worktree"]
+  SM["SessionManager.setActiveWorktree<br/>(main)"]
+  EXT{"external to<br/>project root?"}
+  SUB["provider.subscribeWorktreeWatch(worktreePath)"]
+  NONE["no extra subscription"]
+  WS -->|"transition"| PDS -->|"projects the selection"| IPC --> SM --> EXT
+  EXT -->|yes| SUB
+  EXT -->|"no (root / nested)"| NONE
+```
+
+**Renderer is the single driver; main keeps no second truth.** Main has no
+other way to learn which worktree the renderer's `worktreeStore` currently
+considers active. `panelDataSync`'s existing `activeWorktree` transition
+observer (the same one that already triggers `changesStore.refresh`) also
+calls `agentCockpit.watch.setActiveWorktree(projectId, activeWorktree)` on
+every transition, including to `null` (project switch / worktree-clear) —
+one owning site for "detect a worktree-selection transition," not a second,
+parallel diffing effect. `SessionManager.setActiveWorktree` (main,
+[`electron/main/providers/sessionManager.ts`](../electron/main/providers/sessionManager.ts))
+normalizes both the candidate path and the session's own root/remotePath
+(from `loadSpec`), classifies external vs. root vs. nested, and reconciles:
+a same-target call is a no-op; otherwise it stops any existing extra
+subscription and, iff the new target is external AND the session is live,
+establishes a new one. It keeps no independent "desired worktree" cache
+beyond that reconciliation bookkeeping — the renderer's selection is the
+only source of truth for the target, mirrored by an in-flight call-sequence
+guard (mirroring `startWatch`'s existing `sessions.get(projectId) !==
+provider` pattern) so a superseded call never clobbers a newer one.
+
+**Mechanism (both transports, zero Go changes).**
+`WorkspaceProvider.subscribeWorktreeWatch(worktreePath, handler)`
+([`src/shared/providers/types.ts`](../src/shared/providers/types.ts)) is
+working-tree-only — no `.git`/`.beads` signal watchers, since a linked
+worktree's own `.git` is a pointer FILE (`gitdir: ...`), not a directory, so
+those signal paths never exist under it to watch in the first place. Local
+(`LocalWatchManager.subscribeWorktree`,
+[`electron/main/providers/local/watch.ts`](../electron/main/providers/local/watch.ts))
+shares the SAME `createBase` scaffolding the primary watch uses (own
+`excludedSegments`, own `createGitignoreFilter(worktreePath)` — the
+WORKTREE's own `.gitignore`, not the project root's), just rooted
+differently and without the primary's dedicated git/beads signal watchers.
+Remote (`RemoteProvider.subscribeWorktreeWatch`) reuses the SAME
+`watch.subscribe` RPC with a fresh `token`/`cwd` — the Go helper
+([`remote-helper/watch.go`](../remote-helper/watch.go)) already keys
+subscriptions by token with an arbitrary per-subscription `Cwd`, so a second,
+independently-rooted subscription needed no helper changes.
+
+**Event tagging and consumption.** `WatchPushEvent`/`HubWatchEvent` gain an
+optional `worktreePath` (see Layers 2/4 above): present only for a batch
+from this extra subscription, absent for the primary watch's events. Two
+consumers key off the tag:
+
+- **`diffCache`** (`electron/main/providers/diffCache.ts`) — `onWatch(projectId,
+  paths, worktreePath?)`: a tagged batch drops only entries whose OWN stored
+  `worktreePath` equals the tag AND whose path is in the changed set; an
+  untagged batch keeps its pre-existing behavior (path-only match, or a
+  project-wide clear on a git-state signal) unchanged.
+- **`FoldingView`**'s read cache
+  (`src/renderer/content/FoldingView.tsx`) — each entry's `watchTarget` is a
+  discriminated `{kind:'root'; rel}` (primary/nested worktree, matched by an
+  UNTAGGED event) or `{kind:'worktree'; worktreePath; rel}` (external
+  worktree, matched ONLY by a TAGGED event for that exact worktree).
+  `changesStore.refresh` (via `panelDataSync`'s existing `working-tree`
+  handler) needs no gating at all: it already refreshes unconditionally on
+  any working-tree event, and always re-reads whichever worktree is
+  CURRENTLY active, so a stale-tagged event costs at most one harmless extra
+  refresh.
+
+**Unwatched-interval staleness guard.** The extra watch covers ONLY the
+currently-active external worktree — the moment the selection moves away,
+its subscription is torn down, so an edit made during that unwatched
+interval would never arrive as an event. `FoldingView` subscribes
+(module-level, alongside its hub subscription) to `useWorktreeStore`
+transitions and, on a transition AWAY from a worktree path, evicts every
+`kind:'worktree'` cache entry for that path — so reopening the same worktree
+later forces a real re-read rather than silently trusting a possibly-stale
+cached entry.
+
+**Symmetric lifecycle.** The extra subscription is session-owned exactly
+like the primary one: `SessionManager`'s existing `stopWatch(projectId)` now
+tears down BOTH the primary AND the extra subscription in one place, so
+every existing teardown edge (status → disconnected/failed, eviction,
+`closeAll`) stays symmetric for free — no second, independently-called
+teardown path was introduced.
+
+**Scope boundary (explicit).**
+
+- Covered: the ACTIVE external worktree, on both transports — Changes
+  refresh, FoldingView cache invalidation, and `diffCache` sibling
+  invalidation, with symmetric session lifecycle.
+- Deferred by design, not a bug: every OTHER known-but-not-active worktree
+  stays unwatched. This is handled by the switch-away eviction guard above,
+  not by adding more watchers — see the "do not reintroduce" rule in
+  CLAUDE.md's "Filesystem watch: single-source what to watch" entry.
+- Pre-existing, NOT introduced or fixed by this bead:
+  `diffCache`'s NESTED-worktree path-shape mismatch (an untagged event's
+  path is project-root-relative while a nested worktree's own cached entry
+  stores a worktree-relative path, so they can fail to match) — flagged in
+  `diffCache.ts`'s `onWatch` doc comment as a candidate for a small
+  follow-up bead.
+- Link resolution (`openLinkTarget`/`resolvePath`) remaining
+  non-worktree-aware is the already-tracked separate bead noted above.
+
+**Regression check.** With a sibling/external linked worktree active, edit a
+tracked file in it externally (outside the app) — the Changes panel must
+refresh without a manual action, and toggling a JSON/YAML file's Content view
+from Raw to Rendered must show the edited content. Switch the active worktree
+away and back without any external edit — the switch-away staleness guard
+unconditionally evicts that worktree's cache entries, so the return always
+re-reads; the content shown is correct either way (unchanged if nothing
+happened to change, current if something did). The already-covered primary
+and nested-linked-worktree cases (w5x0) must show no behavior change.
+Covered by the worktree-watch describe blocks in
+`electron/main/providers/sessionManager.test.ts`,
+`electron/main/providers/local/local.test.ts`,
+`electron/main/providers/diffCache.test.ts`, `src/renderer/watch/hub.test.ts`,
+and `src/renderer/content/foldingView.test.tsx`.
+
 ## Bounded File Export (Download) & Row Context Menus
 
 The Changes and Explorer panels offer a per-row context menu (right-click, or
@@ -900,7 +1089,7 @@ construction: the local implementation (`getFile` in
 [electron/main/git/files.ts](../electron/main/git/files.ts)) returns
 `content: null` for binary content (`looksBinary`) and for files over the
 preview `maxBytes` cap, and the remote Go helper's `readFile` RPC returns a
-JSON string hard-capped at 2 MiB (`maxReadFileBytes` in
+JSON string capped at `maxReadFileBytes` (2 MiB by default —
 [remote-helper/commands.go](../remote-helper/commands.go)). Raising the cap
 does not make it binary-safe — that channel exists to feed text preview/diff
 rendering, and a download built on it would silently save empty or corrupt
@@ -908,6 +1097,27 @@ output for exactly the files most worth downloading. The text preview path
 (`readFile`/`FileReadResult`/`getDiffBundle`) therefore
 stays text-only, and there are exactly TWO bounded, deliberately-shaped
 exceptions to it — one in each direction, not to be mistaken for each other:
+
+**`maxBytes` is a per-call cap override, not a second channel
+(local_repo_explorer-ftbq).** `FileReadOptions.maxBytes` raises `readFile`'s
+cap for one call, still entirely within the text-preview contract above — it
+is consumed by exactly one caller today: ContentViewer.tsx's structural-fold
+size-degrade override (see "The two runtime reclassifications (one rule)"
+below). Both transports stay refuse-never-truncate at whatever the effective
+cap is (never a partial/truncated string served as if complete): locally
+`getFile` already refused rather than truncated at any cap; the remote Go
+helper's `handleReadFile` was fixed to match — a file over its effective cap
+now refuses (empty content, `truncated: true`, the true `sizeBytes`, read
+WITHOUT even opening the file on the working-tree branch) instead of the
+prior behavior of silently serving a truncated prefix. The helper clamps any
+requested `maxBytes` to a 12 MiB ceiling (`maxReadFileCapBytes`) regardless of
+the caller's request, and additionally refuses a response that would exceed
+the RPC frame budget once JSON-escaped even under that ceiling (escape-heavy
+text can inflate 2-6x) — both guard the same underlying constraint: the RPC
+frame codec hard-caps a single message at 16 MiB
+(`MAX_MESSAGE_BYTES`/`maxMessageBytes`) and a dropped oversized frame would
+otherwise hang the caller's pending RPC forever with no error surfaced on
+either side (`main.go`'s `writeFrame` only logs, never replies, on failure).
 
 - **`exportFile` — the bounded byte WRITE (Download).** Whole file, uncapped,
   streamed OUT of the repository to a user-chosen destination on the app
@@ -1066,28 +1276,38 @@ work framed its bounded WRITE exception.
 ### Class model and (class, mode) dispatch (single authoring site)
 
 `classOf(path)` is a **pure, path-only** classifier producing a `ContentClass`
-(`markdown | html | image | text | generic-binary`); `modesFor` computes mode
-availability, `defaultModeFor` the default, and `viewFor` the
+(`markdown | html | image | text | json | yaml | generic-binary`); `modesFor`
+computes mode availability, `defaultModeFor` the default, and `viewFor` the
 `(class, mode) → component` lookup (`VIEW_DISPATCH`). `ContentViewer`
 dispatches on `viewFor`'s result — no other module branches on extension or
-mode name. Shipped matrix (`ImageView` and `BinaryPlaceholder` are new; every
-other cell reuses a pre-existing component, and no new text viewer was
-introduced):
+mode name. `isJsonPath`/`isYamlPath` extend the same extension-set pattern
+`isMarkdownPath`/`isHtmlPath`/`isImagePath` already use: `.json`/`.jsonc` both
+classify as `json` (`isJsonPath`; jsonc-parser — the same parser the
+structural-folding view below builds on — natively tolerates
+JSON-with-comments and trailing commas, so there is no grammar mismatch to
+hide); `.json5` deliberately does NOT — its grammar is materially richer than
+jsonc-parser handles, so it falls through to `text`, unchanged. `.yaml`/`.yml`
+both classify as `yaml` (`isYamlPath`). Shipped matrix (`ImageView` and `BinaryPlaceholder`
+were new with the content-mode epic; `FoldingView` is a later addition — see
+"Content Panel Structural Folding (JSON/YAML)" below — every other cell
+reuses a pre-existing component):
 
-| Class            | Diff                              | Rendered                         | Raw               |
-| ---------------- | --------------------------------- | -------------------------------- | ----------------- |
-| `markdown`       | `DiffView`                        | `RenderedMarkdown`               | `RawFile` (plain) |
-| `html`           | `DiffView`                        | `HtmlPreview` (sandboxed iframe) | `RawFile` (plain) |
-| `text`           | `DiffView`                        | `RawFile` (Shiki-highlighted)    | `RawFile` (plain) |
-| `image`          | `ImageCompare` (before/after)     | `ImageView` (working-tree image) | —                 |
-| `generic-binary` | `DiffView` (graceful placeholder) | `RawFile` (graceful placeholder) | —                 |
+| Class            | Diff                              | Rendered                                         | Raw               |
+| ---------------- | --------------------------------- | ------------------------------------------------ | ----------------- |
+| `markdown`       | `DiffView`                        | `RenderedMarkdown`                               | `RawFile` (plain) |
+| `html`           | `DiffView`                        | `HtmlPreview` (sandboxed iframe)                 | `RawFile` (plain) |
+| `text`           | `DiffView`                        | `RawFile` (Shiki-highlighted)                    | `RawFile` (plain) |
+| `json`           | `DiffView`                        | `FoldingView` (source-mapped structural folding) | `RawFile` (plain) |
+| `yaml`           | `DiffView`                        | `FoldingView` (source-mapped structural folding) | `RawFile` (plain) |
+| `image`          | `ImageCompare` (before/after)     | `ImageView` (working-tree image)                 | —                 |
+| `generic-binary` | `DiffView` (graceful placeholder) | `RawFile` (graceful placeholder)                 | —                 |
 
 An `external-file` selection (out-of-project, no git baseline) never offers
 Diff; its image/generic-binary classes fall back to Raw only (a deliberate
 carve-out preserved from the pre-epic behavior — see `modesFor`'s doc
 comment). Defaults: markdown/html → Rendered; image/generic-binary → Diff
-(the type-appropriate comparison); text → Diff for a Changes row, Raw for an
-Explorer file; external files → Raw.
+(the type-appropriate comparison); text-like (`text`/`json`/`yaml`) → Diff for
+a Changes row, Raw for an Explorer file; external files → Raw.
 
 ### What Diff / Rendered / Raw mean
 
@@ -1101,6 +1321,15 @@ Explorer file; external files → Raw.
   single read; a `highlight` prop (`true` for Rendered, `false` for Raw)
   decides whether Shiki tokenization runs at all, so toggling never
   re-fetches.
+- **json/yaml's Rendered and Raw are DIFFERENT dispatch cells — unlike
+  `text`.** `text`'s Rendered/Raw both dispatch to the same `RawFile`
+  instance (a prop toggle, no remount, no re-read). `json`/`yaml`'s Rendered
+  dispatches to `FoldingView`, Raw to `RawFile` — two different components,
+  so toggling between them unmounts one and mounts the other. `FoldingView`
+  owns a module-level read cache keyed `(worktreePath, filePath, gitRef)`
+  specifically to absorb this: a Rendered → Raw → Rendered round trip repaints
+  from the cache instead of re-reading the file. See "Content Panel Structural
+  Folding (JSON/YAML)" below.
 - **Raw exists only for text-like classes.** An image or a confirmed binary
   file has no meaningful plain-text presentation — a byte dump helps no one —
   so `CLASS_MODES` omits Raw for both rather than offering a junk view.
@@ -1138,6 +1367,12 @@ Diff mode additionally gets git's own signal: a patch carrying the
 the placeholder with `changed: true`; an unmodified/untracked binary — whose
 patch is empty and carries no signal — is covered by `RawFile`'s confirmation
 threaded through as `DiffView`'s `knownReason`/`knownSize` props.
+
+This is the first of **two** runtime reclassifications `ContentViewer` derives
+from a real read result rather than from `classOf`. The second — an oversized
+`json`/`yaml` file degrading to `text` — is documented together with it, as
+one coherent rule set, in "Content Panel Structural Folding (JSON/YAML)"
+below.
 
 Two deliberate boundaries of this mechanism, both settled after review:
 
@@ -1222,14 +1457,49 @@ content class). Contract, as shipped:
   never passes a range, a bounded preview needs none (refuse-over-cap makes a
   partial read pointless), and a conformance test pins the SFTP fake's
   recorded stream opts to `{start: undefined, end: undefined}`.
-- **No `ref`, by construction.** `FileBytesOptions` omits `ref` entirely (not
-  merely leaves it undefined): a git-object read is a different byte source
-  (git plumbing) than this primitive's fs/SFTP read, and supporting it now
-  would force the remote path through the forbidden text-only helper RPC or a
-  new exec surface. The IPC handler enforces this at the boundary by
-  constructing `{ worktreePath }` explicitly instead of forwarding the
-  renderer's `opts` wholesale, so a `ref` cannot be smuggled through even by
-  a malformed call.
+- **`ref` (git-object read at a baseline; local_repo_explorer-bn8a).**
+  `FileBytesOptions.ref`, when set, reads the file's bytes AT that git ref
+  instead of the working tree — the byte-safe counterpart to
+  `FileReadOptions.ref`, added to serve the image-diff baseline preview (see
+  "Image views and the baseline-side decision" below). It applies the SAME
+  size gate and refuse-never-truncate contract as the working-tree path above
+  (still `FILE_BYTES_CAP`, still no partial bytes) — an ADDITION to the v1
+  contract, not a rework of it. Byte sources, mirroring the non-ref split:
+  - **Local:** `localReadFileBytes`'s `ref` branch calls
+    `simpleGit.binaryCatFile` — the SAME plumbing `getFile`'s text-preview ref
+    branch already uses (electron/main/git/files.ts), so no new git shell-out
+    is introduced. No filesystem inode exists to stat first, so the cap is
+    checked AFTER the read (mirroring `getFile`'s existing ref-branch shape),
+    but it still refuses rather than truncates.
+  - **Remote:** a dedicated `readFileBytes` RPC on the Go helper
+    (remote-helper/commands.go's `handleReadFileBytes`) — reusing the SAME
+    `git show ref:path` mechanism `readFile`'s ref branch already runs, with
+    two deliberate differences: the ENCODING (a `[]byte` result field, which
+    `encoding/json` marshals as base64 directly — byte-faithful, unlike
+    `readFile`'s `Content string` field, which substitutes invalid UTF-8 with
+    U+FFFD at the JSON boundary — see "Generic-binary is a RUNTIME
+    reclassification"'s "Remote binary detection works too" bullet above and
+    local_repo_explorer-r3s6) and the cap contract (refuse over
+    `FILE_BYTES_CAP`, mirrored into Go as `maxRefBytesCap` since Go cannot
+    import the TS constant — same mirroring precedent as `binarySniffBytes`).
+    `RemoteProvider.readFileBytes` routes a `ref`-bearing call through this RPC
+    — **never** SFTP (filesystem-only, cannot serve a git-object read) and
+    **never** the text-only `readFile` RPC. `repoRelative()` gives `git show`
+    the repo-relative POSIX pathspec it expects.
+  - **Absence, not an error.** A path absent at `ref` (an added file, which has
+    no baseline version) resolves `{ exists: false, reason: 'missing' }` on
+    both transports — a failed `binaryCatFile`/`git show` is caught and mapped
+    to this outcome, never left to reject — exactly like a missing
+    working-tree path, so callers do not need a separate "absent at baseline"
+    case.
+  - **Boundary enforcement.** The IPC handler's opts whitelist was extended
+    (deliberately, not bypassed) to forward `{ worktreePath, ref }` — still
+    only these two named fields, never the renderer's `opts` wholesale.
+  - **Graceful staleness.** A remote helper built before bn8a lacks the
+    `readFileBytes` RPC method entirely; the call rejects with an "unknown
+    method" error, which the renderer's existing catch path already maps to
+    the `'unreadable'` pane state — no crash, no hang, and the provisioner
+    re-uploads a current helper on the next reconnect (hash mismatch).
 
 ```mermaid
 ---
@@ -1243,10 +1513,15 @@ flowchart LR
   ST["stat gate (10 MiB)"]
   LF["local fs read"]
   SF["SFTP read"]
+  GC["local: binaryCatFile(ref)"]
+  RPC["remote: readFileBytes RPC (git show ref)"]
   B64["base64 reply"]
-  UI -. typed IPC .-> IPC --> RB --> ST
+  UI -. typed IPC .-> IPC --> RB
+  RB -- "no ref" --> ST
   ST --> LF --> B64
   ST --> SF --> B64
+  RB -- "ref set" --> GC --> B64
+  RB -- "ref set" --> RPC --> B64
 ```
 
 ### Image views and the baseline-side decision
@@ -1255,23 +1530,30 @@ The image bug this epic fixed: the old image compare's `makeDataUrl` stub
 returned `null` unconditionally, so BOTH panes silently read "(unavailable)"
 — no image ever rendered. Now `useImageBytes`
 ([src/renderer/content/useImageBytes.ts](../src/renderer/content/useImageBytes.ts))
-fetches working-tree bytes via `readFileBytes` and builds a **`data:` URL**
+fetches bytes via `readFileBytes` and builds a **`data:` URL**
 (`data:<mime>;base64,<bytes>` — the bytes already arrive base64-encoded, so
 there is no Blob/`createObjectURL` indirection and nothing to revoke); a
 small local extension→MIME map is the one place deciding which extensions
 render as images at all (an unrecognized extension degrades to `unreadable`,
 never a wrong-MIME URL). `ImagePaneBody` renders every pane state in one
 place, exclusively via `<img src>` (script-inert even for SVG bytes);
-`ImageView` (Rendered) and `ImageCompare`'s "after" pane share the hook.
+`ImageView` (Rendered) and both of `ImageCompare`'s panes share the hook.
 
-**The "before (baseline)" pane is a stated v1 limitation, not a bug:**
-because `readFileBytes` has no `ref`, the baseline side has no byte source at
-all, and `ImageCompare` hardcodes that pane to an explicit
-`'no-baseline-preview'` state ("Baseline preview unavailable — binary files
-can't be read at a git ref yet.") for every add/modify/delete/rename case —
-deliberately never faked from the working-tree image (identical before/after
-panes would be worse than admitting the gap). A follow-up bead
-(`local_repo_explorer-bn8a`) tracks lifting this constraint.
+**The "before (baseline)" pane (local_repo_explorer-bn8a):** the v1 limitation
+recorded here — `readFileBytes` had no `ref`, so the baseline pane was
+hardcoded to an explicit `'no-baseline-preview'` state for every
+add/modify/delete/rename case — is **lifted**. `ImageCompare` now calls
+`useImageBytes(previousPath, worktreePath, { ref: baseline })` for the
+"before" pane (`previousPath` = `oldPath ?? filePath`, so a rename reads the
+content at its OLD name) exactly like the "after" pane calls it for the
+working tree, sharing every state (`loading`/`shown`/`absent`/`too-large`/
+`unreadable`) and the same `ImagePaneBody` rendering — no
+`'no-baseline-preview'` state exists anymore. An added file (no baseline
+version) resolves the SAME way a deleted working-tree file always has: the
+failed ref read maps to `reason: 'missing'` → the `'absent'` state ("Not
+present in the working tree.") — deliberately not a new, baseline-specific
+message, and never faked from the working-tree image. See "The bounded
+binary-preview read (`readFileBytes`)" above for the `ref` byte-source detail.
 
 ### Regression Check
 
@@ -1281,27 +1563,318 @@ drives the REAL built app via Playwright —
 It asserts the full (class × mode) matrix on rendered evidence: exact offered
 modes per class; real added/removed diff rows; Rendered vs Raw observably
 different (token-color spans present vs absent; markdown heading elements vs
-literal `#` source); real image pixels (`naturalWidth > 0`) on the
-working-tree pane and the exact `no-baseline-preview` text (and zero `<img>`)
-on the baseline pane, with the literal "(unavailable)" asserted globally
-absent; the generic-binary placeholders naming Download and Raw NOT offered
-once binary-ness is confirmed; the gutter-alignment invariant across
-Wrap/mode round-trips; and an uncaught-renderer-error gate. Recorded outcome
-(2026-07-31): 41/41 local checks pass; the remote pass is **opt-in**
-(`AC_VERIFY_REMOTE_HOST`/`_USER`/`_PATH`, precondition in the script header)
-and was **explicitly SKIPPED** — the remote transport path exists but has not
-been exercised against a live host, so remote parity is not asserted here.
-Unit coverage: the `readFileBytes` cases in `local.test.ts` and
-`transport.conformance.test.ts` (including the no-range pin), and the
+literal `#` source); real image pixels (`naturalWidth > 0`) on **both** the
+baseline (`ref`-read) pane and the working-tree pane for a MODIFIED image
+(local_repo_explorer-bn8a), the `'absent'` text for an ADDED-only image's
+baseline pane (no fabricated pixels), with the literal "(unavailable)" and the
+retired "Baseline preview unavailable" text both asserted globally absent;
+the generic-binary placeholders naming Download and Raw NOT offered once
+binary-ness is confirmed; the gutter-alignment invariant across Wrap/mode
+round-trips; and an uncaught-renderer-error gate. Recorded outcome
+(2026-07-31, pre-bn8a): 41/41 local checks passed against the then-current
+assertions (the "before" pane's hardcoded `no-baseline-preview` text). bn8a
+updated the script's image assertions to match the shipped `ref`-capable read
+(described above) — **a fresh run has not been executed as part of this
+change**; re-run before relying on a post-bn8a pass count. The remote pass is
+**opt-in** (`AC_VERIFY_REMOTE_HOST`/`_USER`/`_PATH`, precondition in the
+script header) and remains **explicitly SKIPPED** in the last recorded run —
+the remote transport path (including the new `readFileBytes` RPC) exists but
+has not been exercised against a live host, so remote parity is not asserted
+here. Unit coverage: the `readFileBytes` cases (including the `ref` branch) in
+`local.test.ts`, `remote-rpc.test.ts` (`toFileBytesResult`), and
+`transport.conformance.test.ts` (including the no-range pin, non-ref path
+only); the Go `handleReadFileBytes` cases in `commands_test.go`; and the
 renderer cases in `content.test.tsx`, `useImageBytes.test.ts`, and
 `modeSwitcher.test.ts`.
+
+## Content Panel Structural Folding (JSON/YAML)
+
+For the `json` and `yaml` classes, **Rendered** (`VIEW_DISPATCH`'s
+`'folding-view'` cell, rendered by
+[src/renderer/content/FoldingView.tsx](../src/renderer/content/FoldingView.tsx))
+is **source-mapped structural folding**, not a re-parsed/re-rendered value
+view. The pipeline parses ONLY for structure — region boundaries, document
+boundaries, anchor/alias linkage — never for value. Every character
+`FoldingView` renders is a literal `content.slice(...)` of the exact source
+`readFile` returned: no pretty-printing, re-indenting, key reordering, or
+comment dropping. Collapsing a region hides exactly `[region.headerEnd,
+region.end)` behind an "N items" placeholder chip; everything outside that
+span — including the opening delimiter, a block scalar's `|`/`>` indicator
+line, and any trailing content on the closing line — stays literal, visible
+source. Because no value graph is ever materialized (`.toJS()`,
+`JSON.parse`, and `yaml.parse` are never called anywhere in the fold
+pipeline — grep-pinned by a dedicated regression test, `foldModel.test.ts`'s
+"guardrail: never materializes a re-serialized JS value"), comments,
+formatting, key order, number precision, and YAML anchors all survive
+automatically: there is no serialization step that could drop or reorder
+them.
+
+### The fold model (single owning module)
+
+`src/renderer/content/folding/` is the single owning module for fold-region
+derivation. `foldModel.ts` defines the pure data model shared by both
+formats: `FoldRegion` (`[start, end)` the full collapsible span, `headerEnd`
+the point a collapsed placeholder actually starts replacing, `kind`,
+`itemCount`, `depth`), `FoldDocument` (a JSON file is always exactly one
+document spanning the whole file; a YAML stream is one per `---`-separated
+document), `AnchorLink` (a YAML `&name` definition plus every `*name` alias
+referencing it, scoped to the single document both appear in), and
+`FoldModel` (`{ format, documents, regions, anchors, errors }`, `regions`
+sorted start-ascending then end-descending — outer container before its
+inner children) — plus `lineStartOffsets`/`offsetToLine`, a binary-search
+line index shared by every downstream consumer. Every offset in the model is
+a UTF-16 code-unit index into the original source string, never a byte
+offset.
+
+`jsonFold.ts` builds regions via `jsonc-parser`'s `parseTree` — a
+structure-only DOM whose container nodes carry `offset`/`length`/`children`
+and never a materialized value — tolerating JSONC (comments, trailing
+commas via `allowTrailingComma`) and excluding single-line containers from
+folding (folding one gains nothing). `yamlFold.ts` builds regions and anchor
+links from `yaml`'s Document layer (`parseAllDocuments` + each node's
+`range` tuple), never the value-resolving `.toJS()`; anchor scope resets per
+document (the same `&name` in two documents produces two independent
+`AnchorLink` entries), and a definition's own `&name` token — never included
+in the node's own `range` — is located by a bounded backward scan tolerant
+of whitespace/`#`-comments. Both extractors are total: malformed input never
+throws, and parse/recovery errors land in `model.errors` instead.
+
+Structured-clone safety is load-bearing, not incidental: the worker/cache
+delivery below sends a `FoldModel` across a Web Worker `postMessage`
+boundary, and `structuredClone` throws on a cycle — exactly the shape a
+resolved YAML alias graph would take if this module ever built one. Keeping
+the model range-only plain data (numbers/strings/booleans/plain
+objects/arrays; no class instances, library node references, functions, or
+cycles) is what avoids ever constructing that cycle. Round-trip tested per
+fixture in `jsonFold.test.ts`/`yamlFold.test.ts` ("round-trips every fixture
+through `structuredClone`").
+
+### Worker/cache delivery (second instance of the highlight pattern)
+
+The delivery shape deliberately mirrors `highlight/`'s worker/cache pipeline
+(below) — one recognizable worker-offload pattern in this codebase, not two.
+`foldCore.ts`'s `computeFoldModelSync(text, format)` is the ONE function
+both an ES-module Web Worker (`foldWorker.ts`) and an inline main-thread
+fallback (`foldClient.ts`) call, so their output is identical by
+construction; only the delivery differs. `foldClient.ts`'s
+`computeFoldModel` fronts both with a content-addressed cache (key: format +
+text length + the full text) and transparently falls back to inline compute
+if the worker fails to start, errors, or is running under test
+(`workerDisabled` latch) — a caller never sees the difference. `useFoldModel`
+is the progressive-enhancement hook (`loading → ready | unavailable`; a
+`null` input or a compute failure resolves to `unavailable` with no broken
+pane; a stale in-flight result from a fast input change is discarded).
+
+The cache is capped at `MAX_FOLD_CACHE_ENTRIES = 8` — deliberately smaller
+than the highlighter's 32-entry token cache below. A fold-cache entry is
+dominated by its key, which embeds the FULL source text; this view
+specifically targets JSON/YAML files up to the near-threshold size
+`structuredFoldMaxMb` allows (~10 MB by default), and a user realistically
+has several such files open/recently viewed in one session, so 32 entries
+would bound a worst case around 320 MB of retained source text for a
+convenience cache — 8 entries bounds it to ~80 MB while keeping useful hit
+behavior across tab/reselect churn.
+
+The worker offload is load-bearing here, not merely defensive: a measured
+timing finding on ~10 MiB fixtures found `computeFoldModelSync` takes
+roughly 220–300 ms for JSON but roughly 4.3–4.9 SECONDS for YAML (~15–20x
+slower at the same byte size) — long enough to visibly freeze the renderer
+main thread if run inline, which is exactly what the worker exists to
+prevent for a realistically-sized YAML file.
+
+### View dispatch and the ContentViewer branch
+
+`modeSwitcher.tsx`'s `ViewKind` gains `'folding-view'`, and
+`VIEW_DISPATCH.json.rendered`/`VIEW_DISPATCH.yaml.rendered` are its only two
+cells — `ContentViewer` has exactly one new branch, rendering `FoldingView`
+with the file's `(worktreePath, filePath, format, gitRef, wrap)` and an
+`onBinaryConfirmed` callback. `FoldingView` owns its own `readFile` call (see
+"What Diff / Rendered / Raw mean" above for why this differs from `text`'s
+shared-instance model) and reports the same `RawFileConfirmation` shape
+`RawFile` does, so the reclassification signal below is available regardless
+of which component actually performed the read.
+
+`src/renderer/content/foldingRows.ts` is the pure row-projection layer
+between the fold model and FoldingView's render.
+`visibleFoldRows(lineStartOffsets, regions, collapsed)` walks regions
+(re-sorted defensively) and produces the ordered `FoldRow[]` FoldingView
+actually renders — an ordinary `LineRow` for a visible original line, or one
+`FoldedRow` per collapsed region's header line (carrying
+`prefixEnd`/`suffixStart` so the renderer can re-attach the still-visible
+prefix/suffix around the placeholder). Rows are always in ascending
+ORIGINAL line order; folding hides rows, it never renumbers or mutates them,
+so tokens computed once over the full original content
+(`useHighlightedTokens`) stay indexed by that same original line everywhere
+(`tokenLines[row.line]`), never by visible-row position. `groupRowsByDocument`
+is a pure post-pass on top of `visibleFoldRows`'s unchanged output —
+bucketing an already-projected `rows` list into per-document groups only
+when `documents.length > 1` — rather than a second, forked projection; a
+single-document file (every JSON file, most YAML files) never runs it at all
+and renders through the identical single-document path.
+
+Resolving an EXCLUSIVE end offset (`region.end`, `region.headerEnd`,
+`row.suffixStart`) to a line is its own small trap: see the CLAUDE.md entry
+"Folding view: resolve exclusive-end offsets with `lastTouchedLine`, never
+`offsetToLine`" for the mechanism and the real bug it fixed.
+
+### The two runtime reclassifications (one rule)
+
+`ContentViewer` performs two runtime reclassifications from a real read
+result, both living in `ContentViewer` (`effectiveCls`) rather than in the
+pure, path-only `classOf` — because both signals (true binary-ness, true
+byte size) are only knowable once a real read has happened (see
+"Generic-binary is a RUNTIME reclassification" above):
+
+1. **Confirmed binary → `generic-binary`.** Unchanged from the content-mode
+   epic — `rawConfirmation?.kind === 'binary'`.
+2. **Confirmed-text, oversized json/yaml → `text`.** A `json`/`yaml`-classified
+   path whose CONFIRMED-text size (`rawConfirmation.kind === 'text'` —
+   never an as-yet-unknown `null`, and never the sizeless `'missing'`
+   outcome) exceeds `structuredFoldMaxMb * 1024 * 1024` (strict `>`)
+   downgrades `cls` to `'text'` — the file falls back to the plain
+   Shiki-highlighted line view (the SAME `RawFile`-backed `text` Rendered
+   cell every other text file uses) instead of the structural fold view.
+   Folding a very large document is the more expensive presentation (see the
+   timing finding above), so this is a cost/benefit fallback, not a
+   correctness one.
+
+   **Reachable via a per-read cap override (local_repo_explorer-ftbq).**
+   `getFile`'s `DEFAULT_MAX_BYTES` (256 KiB, `electron/main/git/files.ts`)
+   caps an ordinary text read, and — before this fix — neither `FoldingView`
+   nor `RawFile` ever overrode it, so any file large enough to exceed
+   `structuredFoldMaxMb`'s 1 MB minimum always returned `truncated: true` and
+   rendered the too-large placeholder before `oversizedStructured` was ever
+   evaluated: the branch had unit coverage against mocked confirmations, but
+   was a dead path end to end. ContentViewer.tsx now computes
+   `structuredReadMaxBytes` — `structuredFoldReadMaxBytes(structuredFoldMaxMb)`
+   (src/shared/settings.ts, 2x the threshold) — for json/yaml-classed paths
+   ONLY (keyed on the pure `cls`, see the correctness note below), and passes
+   it as `maxBytes` to BOTH `FoldingView` and `RawFile`. A file strictly
+   between the threshold (T) and the raised cap (R = 2T) now reads
+   successfully and this branch fires for real; a file above R still refuses
+   (the generic too-large placeholder), so `effectiveCls` correctly stays
+   json/yaml rather than degrading for a non-`'text'` confirmation. Remote
+   parity: the Go helper accepts the same `maxBytes` override, clamped to a
+   12 MiB effective ceiling (an RPC frame-size constraint — see "Why
+   `readFile` is not the byte source" above) and made refuse-never-truncate to
+   match local exactly (previously it truncated silently instead of refusing
+   — a separate bug this fix also closes).
+
+   **Correctness detail: keyed on `cls`, never `effectiveCls`.** If the read
+   cap were derived from `effectiveCls` instead of the pure `cls`, it would
+   self-defeat: once the degrade fires, `view` switches `folding-view` →
+   `raw-file`, and `effectiveCls` is ALREADY `'text'` by the time `RawFile`
+   mounts for that degraded view — so a naive `effectiveCls === 'json' ||
+   effectiveCls === 'yaml'` guard would be false for that very mount, RawFile
+   would read at the DEFAULT (smaller) cap, refuse, report `'too-large'`,
+   un-set `oversizedStructured` (which requires `kind === 'text'`), flip
+   `effectiveCls` back to json/yaml, remount `FoldingView`, which reports
+   `'text'` again — degrading again, in an infinite mount loop. Keying on the
+   pure, unchanging `cls` gives the SAME file the SAME cap in every mode
+   (folding, degraded-rendered, and Raw), which is what makes the state
+   machine stable. `content.test.tsx` asserts every `readFile` call for the
+   same selection (across a FoldingView→RawFile remount) requested the
+   identical `maxBytes`, specifically to guard this invariant.
+
+`confirmedBinary` wins outright over the size degrade — ordering matters, so
+a json/yaml-PATH file whose bytes turn out to be binary always lands on the
+binary placeholder, never the size-degraded text view. Neither
+reclassification is visible in the mode switcher itself: `CLASS_MODES` gives
+`json`/`yaml`/`text` the identical 3-mode array, so only `view` (which
+component renders) changes, never which modes are offered — and neither
+reclassification ever writes the persisted `contentMode` setting; both are
+synchronous DISPLAY corrections for the current render only.
+
+`structuredFoldMaxMb` (Preferences → "Structural fold max size (MB)", default
+10, bounds `STRUCTURED_FOLD_MAX_MB_MIN`/`_MAX` = 1/100 — a value below the
+minimum falls back to the default rather than clamping up, the same
+asymmetric shape as `workgraphColumnsSoftCap`) is a SEPARATE setting from
+`FILE_BYTES_CAP` (the 10 MiB binary-preview read cap — see "The bounded
+binary-preview read" above): they gate different read paths for different
+reasons. `FILE_BYTES_CAP` bounds a base64-over-IPC BYTE read for binary
+preview; `structuredFoldMaxMb` bounds a much more expensive PARSE (not just a
+read) of already-confirmed TEXT content. The two share a same-order-of-
+magnitude default only coincidentally.
+
+### Known, accepted behaviors
+
+- **Find searches unfolded text only.** Find-in-file (`useFindInContent`)
+  walks the rendered DOM; a collapsed region's hidden lines are not in the
+  DOM, so a match inside a folded region is not found until that region is
+  expanded. `findable` includes `'folding-view'`; this is a documented v1
+  limitation, not a bug.
+- **Every fold-model failure degrades to the plain highlighted view, never
+  blank.** An `unavailable` model (compute failed, or inputs not ready) or a
+  model carrying `errors` (malformed input recovered only a partial region
+  list) both ignore `regions`/`documents`/`anchors` entirely and render the
+  same plain Shiki-highlighted rows the `text` class uses, with a visible
+  notice explaining why. Zero foldable regions or an empty file are NOT
+  notice-worthy — an empty/valid `regions` array renders identically to
+  "nothing to fold".
+- **A `.jsonc` file classifies as `json` but is not Shiki-highlighted.**
+  Shiki's `json` grammar entry only recognizes the `.json` extension (see
+  "Content Panel Highlighting" below); a `.jsonc` file's Rendered/Diff
+  highlighting is plain, unhighlighted text. This is a highlight-registry
+  gap, not a folding defect — folding itself works identically for both
+  extensions.
+
+```mermaid
+---
+config:
+  layout: elk
+---
+flowchart LR
+  CV["ContentViewer"] --> FV["FoldingView"]
+  FV --> UFM["useFoldModel"]
+  FV --> VFR["visibleFoldRows"]
+  UFM --> FC["foldClient cache"]
+  FC -- "miss" --> W["Worker"]
+  FC -- "worker down" --> INL["Inline fallback"]
+  W --> CFS["computeFoldModelSync"]
+  INL --> CFS
+  CFS --> JF["jsonFoldModel"]
+  CFS --> YF["yamlFoldModel"]
+  VFR --> GBD["groupRowsByDocument"]
+```
+
+### Regression Check
+
+In the running app: open a `.json` and a `.yaml` file from Changes or
+Explorer — Rendered dispatches to the folding view
+(`data-testid="folding-view"`), every foldable object/array/map/sequence/
+block-scalar shows an always-visible chevron (keyboard-operable,
+`aria-expanded` tracks state), and collapsing one replaces it with an "N
+items" chip while gutter line numbers stay the file's ORIGINAL numbers
+(never renumbered) and stay aligned across a Wrap toggle. Open a
+3-document YAML stream — all three documents render, stacked, each in its
+own labelled `role="region"` ("Document i of N") separated by a visible
+(but `aria-hidden`) band, with file-global (not per-document) line numbering
+throughout. Open a file with `&anchor` definitions and `*alias` references —
+each carries a small glyph badge (`&N`/`*N`) with a Radix tooltip explaining
+the linkage, reachable by Tab. Lowering Preferences' 'Structural fold max
+size (MB)' below an open json/yaml file's size — but leaving the file's size
+within twice that threshold — DOES now produce the plain highlighted line
+view (local_repo_explorer-ftbq): no fold toggles, the file's real content
+visible, no too-large placeholder (see 'The two runtime reclassifications
+(one rule)' above). Raise the file further, past twice the lowered threshold,
+and it correctly falls back to the too-large placeholder instead (folding
+view stays dispatched, never degrading for a refused read). Toggle
+Rendered → Raw → Rendered on the same file — no second read fires (the
+module-level read cache serves the second Rendered mount).
+
+Unit/component coverage: `foldModel.test.ts`, `jsonFold.test.ts`,
+`yamlFold.test.ts`, `foldClient.test.ts`, `useFoldModel.test.tsx`,
+`foldingRows.test.ts`, `foldingView.test.tsx`. The end-to-end matrix is
+extended by `npm run verify:content-modes`
+([scripts/screenshots/verify-content-modes.mjs](../scripts/screenshots/verify-content-modes.mjs))
+— see its own Regression Check entry above for the harness's general shape.
 
 ## Content Panel Highlighting
 
 The Content panel supports **Shiki-based syntax highlighting** for the text-class
 **Rendered** view and the **Diff** view (Raw is deliberately plain — see "Content
 Modes & Bounded Binary-Preview Reads"). Supported languages (TypeScript/TSX, JavaScript/JSX, Java, Python, Rust, Go, HTML,
-CSS, JSON, and shell — bash/sh/zsh) are defined entirely by the language registry below;
+CSS, JSON, YAML, and shell — bash/sh/zsh) are defined entirely by the language registry below;
 extending the set is a registry-only change. Markdown highlighting uses a separate
 pipeline (`rehype-highlight` in `markdown.tsx`) and is not part of this subsystem.
 
@@ -1311,13 +1884,18 @@ pipeline (`rehype-highlight` in `markdown.tsx`) and is not part of this subsyste
 extensions to Shiki TextMate grammars. Adding a new language is two changes: one entry in
 the `ENTRIES` map + one fine-grained grammar import. No other module in the highlight
 pipeline changes. `resolveLanguage(filePath)` is the public API; it returns a `LangId`
-or `null` for plaintext fallback.
+or `null` for plaintext fallback. (The `json` grammar entry recognizes only the `.json`
+extension — a `.jsonc` file classifies as `json` for folding purposes, but its
+highlighting is plain; see "Content Panel Structural Folding (JSON/YAML)"'s "Known,
+accepted behaviors".)
 
 ### Highlighter core (worker-offloaded + cached)
 
 `src/renderer/content/highlight/highlighter.ts` is the public entry
 (`tokenizeLines(code, langId, theme) → TokenizeResult`, per-line token arrays +
-theme `fg`/`bg`, never HTML). It is a thin **cache + Web-Worker client**:
+theme `fg`/`bg`, never HTML). It is a thin **cache + Web-Worker client** — the pattern
+"Content Panel Structural Folding (JSON/YAML)"'s fold pipeline deliberately mirrors as
+its own, second instance of the same shape:
 
 - The actual Shiki tokenize lives in `tokenizeCore.ts` (`shiki/core` + the
   pure-JavaScript RegExp engine — still no Oniguruma WASM, no `wasm-unsafe-eval`
@@ -1535,7 +2113,7 @@ calls `focusPanel(panel.id)` (covers tab clicks and menu-opens), `loadLayout` wr
 application in `setFocusSuppressed(true)` cleared on the next animation frame, and
 `restoreFocusedPanel` + the Ctrl+\` handler call `focusPanelForce`. This generalized the
 former terminal-only `FOCUS_TERMINAL_EVENT` special case to all panels via their registered
-handlers. `focusMemory.ts` is unrelated — it is `localStorage` persistence of *which* panel
+handlers. `focusMemory.ts` is unrelated — it is `localStorage` persistence of _which_ panel
 was last active per project, not a focus mechanism.
 
 ## Configuration and Environment Contracts

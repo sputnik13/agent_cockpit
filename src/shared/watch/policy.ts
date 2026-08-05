@@ -37,11 +37,24 @@ export const NEVER_RECURSE = ['node_modules'] as const;
 export const DIRECTORY_GRANULARITY = ['.git', '.beads'] as const;
 
 /**
- * `git-state` signal paths: branch switch / commit / ref updates. `.git/refs`
- * is a prefix (covers `refs/heads/*`, `refs/tags/*`, nested branches). All other
- * `.git` churn (index, FETCH_HEAD, lockfiles, COMMIT_EDITMSG) is noise.
+ * `git-state` signal paths: branch switch / commit / ref updates, plus a linked
+ * worktree being added or removed (`git worktree add`/`remove` writes only
+ * under `.git/worktrees/<name>/...`). `.git/refs` is an UNBOUNDED prefix
+ * (covers `refs/heads/*`, `refs/tags/*`, nested branches — every depth is real
+ * signal). `.git/worktrees` is deliberately NOT unbounded: `classifyWatchPath`
+ * treats only the directory itself and its immediate `<name>` entries as
+ * signal, never paths nested inside a worktree's own metadata dir
+ * (`.git/worktrees/<name>/HEAD`, `/index`, `/logs/HEAD`, … churn on every
+ * commit made INSIDE that worktree — routine activity, not a worktree-set
+ * change; see DIRECTORY_GRANULARITY-style gating below). All other `.git`
+ * churn (index, FETCH_HEAD, lockfiles, COMMIT_EDITMSG) is noise.
  */
-export const GIT_STATE_SIGNALS = ['.git/HEAD', '.git/packed-refs', '.git/refs'] as const;
+export const GIT_STATE_SIGNALS = [
+  '.git/HEAD',
+  '.git/packed-refs',
+  '.git/refs',
+  '.git/worktrees',
+] as const;
 
 /**
  * `beads` signal paths: committed-write markers only. `beads.db` changes on
@@ -87,6 +100,14 @@ export function classifyWatchPath(relPath: string): WatchCategory | null {
 
   if (top === '.git') {
     if (rel === '.git/HEAD' || rel === '.git/packed-refs' || rel.startsWith('.git/refs')) {
+      return 'git-state';
+    }
+    // `.git/worktrees` itself (a worktree being added/removed changes this
+    // directory's own listing), or exactly one entry below it. Gated at
+    // directory level via segment count, NOT `.startsWith`, so per-commit
+    // churn inside an already-known worktree's own metadata dir
+    // (`.git/worktrees/<name>/HEAD`, two segments deeper) stays noise.
+    if (segments[1] === 'worktrees' && segments.length <= 3) {
       return 'git-state';
     }
     return null; // all other .git churn is noise

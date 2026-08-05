@@ -93,7 +93,7 @@ Out of scope:
     dedicated socket, so it survives IDE restarts; local attaches via
     `node-pty`, remote over an SSH PTY shell.
   - **control mode (`-CC`)**: one per-project control connection (`tmux -L
-    agent-cockpit -CC new-session -A -s agent-cockpit-<projectId>`) is the
+agent-cockpit -CC new-session -A -s agent-cockpit-<projectId>`) is the
     authority for the project's windows and panes; tmux windows map to UI
     tabs, panes map to splits within a tab, each pane renders through a
     **pluggable renderer** selected by the `terminalRenderer` setting — `dom`
@@ -108,16 +108,16 @@ Out of scope:
     binds a `Ctrl+a` prefix (z=zoom, n/p=next/previous tab, a=send a literal
     `Ctrl+a`) plus `Shift+Arrow` pane navigation, intercepted before xterm so the
     prefix byte never reaches the pane; the existing ⌘ shortcuts always coexist.
-  On Apple Silicon, local `tmux`/shell spawns run native arm64 even when the app's
-  process tree was launched under Rosetta translation (detected via
-  `sysctl.proc_translated`); server-query calls are unaffected.
-  Switching backends is a clean-slate operation that kills every cockpit-socket
-  tmux session and re-initializes the terminal panel.
-- **FR-5 Terminal resilience (remote).** On an *unexpected* dropped link or app
+    On Apple Silicon, local `tmux`/shell spawns run native arm64 even when the app's
+    process tree was launched under Rosetta translation (detected via
+    `sysctl.proc_translated`); server-query calls are unaffected.
+    Switching backends is a clean-slate operation that kills every cockpit-socket
+    tmux session and re-initializes the terminal panel.
+- **FR-5 Terminal resilience (remote).** On an _unexpected_ dropped link or app
   restart, re-attaching reconnects to the same tmux session with scrollback
   intact; the agent process keeps running on the host throughout. In control
   mode, reattach replays windows/panes through tmux notifications and reseeds
-  each visible pane via `capture-pane`. A *user-initiated* disconnect is
+  each visible pane via `capture-pane`. A _user-initiated_ disconnect is
   explicit teardown/rebuild (FR-5a): scrollback is not preserved across it.
 - **FR-5a Connection state machine.** Each project's connection state is owned
   by a single authoritative state machine in main with guarded transitions
@@ -153,7 +153,8 @@ Out of scope:
   per-type mode model — **Diff**, **Rendered**, and (text-like types only)
   **Raw** — defaulting to the best mode for the type: unified diff, rendered
   Markdown with changed-block callouts and Mermaid, sandboxed HTML preview,
-  image compare/view, highlighted code; binary files degrade to graceful
+  image compare/view, highlighted code, or structural folding for JSON/YAML
+  (FR-13); binary files degrade to graceful
   placeholders that point at Download. Filtering/search across the change
   list. The rendered-
   Markdown mode is GFM-complete in a single whole-document parse so reference
@@ -164,7 +165,7 @@ Out of scope:
   both Solarized themes), syntax-highlighted fenced code (`rehype-highlight`,
   base16 Solarized), and a safe link/image transform (absolute http(s)/mailto
   anchors open via the platform shell with `target="_blank"` + `rel="noopener
-  noreferrer"`; relative/fragment/`javascript:` anchors stay inert; only
+noreferrer"`; relative/fragment/`javascript:` anchors stay inert; only
   http(s)/`data:image/` image sources render) are part of this requirement.
   A **find-in-file** affordance (Cmd/Ctrl+F) searches within the currently
   displayed file across the rendered/raw/diff modes: case-insensitive, with a
@@ -205,9 +206,9 @@ Out of scope:
   - In **control mode**, the run command targets a distinguished pane within
     the project's control session (typically a `run` window) and gains native
     pane scrollback like any other pane.
-  Live terminals belonging to non-active projects are reaped after an idle
-  period to bound resource use; the underlying `tmux` session survives so
-  returning to the project reattaches it.
+    Live terminals belonging to non-active projects are reaped after an idle
+    period to bound resource use; the underlying `tmux` session survives so
+    returning to the project reattaches it.
 - **FR-12 Sessions management.** A management modal (opened from the terminal
   surface) lists the `tmux` sessions on the cockpit socket (name, window count,
   attached state), copies a manual attach command, and kills a session or all
@@ -215,6 +216,30 @@ Out of scope:
   orphaned per-key sessions left over from prior backend use — so they remain
   manageable. A remote project's host-side sessions are visible only inside its
   terminal.
+- **FR-13 Structural folding for JSON/YAML.** JSON (`.json`/`.jsonc`) and
+  YAML (`.yaml`/`.yml`) files offer a structural-folding **Rendered** view:
+  collapsible objects/arrays/mappings/sequences/block scalars with
+  always-visible fold toggles, an "N items" placeholder chip per collapsed
+  region, and original source line numbers throughout. Everything rendered is
+  the file's literal source text — formatting, comments, key order, number
+  precision, and YAML anchors are preserved exactly; folding only hides
+  lines, never rewrites them. Multi-document YAML streams render every
+  document, stacked with labelled separators; YAML anchor definitions and
+  aliases carry small linkage badges with tooltips. Parsing runs off the main
+  thread; a file that fails to parse degrades to the plain
+  syntax-highlighted view with a visible notice, never a blank pane. Files
+  larger than the configurable `structuredFoldMaxMb` threshold (Preferences,
+  default 10 MB, bounds 1–100) fall back to the plain syntax-highlighted line
+  view with the mode switcher unchanged. This fallback is reachable via a
+  dedicated read-cap override: a json/yaml file strictly between the
+  threshold (T) and twice the threshold (R = 2T) reads successfully and
+  degrades to the plain view; a file above R still refuses (the generic "too
+  large to preview inline" placeholder, folding view unchanged) rather than
+  degrading — remote additionally clamps R to a 12 MB effective ceiling (a
+  frame-size constraint of the remote helper RPC). Diff is unchanged from
+  other text-like files; Raw for json/yaml also reads at the same raised cap
+  as Rendered (so the two never disagree about whether a given file is
+  available to preview at all).
 
 ## Non-Functional Requirements
 
@@ -283,6 +308,8 @@ The high-level user loop:
 - **unified / remark / rehype / rehype-highlight** + **DOMPurify** for
   single-pass sanitized Markdown with syntax-highlighted fenced code;
   **mermaid** in a sandboxed iframe.
+- **jsonc-parser** + **yaml** for source-mapped structural folding of
+  JSON/YAML in the content viewer's Rendered mode (both zero-runtime-dependency).
 - **Go** (`CGO_ENABLED=0` static cross-compile) for the remote helper binary.
 - Remote host: SSH account, `tmux`, ability to run the uploaded helper binary.
 

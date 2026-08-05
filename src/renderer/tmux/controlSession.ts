@@ -420,16 +420,146 @@ export function pushClientSize(host: HTMLElement | null): void {
  * on the next frame, but only if the same project is still active. Equivalent to
  * nudging the window border and back; one-shot + user-initiated, so it cannot
  * self-loop the way layout-ack-driven nudges did.
+ *
+ * The shrink base and restore target are read from tmux's OWN current size —
+ * the active window's layout root `w`/`h` (the same `LayoutNode` tree
+ * {@link nudgePaneRows} already reads; a live probe confirmed a control-mode
+ * client's `window_layout` root height equals the pushed client rows 1:1, with
+ * no status-line subtraction) — captured ONCE here at click time, falling back
+ * to the pixel-derived {@link clientCells} estimate only when no layout exists
+ * yet (e.g. before the first window). The rAF restore pushes that captured
+ * value VERBATIM. It deliberately does NOT call {@link pushClientSize} or
+ * otherwise recompute {@link clientCells} for the restore: `clientCells` sums
+ * each pane's LIVE, independently `fit()`-floored `term.rows`, a real
+ * cross-layer rounding authority — and the shrink's own `%layout-change` side
+ * effects (flex reweight → per-pane refits) perturb that sum before a
+ * recompute would re-read it, which produced a deterministic ±1-row
+ * `window_layout` oscillation on repeated clicks against an otherwise-settled
+ * split (local_repo_explorer-ppjp). See CLAUDE.md "Control-mode tab refresh is
+ * three-tier" before changing this: do NOT reintroduce a restore-time
+ * recompute, and do NOT change {@link clientCells}/{@link clientCellsFromLayout}
+ * themselves to source from the layout root — their OTHER callers (via
+ * `pushClientSize`, from real pixel/font/resize events) need a genuinely
+ * pixel-derived size, not tmux's current one.
  */
 export function nudgeClientSize(host: HTMLElement | null): void {
   if (!host) return;
-  const { cols, rows } = clientCells(host);
+  const st = useTmuxStore.getState();
+  const view = selectActiveView(st);
+  const win = view.activeWindowId ? (view.windows[view.activeWindowId] ?? null) : null;
+  const root = win?.visibleLayout ?? win?.layout ?? null; // both roots carry window size
+  const { cols, rows } = root ? { cols: root.w, rows: root.h } : clientCells(host);
   if (cols <= 0 || rows <= 0) return;
-  const projectId = useTmuxStore.getState().activeProjectId;
+  const projectId = st.activeProjectId;
   void store().resize(cols, Math.max(1, rows - 1));
   requestAnimationFrame(() => {
     if (useTmuxStore.getState().activeProjectId !== projectId) return;
-    pushClientSize(host);
+    void store().resize(cols, rows); // identity restore of the CAPTURED size — never a recompute
+  });
+}
+
+/** Per-project single-flight guard for {@link nudgePaneRows}. A rapid second
+ *  click must not read TRANSIENT heights from the store while the first nudge's
+ *  shrink/restore commands are still in flight — a layout-change notification
+ *  from the first nudge landing mid-flight could make a second call "restore" to
+ *  the wrong (already-shrunken) height permanently. Cleared once every command
+ *  from the run has settled (or been swallowed by its own `.catch`), or
+ *  immediately on a pre-send bail (see {@link nudgePaneRows}). */
+const paneNudgeInFlight = new Set<string>();
+
+/** Leaf `{paneId, h}` pairs of a layout tree, depth-first left to right — the
+ *  same traversal `collectLayoutPaneIds` in controlPaneRegistry.ts uses, plus
+ *  each leaf's current cell height (needed for the absolute-height round-trip
+ *  below). Local to this module so {@link nudgePaneRows} needs no new imports. */
+function collectLeafHeights(node: LayoutNode | null): { paneId: string; h: number }[] {
+  if (!node) return [];
+  if (node.type === 'leaf') return [{ paneId: node.paneId, h: node.h }];
+  return node.children.flatMap(collectLeafHeights);
+}
+
+/**
+ * Force EVERY pane in a window's split layout to visibly redraw — not just the
+ * first. Companion to {@link nudgeClientSize}, which forces exactly ONE real
+ * client-size round-trip (tmux only re-emits `%output`/SIGWINCHes panes on an
+ * actual size change). ROOT CAUSE this closes: tmux's `layout_resize_adjust`
+ * distributes a same-axis +-1 cell change to ONLY THE FIRST child of a split
+ * (live tmux 3.7b probe: a stacked/top-bottom window's 1-row client nudge
+ * SIGWINCHes just the first pane; a side-by-side split is unaffected because
+ * rows are the perpendicular axis there — see CLAUDE.md "Control-mode tab
+ * refresh is three-tier"). The fix is a per-pane ABSOLUTE-height round-trip:
+ * shrink each leaf pane by 1 row, let a server-side delay give the pane app a
+ * chance to observe the shrunken size, then restore the EXACT original height
+ * read from tmux's own layout. Every pane either has a TB ancestor (its height
+ * changes, so it SIGWINCHes) or has only-LR ancestors (already reached by the
+ * client nudge) — so uniform iteration over every leaf covers any topology,
+ * including nested same-direction stacks, with no topology-specific targeting
+ * needed. The absolute-height restore is an identity round-trip on tmux's own
+ * integers (no pixel/FitAddon math), so the final layout is unchanged
+ * (probe-verified checksum-identical across TB2/LR2/nested-TB-LR/TB3/h=2/h=1
+ * cases) — this is a ONE-SHOT user/reattach-triggered action, not a
+ * layout-ack-driven loop, so it does not reintroduce the every-resize-drag
+ * cascade hazard the ghost-% ("tight-split ghost %") ADR entry rejected
+ * per-pane resize for.
+ *
+ * ADDITIVE alongside `nudgeClientSize`, which keeps its untouched per-window
+ * semantics. Callers MUST invoke this IMMEDIATELY AFTER `nudgeClientSize` in
+ * the same synchronous code path (load-bearing ordering — do not change): both
+ * defer to a single `requestAnimationFrame`, rAF callbacks run in registration
+ * order, so this one's rAF fires after `nudgeClientSize`'s own restore push was
+ * SENT, and the command channel's FIFO ordering then guarantees every pane
+ * command EXECUTES after the client shrink+restore completes, at the window's
+ * true (already-restored) size — eliminating any need to reason about
+ * client/pane resize interleaving.
+ */
+export function nudgePaneRows(projectId: string, windowId: string): void {
+  const win = useTmuxStore.getState().byProject[projectId]?.windows[windowId];
+  if (!win) return;
+  // Zoomed: resize-pane -y on a zoomed window silently UNZOOMS it and can
+  // corrupt sizes read from the (single-pane) zoomed layout — probe-proven
+  // hazard. A zoomed window is a single visible full-window pane, already
+  // covered by nudgeClientSize.
+  if (win.isZoomed) return;
+  const leaves = collectLeafHeights(win.layout);
+  if (leaves.length < 2) return; // single pane: nudgeClientSize already covers it
+  if (paneNudgeInFlight.has(projectId)) return; // a rapid second click must not read transient heights
+  paneNudgeInFlight.add(projectId);
+
+  requestAnimationFrame(() => {
+    if (useTmuxStore.getState().activeProjectId !== projectId) {
+      // Commands route via main's activeControl(), which resolves to whichever
+      // project is active AT SEND TIME — bailing before the first send (rather
+      // than sending anyway) guarantees a shrunken pane can never be stranded on
+      // an inactive/switched-away project. Mirrors nudgeClientSize's own guarded
+      // restore.
+      paneNudgeInFlight.delete(projectId);
+      return;
+    }
+    const sent: Promise<unknown>[] = [];
+    for (const { paneId, h } of leaves) {
+      if (h < 2) continue; // resize-pane -y 0 clamps silently; nothing to nudge
+      // Three SEPARATE command() calls, sent back-to-back with no await between
+      // them (the channel's FIFO ordering preserves send order regardless).
+      // MUST NOT be collapsed into one ';'-sequenced command line: a live probe
+      // showed control mode emits a SEPARATE %begin/%end reply block per
+      // sub-command of a sequence, which would desync the manager's
+      // pending-reply FIFO correlation (each command() call expects exactly one
+      // reply block).
+      sent.push(store().command(`resize-pane -t ${paneId} -y ${h - 1}`).catch(() => {}));
+      // Server-side pure delay (no shell command) so the pane app OBSERVES the
+      // shrunken size before the restore arrives — guards against SIGWINCH
+      // coalescing / an app like ncurses not redrawing on a same-size no-op. On
+      // tmux < 3.2 (the `-d` flag was added in 3.2) this %errors harmlessly: the
+      // shrink and restore are separate command lines and both still execute,
+      // degrading to at-worst today's (first-pane-only) behavior, never worse.
+      sent.push(store().command('run-shell -d 0.05').catch(() => {}));
+      // Absolute-height restore: the exact original height read from tmux's own
+      // layout, written back verbatim. No pixel/FitAddon math is involved, so
+      // this cannot introduce a new rounding-mismatch bug class.
+      sent.push(store().command(`resize-pane -t ${paneId} -y ${h}`).catch(() => {}));
+    }
+    // Clear the single-flight guard once every reply (or its swallowed
+    // rejection) has landed.
+    void Promise.allSettled(sent).finally(() => paneNudgeInFlight.delete(projectId));
   });
 }
 

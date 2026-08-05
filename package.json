@@ -7,7 +7,7 @@
   "main": "out/main/index.js",
   "scripts": {
     "helper:build": "bash remote-helper/build.sh",
-    "postinstall": "node scripts/strip-cpu-features.mjs",
+    "postinstall": "node scripts/strip-cpu-features.mjs && node scripts/sign-dev-electron.mjs",
     "predev": "npm run helper:build",
     "prebuild": "npm run helper:build",
     "dev": "electron-vite dev",
@@ -47,6 +47,7 @@
     "dompurify": "^3.4.11",
     "font-list": "^2.1.0",
     "ignore": "^7.0.5",
+    "jsonc-parser": "^3.3.1",
     "mermaid": "^11.4.0",
     "node-pty": "^1.1.0",
     "react": "^18.3.0",
@@ -62,6 +63,7 @@
     "simple-git": "^3.27.0",
     "ssh2": "^1.17.0",
     "unified": "^11.0.0",
+    "yaml": "^2.9.0",
     "zustand": "^5.0.13"
   },
   "devDependencies": {

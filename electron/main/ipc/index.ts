@@ -8,7 +8,7 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import { Channels } from '@shared/ipc/channels';
 import type { BeadsCreateInput, ProjectInfo } from '@shared/ipc/channels';
-import type { ConnectionStatus, WorkspaceProvider } from '../providers/types';
+import type { ConnectionStatus, FileReadOptions, WorkspaceProvider } from '../providers/types';
 import { sessionManager } from '../providers';
 import { diffCache } from '../providers/diffCache';
 import {
@@ -164,11 +164,14 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   // lifecycle (started on connect, stopped on disconnect/close); the renderer no
   // longer drives watch.subscribe — the watchSubscribe/Unsubscribe IPC channels
   // were removed. The renderer hub routes these by (projectId, category).
-  sessionManager.setWatchListener((projectId, event) => {
+  // `worktreePath` is present only for a batch from the EXTRA active-external-
+  // worktree watch (SessionManager.setActiveWorktree, local_repo_explorer-g1je)
+  // — absent for the primary watch's events, exactly as before this tag existed.
+  sessionManager.setWatchListener((projectId, event, worktreePath) => {
     // Precise diff-bundle invalidation: drop changed paths (or clear the project
     // on a git-state/baseline change) BEFORE the renderer reacts and re-reads.
-    diffCache.onWatch(projectId, event.paths);
-    send(Channels.evtWatch, { projectId, event });
+    diffCache.onWatch(projectId, event.paths, worktreePath);
+    send(Channels.evtWatch, { projectId, worktreePath, event });
   });
 
   // IPC cache cleanup on provider eviction (D2/FR5).
@@ -364,19 +367,34 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       return { bundle };
     },
   );
-  ipcMain.handle(Channels.providerReadFile, async (_e, req: { path: string; opts?: never; projectId?: string }) => ({
-    file: await providerFor(req?.projectId).readFile(requireString(req?.path, 'path'), req.opts),
-  }));
-  // Whitelists opts to { worktreePath } ONLY — deliberately does not forward
-  // req.opts wholesale like providerReadFile above does. FileBytesOptions has
-  // no `ref` field at all (see the WorkspaceProvider.readFileBytes doc
-  // comment for why); whitelisting here is the boundary enforcement of that
-  // decision, so an untyped renderer/IPC payload can never smuggle one through.
+  // Unlike providerReadFileBytes below, this handler forwards `opts` wholesale
+  // (no field whitelist) — the type here is the real shared `FileReadOptions`
+  // (matching the `IpcMap` entry in @shared/ipc/channels.ts) rather than the
+  // previous `opts?: never`, which was honesty-only: it never actually
+  // constrained what crossed the boundary (electron structured-clones the
+  // request regardless of the handler's inline type), it just mis-described
+  // the real, already-wholesale-forwarding behavior. `maxBytes` (local_repo_
+  // explorer-ftbq) now deliberately crosses here for json/yaml structural-fold
+  // reads — see RawFile.tsx/FoldingView.tsx's `maxBytes` prop.
+  ipcMain.handle(
+    Channels.providerReadFile,
+    async (_e, req: { path: string; opts?: FileReadOptions; projectId?: string }) => ({
+      file: await providerFor(req?.projectId).readFile(requireString(req?.path, 'path'), req.opts),
+    }),
+  );
+  // Whitelists opts to { worktreePath, ref } ONLY — deliberately does not
+  // forward req.opts wholesale like providerReadFile above does. `ref` was
+  // added to FileBytesOptions by local_repo_explorer-bn8a (the image-diff
+  // baseline preview); extending this whitelist is the deliberate boundary
+  // enforcement for that addition, so an untyped renderer/IPC payload still
+  // cannot smuggle an arbitrary option through — only the two named fields
+  // ever cross this boundary.
   ipcMain.handle(
     Channels.providerReadFileBytes,
-    async (_e, req: { path: string; opts?: { worktreePath?: string }; projectId?: string }) => ({
+    async (_e, req: { path: string; opts?: { worktreePath?: string; ref?: string }; projectId?: string }) => ({
       bytes: await providerFor(req?.projectId).readFileBytes(requireString(req?.path, 'path'), {
         worktreePath: req?.opts?.worktreePath,
+        ref: req?.opts?.ref,
       }),
     }),
   );
@@ -676,9 +694,24 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   );
 
   // ---- Watch ----
-  // No renderer-facing watch IPC: main owns one watch per live session over its
-  // lifecycle (SessionManager) and forwards events via setWatchListener above.
-  // The watchSubscribe/watchUnsubscribe channels were removed.
+  // No renderer-facing watch SUBSCRIPTION IPC: main owns one watch per live
+  // session over its lifecycle (SessionManager) and forwards events via
+  // setWatchListener above. The watchSubscribe/watchUnsubscribe channels were
+  // removed. The ONE exception is watch:set-active-worktree below: main has no
+  // other way to learn which worktree the renderer's worktreeStore currently
+  // considers active, and needs it to (de)establish the lazy, at-most-one-per-
+  // project active-external-worktree watch (local_repo_explorer-g1je) — see
+  // SessionManager.setActiveWorktree's doc comment.
+  ipcMain.handle(
+    Channels.watchSetActiveWorktree,
+    async (_e, req: { projectId: string; worktreePath: string | null }) => {
+      await sessionManager.setActiveWorktree(
+        requireString(req?.projectId, 'projectId'),
+        req?.worktreePath ?? null,
+      );
+      return { ok: true as const };
+    },
+  );
 
   // ---- Notes (app-local, by project) ----
   ipcMain.handle(

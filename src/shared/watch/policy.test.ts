@@ -32,6 +32,31 @@ describe('classifyWatchPath', () => {
     expect(classifyWatchPath('.git/logs/HEAD')).toBeNull();
   });
 
+  it('classifies a linked worktree being added/removed as git-state (local_repo_explorer-rc9n)', () => {
+    // `.git/worktrees` itself: created on the very first `git worktree add` in
+    // a repo (a new top-level entry under `.git`).
+    expect(classifyWatchPath('.git/worktrees')).toBe('git-state');
+    // A worktree's own top-level entry: every subsequent add/remove once
+    // `.git/worktrees` already exists.
+    expect(classifyWatchPath('.git/worktrees/my-feature')).toBe('git-state');
+    expect(classifyWatchPath('.git/worktrees/my-feature-2')).toBe('git-state');
+  });
+
+  it('gates worktree churn at the directory level — nested per-commit noise stays dropped', () => {
+    // Everything git writes INSIDE an existing worktree's own metadata dir on
+    // a routine commit (real `git worktree add` shape, verified against a
+    // throwaway repo). None of this is a worktree-set change, so none of it
+    // may classify as git-state — that would spam loadWorktrees() on every
+    // commit made in an already-known worktree.
+    expect(classifyWatchPath('.git/worktrees/my-feature/HEAD')).toBeNull();
+    expect(classifyWatchPath('.git/worktrees/my-feature/ORIG_HEAD')).toBeNull();
+    expect(classifyWatchPath('.git/worktrees/my-feature/index')).toBeNull();
+    expect(classifyWatchPath('.git/worktrees/my-feature/commondir')).toBeNull();
+    expect(classifyWatchPath('.git/worktrees/my-feature/gitdir')).toBeNull();
+    expect(classifyWatchPath('.git/worktrees/my-feature/logs/HEAD')).toBeNull();
+    expect(classifyWatchPath('.git/worktrees/my-feature/refs/heads/x')).toBeNull();
+  });
+
   it('classifies beads committed-write signals', () => {
     expect(classifyWatchPath('.beads/beads.db')).toBe('beads');
     expect(classifyWatchPath('.beads/issues.jsonl')).toBe('beads');

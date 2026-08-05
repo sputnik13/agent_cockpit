@@ -20,6 +20,8 @@ describe('resolveLanguage', () => {
     ['index.htm', 'html'],
     ['a.css', 'css'],
     ['package.json', 'json'],
+    ['config.yaml', 'yaml'],
+    ['config.yml', 'yaml'],
     ['run.sh', 'shellscript'],
     ['.x.bash', 'shellscript'],
     ['prompt.zsh', 'shellscript'],
@@ -59,6 +61,7 @@ describe('resolveLanguage', () => {
         'rust',
         'shellscript',
         'typescript',
+        'yaml',
       ].sort(),
     );
   });

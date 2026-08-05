@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -125,6 +126,17 @@ func TestShouldEmit(t *testing.T) {
 		"/home/u/proj/.git/refs/heads/main": true,
 		"/home/u/proj/.beads/beads.db":      true,
 		"/home/u/proj/.beads/issues.jsonl":  true,
+		// Emitted: a linked worktree being added/removed (local_repo_explorer-rc9n).
+		// NOTE: shouldEmit's own signal matching is depth-UNBOUNDED (matchesSignal
+		// is a prefix match), same as .git/refs — the depth bound that keeps
+		// per-commit churn INSIDE an existing worktree's metadata dir (e.g.
+		// .git/worktrees/<name>/HEAD) from ever reaching shouldEmit at all is
+		// enforced upstream, by addWatchesWithSpec's SkipDir at ".git/worktrees"
+		// (see TestWatchExcludesWorktreeInternalChurn) — fsnotify never adds a
+		// watch that deep, so shouldEmit is never actually called with such a
+		// path in the real pipeline.
+		"/home/u/proj/.git/worktrees":         true,
+		"/home/u/proj/.git/worktrees/feature": true,
 	}
 	for p, want := range cases {
 		if got := w.shouldEmit(p); got != want {
@@ -157,6 +169,97 @@ func TestWatchEmitsGitAndBeadsSignals(t *testing.T) {
 	}
 	if !waitForEvent(c, "watch", 2*time.Second) {
 		t.Fatalf("expected watch event for .beads/issues.jsonl, got %+v", c.snapshot())
+	}
+}
+
+// TestWatchDetectsWorktreeAdd is the regression guard for local_repo_explorer-rc9n:
+// `git worktree add` writes only under .git/worktrees/<name>/..., which
+// previously matched no signal AND was never watched at all (addWatchesWithSpec
+// hit the generic ".git/*" SkipDir with no Add). Both the very first worktree
+// ever added to a repo (which creates the .git/worktrees dir itself — a new
+// entry in .git's own listing) and a second worktree added afterward in the
+// SAME session (exercising the dedicated .git/worktrees watch, self-healed onto
+// the tree the moment .git/worktrees was created by the first) must fire.
+func TestWatchDetectsWorktreeAdd(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &eventCollector{}
+	m := newWatchManager(c.emit)
+	t.Cleanup(m.closeAll)
+
+	if _, err := m.subscribe(json.RawMessage(`{"cwd":` + jstr(dir) + `,"token":"twt"}`)); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	// MkdirAll creates ".git/worktrees" and ".git/worktrees/wt1" back-to-back
+	// (mirroring how `git worktree add` lays out the first-ever worktree). The
+	// PARENT directory's own creation is the guaranteed-observed signal here:
+	// fsnotify sees it via the pre-existing top-level ".git" watch, and only
+	// AFTER processing that event does the retroactive addWatchesWithSpec (Layer
+	// 2's newly-created-dir rescan) attach a watch onto ".git/worktrees" itself
+	// — so asserting on "wt1" specifically would race the rescan. What actually
+	// matters for correctness (loadWorktrees() re-lists ALL worktrees from git,
+	// not just the one named in the event) is that classification fires at all.
+	if err := os.MkdirAll(filepath.Join(dir, ".git", "worktrees", "wt1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForPath(c, ".git/worktrees", 2*time.Second) {
+		t.Fatalf("expected watch event for first worktree (.git/worktrees created), got %+v", c.snapshot())
+	}
+
+	// By now the event above has been fully processed (the retroactive watch-add
+	// runs synchronously before the event is queued for emission — see Layer 2's
+	// run loop), so .git/worktrees is a genuinely fsnotify-watched directory: a
+	// second worktree added afterward in the SAME session is a clean, non-racy
+	// direct-child create on that dedicated watch.
+	if err := os.MkdirAll(filepath.Join(dir, ".git", "worktrees", "wt2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForPath(c, "wt2", 2*time.Second) {
+		t.Fatalf("expected watch event for second worktree, got %+v", c.snapshot())
+	}
+}
+
+// TestWatchExcludesWorktreeInternalChurn ensures per-commit writes inside an
+// ALREADY-KNOWN worktree's own metadata dir (.git/worktrees/<name>/HEAD — what a
+// real commit made inside that worktree rewrites) do NOT produce a watch event:
+// only the worktrees directory's own listing (add/remove) is signal. Without
+// this, routine work in a linked worktree would spam a worktreeStore refresh on
+// every commit (local_repo_explorer-rc9n's explicit guardrail).
+func TestWatchExcludesWorktreeInternalChurn(t *testing.T) {
+	dir := t.TempDir()
+	wtDir := filepath.Join(dir, ".git", "worktrees", "existing-wt")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "HEAD"), []byte("ref: refs/heads/x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &eventCollector{}
+	m := newWatchManager(c.emit)
+	t.Cleanup(m.closeAll)
+
+	if _, err := m.subscribe(json.RawMessage(`{"cwd":` + jstr(dir) + `,"token":"twtnoise"}`)); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	// Rewrite the worktree's own HEAD — what a commit made inside it does.
+	if err := os.WriteFile(filepath.Join(wtDir, "HEAD"), []byte("ref: refs/heads/y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if waitForEvent(c, "watch", 600*time.Millisecond) {
+		t.Fatalf("expected NO watch event from worktree-internal churn, got %+v", c.snapshot())
+	}
+
+	// A real source-file change still fires — proves the watcher is alive and
+	// this isn't a false negative from a dead subscription.
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForEvent(c, "watch", 2*time.Second) {
+		t.Fatalf("expected watch event for a real file change, got %+v", c.snapshot())
 	}
 }
 
@@ -312,6 +415,36 @@ func waitForEvent(c *eventCollector, name string, timeout time.Duration) bool {
 		for _, ev := range c.snapshot() {
 			if ev.Event == name {
 				return true
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// waitForPath polls until some emitted "watch" event's paths contains an entry
+// with want as a substring, or the timeout elapses. More precise than
+// waitForEvent for asserting a SPECIFIC change was observed (e.g. distinguishing
+// a second, later mutation from an already-satisfied earlier one).
+func waitForPath(c *eventCollector, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, ev := range c.snapshot() {
+			if ev.Event != "watch" {
+				continue
+			}
+			data, ok := ev.Data.(map[string]any)
+			if !ok {
+				continue
+			}
+			paths, ok := data["paths"].([]string)
+			if !ok {
+				continue
+			}
+			for _, p := range paths {
+				if strings.Contains(p, want) {
+					return true
+				}
 			}
 		}
 		time.Sleep(20 * time.Millisecond)

@@ -14,7 +14,8 @@
  * categories they care about; they do not re-inspect raw paths.
  *
  * - `working-tree`: an ordinary file change that affects the git changeset.
- * - `git-state`: a branch switch / commit / ref update (`.git/HEAD`, refs).
+ * - `git-state`: a branch switch / commit / ref update (`.git/HEAD`, refs), or
+ *   a linked worktree being added/removed (`.git/worktrees/<name>`).
  * - `beads`: a committed-write to the beads store (`beads.db`/`issues.jsonl`).
  */
 export type WatchCategory = 'working-tree' | 'git-state' | 'beads';

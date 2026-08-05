@@ -15,8 +15,68 @@ import (
 	"time"
 )
 
-// maxReadFileBytes caps the content returned by readFile (2 MiB).
+// maxReadFileBytes caps the content returned by readFile (2 MiB) when the
+// caller does not request an override via readFileParams.MaxBytes.
 const maxReadFileBytes = 2 << 20
+
+// maxReadFileCapBytes bounds any caller-requested MaxBytes override
+// (local_repo_explorer-ftbq — the structural-fold size-degrade read-cap
+// override threaded from src/shared/settings.ts's structuredFoldReadMaxBytes).
+// The RPC frame codec hard-caps a single message at 16 MiB on both sides
+// (rpcClient.ts's MAX_MESSAGE_BYTES, protocol.go's maxMessageBytes) and JSON
+// string-escaping can inflate escape-heavy text 2-6x, so a raw content length
+// even somewhat under 16 MiB can encode well over it. 12 MiB leaves
+// comfortable headroom under the 16 MiB frame ceiling for that inflation plus
+// the response envelope (see fitsFrameBudget below for the belt-and-suspenders
+// check against the ACTUAL encoded size — this constant alone is not the only
+// guard). A requested MaxBytes above this ceiling is clamped down to it, never
+// honored verbatim — see effectiveReadCap.
+const maxReadFileCapBytes = 12 << 20 // 12 MiB
+
+// frameEnvelopeHeadroomBytes is subtracted from maxMessageBytes (protocol.go)
+// to get frameBudgetBytes. Small relative to maxMessageBytes: the Response
+// envelope ({"id":N,"result":...,"error":null}) adds only a few dozen bytes
+// around the marshaled readFileResult; the real safety margin against
+// escape-inflation comes from maxReadFileCapBytes being well under
+// maxMessageBytes in the first place, not from this headroom.
+const frameEnvelopeHeadroomBytes = 64 << 10 // 64 KiB
+
+// frameBudgetBytes is the encoded-response size ceiling handleReadFile
+// enforces BEFORE returning a successful large read, so a response is never
+// handed to writeFrame (protocol.go) already doomed to exceed maxMessageBytes.
+// Escape-heavy text (many newlines/control characters/non-ASCII) can inflate
+// 2-6x under JSON string escaping, so a raw content length comfortably under
+// maxReadFileCapBytes can still encode over the frame ceiling — and
+// writeFrame only LOGS a "frame too large" error and drops the frame
+// SILENTLY (see main.go's writeFrame), which would hang the client's pending
+// RPC call forever with no error ever surfacing on either side. Refusing
+// gracefully here (the same refuse shape the cap check below uses) keeps the
+// RPC's contract "a call always eventually resolves; refuse rather than
+// hang."
+const frameBudgetBytes = maxMessageBytes - frameEnvelopeHeadroomBytes
+
+// effectiveReadCap resolves the byte cap handleReadFile applies for one call:
+// the default maxReadFileBytes when the caller did not request an override
+// (requested <= 0 — the JSON zero value for an omitted/absent field), else
+// the requested value clamped to maxReadFileCapBytes. Never trusts a
+// caller-requested value verbatim, however large.
+func effectiveReadCap(requested int64) int64 {
+	if requested <= 0 {
+		return maxReadFileBytes
+	}
+	if requested > maxReadFileCapBytes {
+		return maxReadFileCapBytes
+	}
+	return requested
+}
+
+// fitsFrameBudget reports whether result, once JSON-encoded as this RPC's
+// response payload, stays within frameBudgetBytes. A marshal failure is
+// treated as "does not fit" — refuse rather than risk an unencodable response.
+func fitsFrameBudget(result readFileResult) bool {
+	encoded, err := json.Marshal(result)
+	return err == nil && len(encoded) <= frameBudgetBytes
+}
 
 // binarySniffBytes bounds the NUL-byte scan used to classify content as
 // binary. Mirrors electron/main/git/files.ts's looksBinary exactly (same
@@ -66,6 +126,14 @@ type readFileParams struct {
 	// that worktree root (falling back to the Path as-given when empty). Absolute
 	// paths are honored verbatim, so the project-root default is unchanged.
 	WorktreePath string `json:"worktreePath,omitempty"`
+	// MaxBytes, when > 0, raises the read cap for this call above the default
+	// maxReadFileBytes (local_repo_explorer-ftbq's structural-fold size-degrade
+	// read-cap override). Always resolved through effectiveReadCap, which
+	// clamps it to maxReadFileCapBytes regardless of the requested value — the
+	// caller's own formula (structuredFoldReadMaxBytes in
+	// src/shared/settings.ts) can request up to 200 MiB for a maxed-out
+	// setting, far beyond what a single RPC frame can carry.
+	MaxBytes int64 `json:"maxBytes,omitempty"`
 }
 
 type readFileResult struct {
@@ -95,8 +163,9 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 	if p.Path == "" {
 		return nil, fmt.Errorf("readFile: path must not be empty")
 	}
-	// Ref read: `git show <ref>:<repo-relative-path>` in the repo root. Same
-	// truncation cap as the working-tree path so callers see a uniform contract.
+	readCap := effectiveReadCap(p.MaxBytes)
+
+	// Ref read: `git show <ref>:<repo-relative-path>` in the repo root.
 	if p.Ref != "" {
 		if p.Cwd == "" {
 			return nil, fmt.Errorf("readFile: cwd must not be empty when ref is set")
@@ -105,17 +174,32 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Capture the full blob length AND binary-ness BEFORE any cap decision
+		// — both are effectively free here (out is already fully in memory),
+		// mirroring electron/main/git/files.ts's getFile ref branch, which
+		// computes isBin unconditionally for the exact same reason.
 		isBin := looksBinaryString(out)
-		// Capture the full blob length BEFORE the truncation slice below — the
-		// true size, mirroring local's ref-path sizeBytes (buf.length of the
-		// full git-cat-file blob, read before its truncation check).
 		sizeBytes := int64(len(out))
-		truncated := len(out) > maxReadFileBytes
-		if truncated {
-			out = out[:maxReadFileBytes]
+		// Refuse-never-truncate (local_repo_explorer-ftbq): over the effective
+		// cap, refuse with the true size and drop the oversized blob entirely
+		// — never a truncated prefix. Mirrors local's ref branch
+		// (`getFile`: `truncated: sizeBytes > maxBytes`, content dropped)
+		// exactly, including reporting the already-known IsBinary verdict.
+		if sizeBytes > readCap {
+			return readFileResult{IsBinary: isBin, Truncated: true, SizeBytes: sizeBytes}, nil
 		}
-		return readFileResult{Content: out, Truncated: truncated, IsBinary: isBin, SizeBytes: sizeBytes}, nil
+		result := readFileResult{Content: out, IsBinary: isBin, SizeBytes: sizeBytes}
+		// Frame-budget guard: even under the (possibly raised) cap, escape-heavy
+		// text can inflate past the RPC frame ceiling once JSON-encoded — refuse
+		// rather than risk a silently-dropped, permanently-hung response. Gated
+		// on exceeding the OLD default cap so an ordinary (un-raised-cap) read
+		// never pays for the extra marshal.
+		if sizeBytes > maxReadFileBytes && !fitsFrameBudget(result) {
+			return readFileResult{IsBinary: isBin, Truncated: true, SizeBytes: sizeBytes}, nil
+		}
+		return result, nil
 	}
+
 	// Working-tree read: resolve a relative path against the worktree root when
 	// supplied; empty/absent falls back to the path as-given (already absolute
 	// for the project-root default).
@@ -129,33 +213,40 @@ func handleReadFile(raw json.RawMessage) (interface{}, error) {
 	}
 	defer f.Close()
 
-	// True on-disk size via a stat on the fd already open for the read below —
-	// no extra RPC, and (unlike the byte count from the capped read) still
-	// correct when the file is larger than maxReadFileBytes. Falls back to the
-	// bytes actually read if the stat somehow fails (the fd was just opened
-	// successfully, so this is a defensive, not expected, path).
-	var sizeBytes int64
-	statOK := false
-	if fi, statErr := f.Stat(); statErr == nil {
-		sizeBytes = fi.Size()
-		statOK = true
+	// True on-disk size via a stat on the fd already open — no extra RPC, and
+	// needed BEFORE deciding whether to read at all (see the refuse branch
+	// below).
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("readFile: stat %q: %w", target, err)
+	}
+	sizeBytes := fi.Size()
+
+	// Refuse-never-truncate: over the effective cap, report the true size and
+	// refuse WITHOUT reading the file at all — mirrors electron/main/git/
+	// files.ts's getFile working-tree branch exactly, including never
+	// attempting a binary sniff for a refused file (IsBinary stays the zero
+	// value, false — sniffing would require reading, which refusing is
+	// specifically avoiding).
+	if sizeBytes > readCap {
+		return readFileResult{Truncated: true, SizeBytes: sizeBytes}, nil
 	}
 
-	// Read one byte past the cap so we can detect truncation.
-	buf := make([]byte, maxReadFileBytes+1)
+	// Buffer sized to the actual (small, since it's under the cap) file size,
+	// rather than a maxReadFileBytes-sized buffer regardless of the real size.
+	buf := make([]byte, sizeBytes)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, fmt.Errorf("readFile: read %q: %w", target, err)
 	}
 	isBin := looksBinary(buf[:n])
-	truncated := n > maxReadFileBytes
-	if truncated {
-		n = maxReadFileBytes
+	result := readFileResult{Content: string(buf[:n]), IsBinary: isBin, SizeBytes: sizeBytes}
+	// Frame-budget guard — see the identical check in the ref branch above for
+	// the full rationale.
+	if sizeBytes > maxReadFileBytes && !fitsFrameBudget(result) {
+		return readFileResult{Truncated: true, SizeBytes: sizeBytes}, nil
 	}
-	if !statOK {
-		sizeBytes = int64(n)
-	}
-	return readFileResult{Content: string(buf[:n]), Truncated: truncated, IsBinary: isBin, SizeBytes: sizeBytes}, nil
+	return result, nil
 }
 
 // looksBinary reports whether buf's first binarySniffBytes bytes contain a
@@ -180,6 +271,88 @@ func looksBinaryString(s string) bool {
 		n = binarySniffBytes
 	}
 	return looksBinary([]byte(s[:n]))
+}
+
+// --- readFileBytes (git-ref binary-preview read; local_repo_explorer-bn8a) ---
+//
+// The byte-safe counterpart to readFile's ref branch above, serving
+// WorkspaceProvider.readFileBytes's `ref` option (the image-diff baseline
+// preview). Reuses the SAME `git show ref:path` mechanism readFile's ref
+// branch already runs — no new git-plumbing mechanism. The only differences
+// are the ENCODING (a []byte result field, which encoding/json marshals as
+// base64 directly — byte-faithful, unlike readFile's `Content string` field,
+// which substitutes invalid UTF-8 with U+FFFD at the JSON boundary; see
+// readFileResult's doc comment above and local_repo_explorer-r3s6) and the
+// cap/refuse-vs-truncate contract (mirrors readFileBytes's fs/SFTP branches:
+// refuse over cap with metadata only, never a truncated prefix — unlike
+// readFile's 2 MiB truncating cap). Never serves a working-tree (non-ref)
+// read — RemoteProvider.readFileBytes routes only a `ref`-bearing call here;
+// a plain working-tree call stays on SFTP.
+
+// maxRefBytesCap mirrors src/shared/providers/fileBytesCap.ts's
+// FILE_BYTES_CAP (10 MiB) — THE single authoring site for the readFileBytes
+// capability's size cap. Go cannot import that TS constant, so this is a
+// required VALUE MIRROR (same pattern as binarySniffBytes mirroring
+// looksBinary's bound above): if FILE_BYTES_CAP ever changes, update this
+// constant to match — do not give this capability a second, different cap.
+const maxRefBytesCap = 10 << 20 // 10 MiB
+
+type readFileBytesParams struct {
+	// Path must already be repo-relative (POSIX) — the caller (RemoteProvider)
+	// passes it through repoRelative(), mirroring readFileParams.Ref's own
+	// requirement above.
+	Path string `json:"path"`
+	Ref  string `json:"ref"`
+	// Cwd is the repo (or worktree) root `git show` runs in — mirrors
+	// readFileParams.Cwd for the ref branch.
+	Cwd string `json:"cwd"`
+}
+
+type readFileBytesResult struct {
+	// BytesBase64 is the raw git-show blob bytes. A []byte field (not string)
+	// so encoding/json marshals it via base64 directly on the wire — see this
+	// section's doc comment. Nil (the Go zero value) marshals to JSON `null`;
+	// the TS adapter branches on Reason, never on this field's truthiness,
+	// matching FileBytesResult's documented contract.
+	BytesBase64 []byte `json:"bytesBase64"`
+	SizeBytes   int64  `json:"sizeBytes"`
+	Exists      bool   `json:"exists"`
+	// Reason mirrors FileBytesUnavailableReason ('missing' | 'too-large'); ""
+	// means bytes are present (the TS adapter maps that to `reason: null`).
+	Reason string `json:"reason"`
+}
+
+func handleReadFileBytes(raw json.RawMessage) (interface{}, error) {
+	var p readFileBytesParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("readFileBytes: decode params: %w", err)
+	}
+	if p.Path == "" {
+		return nil, fmt.Errorf("readFileBytes: path must not be empty")
+	}
+	if p.Ref == "" {
+		return nil, fmt.Errorf("readFileBytes: ref must not be empty")
+	}
+	if p.Cwd == "" {
+		return nil, fmt.Errorf("readFileBytes: cwd must not be empty")
+	}
+	out, err := runCommand(p.Cwd, "git", "show", p.Ref+":"+p.Path)
+	if err != nil {
+		// A failed git-show (path absent at this ref, bad ref, ...) maps to the
+		// SAME "missing" outcome useImageBytes already renders for a deleted
+		// working-tree file — never an RPC-level error. Mirrors
+		// electron/main/git/files.ts's getFile ref branch (`.catch(() => null)`).
+		return readFileBytesResult{Reason: "missing"}, nil
+	}
+	// Byte-exact: converting a Go string back to []byte never re-validates or
+	// mangles UTF-8 (only encoding/json's STRING encoding does that, at the
+	// JSON-marshal boundary) — see this section's doc comment.
+	data := []byte(out)
+	sizeBytes := int64(len(data))
+	if sizeBytes > maxRefBytesCap {
+		return readFileBytesResult{SizeBytes: sizeBytes, Exists: true, Reason: "too-large"}, nil
+	}
+	return readFileBytesResult{BytesBase64: data, SizeBytes: sizeBytes, Exists: true}, nil
 }
 
 // readCappedFile reads up to maxReadFileBytes of a working-tree file, reporting

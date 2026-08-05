@@ -98,6 +98,8 @@ func (s *server) handle(req Request) (interface{}, error) {
 		return s.handleHandshake(req.Params)
 	case "readFile":
 		return handleReadFile(req.Params)
+	case "readFileBytes":
+		return handleReadFileBytes(req.Params)
 	case "stat":
 		return handleStat(req.Params)
 	case "gitStatus":

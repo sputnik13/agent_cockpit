@@ -128,6 +128,166 @@ function makeBinaryBlob(seed, length) {
   return buf;
 }
 
+// --- local_repo_explorer-jp2f.8 fixtures: structural JSON/YAML folding -----
+//
+// Proves the folding renderer (.1-.6) in the REAL launched app: JSON with a
+// deeply nested region + a single-line container jsonFold.ts's
+// single-line-exclusion rule must NOT treat as foldable + one deliberately
+// long line for wrap/gutter-alignment testing; a three-document YAML stream;
+// a YAML anchor with two aliases; and an oversized JSON file for the
+// structural-fold size-threshold degrade. Exact line numbers below are
+// LOAD-BEARING for verify-content-modes.mjs's fold/unfold/keyboard/gutter
+// assertions (which assert exact aria-labels and exact gutter-number
+// sequences) — do not reformat without updating that script's expectations.
+
+const FOLD_JSON_BASELINE =
+  [
+    '{',
+    '  "name": "fold-demo",',
+    '  "point": { "x": 0, "y": 0 },',
+    '  "list": ["alpha"]',
+    '}',
+  ].join('\n') + '\n';
+
+// Line numbers (1-based) verify-content-modes.mjs depends on:
+//   1  {
+//   2    "name": "fold-demo",
+//   3    "point": { "x": 1, "y": 2 },      <- single-line object: NOT foldable
+//   4    "config": {                       <- region: header 4, closes 13, 1 item
+//   5      "level1": {                     <- region: header 5, closes 12, 1 item
+//   6        "level2": {                   <- region: header 6, closes 11, 1 item
+//   7        "level3": {                   <- region: header 7, closes 10, 2 items (deepest)
+//   8            "flag": true,
+//   9            "items": [1, 2, 3]        <- single-line array: NOT foldable
+//   10         }
+//   11       }
+//   12     }
+//   13   },
+//   14   "list": [                         <- region: header 14, closes 18, 3 items
+//   15     "alpha",
+//   16     "beta",
+//   17     "gamma"
+//   18   ],
+//   19   "note": "<long>"                  <- deliberately overlong line
+//   20 }
+const FOLD_JSON_MODIFIED_LINES = [
+  '{',
+  '  "name": "fold-demo",',
+  '  "point": { "x": 1, "y": 2 },',
+  '  "config": {',
+  '    "level1": {',
+  '      "level2": {',
+  '        "level3": {',
+  '          "flag": true,',
+  '          "items": [1, 2, 3]',
+  '        }',
+  '      }',
+  '    }',
+  '  },',
+  '  "list": [',
+  '    "alpha",',
+  '    "beta",',
+  '    "gamma"',
+  '  ],',
+  `  "note": "${'z'.repeat(320)}"`,
+  '}',
+];
+const FOLD_JSON_MODIFIED = FOLD_JSON_MODIFIED_LINES.join('\n') + '\n';
+
+// Three `---`-separated documents; documents 2 and 3 each carry their own
+// nested foldable region so per-document grouping has real content to walk.
+const YAML_MULTI_DOC =
+  [
+    'service: alpha',
+    '---',
+    'config:',
+    '  timeout: 30',
+    '  retries: 3',
+    '---',
+    'items:',
+    '  - one',
+    '  - two',
+    '  - three',
+  ].join('\n') + '\n';
+
+// One `&defaults` anchor definition (line 1) with two `*defaults` aliases
+// (lines 5 and 7).
+const YAML_ANCHORS =
+  [
+    'defaults: &defaults',
+    '  retries: 3',
+    '  timeout: 30',
+    'service_a:',
+    '  config: *defaults',
+    'service_b:',
+    '  config: *defaults',
+  ].join('\n') + '\n';
+
+/**
+ * Threshold (MB) verify-content-modes.mjs configures via the
+ * `structuredFoldMaxMb` setting for its size-threshold degrade check —
+ * pinned to that setting's own minimum (`STRUCTURED_FOLD_MAX_MB_MIN` in
+ * src/shared/settings.ts) so `oversized.json` below can stay as small as the
+ * degrade check allows. Exported so the harness never hardcodes a second,
+ * independently-drifting copy of this number.
+ */
+export const OVERSIZED_JSON_THRESHOLD_MB = 1;
+
+/**
+ * Size target (MB) for a SECOND JSON fixture that stays over the RAISED read
+ * cap the fix in local_repo_explorer-ftbq computes for
+ * `OVERSIZED_JSON_THRESHOLD_MB` — `structuredFoldReadMaxBytes` (src/shared/
+ * settings.ts) is 2x the threshold, i.e. 2 MB at the pinned minimum above.
+ * `oversized.json` (~1.3 MiB, built from `OVERSIZED_JSON_THRESHOLD_MB`) now
+ * falls INSIDE that raised cap and is used to verify the real degrade; this
+ * fixture stays comfortably ABOVE it (4x the threshold -> ~5.2 MiB actual,
+ * versus a 2 MiB cap) so the "still refuses past the raised cap" check is
+ * never marginal/flaky. Exported so verify-content-modes.mjs never hardcodes
+ * a second, independently-drifting copy.
+ */
+export const WAY_OVERSIZED_JSON_TARGET_MB = OVERSIZED_JSON_THRESHOLD_MB * 4;
+
+/**
+ * A deterministic, syntactically-valid JSON fixture comfortably larger
+ * (~30% margin) than `minBytes`, built from many FIXED-LENGTH lines rather
+ * than one pathologically long line — avoids both extremes (a single row
+ * wide enough to strain layout, or so many rows that mounting them all is
+ * slow). Content is otherwise inert (a flat padding array): this fixture
+ * exists solely to exceed a byte threshold, not to exercise fold structure.
+ */
+function makeOversizedJson(minBytes) {
+  const LINE_LEN = 300;
+  const target = Math.ceil(minBytes * 1.3);
+  const line = 'x'.repeat(LINE_LEN);
+  const render = (items) =>
+    `{\n  "marker": "oversized-fixture",\n  "pad": [\n${items
+      .map((s, i) => `    "${s}"${i === items.length - 1 ? '' : ','}`)
+      .join('\n')}\n  ]\n}\n`;
+  const perItemBytes = LINE_LEN + 8; // '    "' + line + '",\n' — approx, self-corrected below
+  const items = new Array(Math.max(1, Math.ceil(target / perItemBytes))).fill(line);
+  let text = render(items);
+  while (Buffer.byteLength(text, 'utf8') < target) {
+    items.push(line);
+    text = render(items);
+  }
+  return text;
+}
+
+/**
+ * The exact working-tree text written for the three small structural
+ * fixtures above, keyed like `CONTENT_MODE_FIXTURES` — exported so
+ * verify-content-modes.mjs's byte-exact round-trip assertions compare
+ * against the SAME string used to write the file, never a second,
+ * hand-copied literal that could silently drift from it. `jsonOversized` and
+ * `jsonWayOversized` are deliberately absent: both are inert filler content,
+ * never compared byte-for-byte (see `makeOversizedJson`'s doc comment).
+ */
+export const FOLD_FIXTURE_TEXT = {
+  jsonFold: FOLD_JSON_MODIFIED,
+  yamlMultiDoc: YAML_MULTI_DOC,
+  yamlAnchors: YAML_ANCHORS,
+};
+
 /**
  * Repo-relative paths of the content-mode matrix corpus (markdown/JSON/source/
  * image/generic-binary, each with a committed baseline AND a working-tree
@@ -145,6 +305,16 @@ export const CONTENT_MODE_FIXTURES = {
   imageAdded: 'assets/added.png',
   genericBinary: 'assets/archive.bin',
   unchangedExplorerFile: 'LICENSE',
+  // local_repo_explorer-jp2f.8: structural JSON/YAML folding fixtures — see
+  // the FOLD_* constants above for exact content/line numbers.
+  jsonFold: 'fold-demo.json',
+  yamlMultiDoc: 'multi-doc.yaml',
+  yamlAnchors: 'anchors.yaml',
+  jsonOversized: 'oversized.json',
+  // Comfortably above the raised read cap (see WAY_OVERSIZED_JSON_TARGET_MB's
+  // doc comment) — local_repo_explorer-ftbq's "still refuses past the raised
+  // cap" boundary case.
+  jsonWayOversized: 'oversized-huge.json',
 };
 
 export function generateFixture() {
@@ -174,6 +344,18 @@ export function generateFixture() {
     'assets/photo.png': makeSolidPng(4, 4, [255, 0, 0]),
     // Real, non-image binary bytes (baseline pattern) — see makeBinaryBlob's doc comment.
     'assets/archive.bin': makeBinaryBlob(1, 96),
+    // jsonFold's committed baseline (see FOLD_JSON_BASELINE's doc comment) —
+    // modified below in the uncommitted-changes stage.
+    'fold-demo.json': FOLD_JSON_BASELINE,
+    // Committed once and NEVER modified again (like LICENSE above) — the
+    // structural-fold size-threshold degrade check opens this via Explorer
+    // only, so it never needs a Changes-panel diff (git diff of an unchanged
+    // file is empty/cheap, unlike diffing a fresh 1MB+ added file).
+    'oversized.json': makeOversizedJson(OVERSIZED_JSON_THRESHOLD_MB * 1024 * 1024),
+    // Comfortably above the raised read cap — see WAY_OVERSIZED_JSON_TARGET_MB's
+    // doc comment. Committed once, never modified, same rationale as
+    // 'oversized.json' above.
+    'oversized-huge.json': makeOversizedJson(WAY_OVERSIZED_JSON_TARGET_MB * 1024 * 1024),
   });
 
   run('git', ['init', '-q', '-b', 'main']);
@@ -217,6 +399,13 @@ export function generateFixture() {
     'assets/added.png': makeSolidPng(4, 4, [0, 255, 0]),
     // MODIFIED generic binary: same path, genuinely different bytes.
     'assets/archive.bin': makeBinaryBlob(97, 96),
+    // jsonFold's working-tree modification (see FOLD_JSON_MODIFIED_LINES's
+    // doc comment for the exact, load-bearing line numbers).
+    'fold-demo.json': FOLD_JSON_MODIFIED,
+    // yamlMultiDoc / yamlAnchors: brand-new files (show as added), like
+    // src/search.ts above — no baseline needed for their assertions.
+    'multi-doc.yaml': YAML_MULTI_DOC,
+    'anchors.yaml': YAML_ANCHORS,
   });
 
   // --- beads issue graph (varied states for the workgraph) ----------------

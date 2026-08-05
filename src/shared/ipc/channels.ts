@@ -70,6 +70,16 @@ export const Channels = {
    *  worktree; null when no parent can be resolved (orphan, unrelated histories). */
   providerResolveBranchPoint: 'provider:resolve-branch-point',
 
+  /**
+   * Tell main which worktree is currently active for a project — the ONLY
+   * renderer -> main watch channel (see the module doc comment above: watch
+   * is otherwise not renderer-driven). Main has no other way to learn the
+   * `worktreeStore` selection, and uses it to (de)establish the lazy,
+   * at-most-one-per-project active-external-worktree watch subscription
+   * (`SessionManager.setActiveWorktree`, local_repo_explorer-g1je).
+   */
+  watchSetActiveWorktree: 'watch:set-active-worktree',
+
   /** Bounded export (Download capability): opens a native Save-as dialog in
    *  main and streams the source file's bytes to the chosen destination. The
    *  one write this app performs outside the embedded terminal — see
@@ -271,6 +281,14 @@ export interface TerminalExitEvent {
 }
 export interface WatchPushEvent {
   projectId: string;
+  /**
+   * The worktree `event.paths` are relative to, when this batch came from
+   * the active-external-worktree watch (local_repo_explorer-g1je) rather
+   * than the project's primary root-rooted watch. Absent/undefined for the
+   * primary watch's events, whose paths stay project-root-relative exactly
+   * as before this field was added.
+   */
+  worktreePath?: string;
   event: WatchEvent;
 }
 /** One typed tmux control-mode notification, tagged with its project. */
@@ -390,6 +408,10 @@ export interface IpcContract {
   [Channels.providerResolveBranchPoint]: {
     request: { worktreePath: string; projectId?: string };
     response: { branchPoint: BranchPoint | null };
+  };
+  [Channels.watchSetActiveWorktree]: {
+    request: { projectId: string; worktreePath: string | null };
+    response: { ok: true };
   };
 
   [Channels.filesSaveAs]: {

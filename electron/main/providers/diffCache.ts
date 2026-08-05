@@ -23,8 +23,13 @@ const MAX_ENTRIES_PER_PROJECT = 64;
 const SEP = '\x1f'; // unit separator: never appears in a path or ref
 
 interface Entry {
-  /** Repo-relative file path, kept so path-precise invalidation can match it. */
+  /** Repo-relative (or, for a `worktreePath`-set entry, worktree-relative)
+   *  file path, kept so path-precise invalidation can match it. */
   path: string;
+  /** The worktree this entry was read from (mirrors the `worktreePath` arg
+   *  `set()` was called with) — used by a `worktreePath`-TAGGED watch batch
+   *  (`onWatch`) to match only entries belonging to that same worktree. */
+  worktreePath: string;
   bundle: DiffBundle;
 }
 
@@ -66,7 +71,7 @@ export class DiffBundleCache {
     const k = DiffBundleCache.key(worktreePath, path, baseline);
     // Re-insert at the end for insertion-order LRU behavior.
     m.delete(k);
-    m.set(k, { path, bundle });
+    m.set(k, { path, worktreePath, bundle });
     while (m.size > MAX_ENTRIES_PER_PROJECT) {
       const oldest = m.keys().next().value as string | undefined;
       if (oldest === undefined) break;
@@ -75,13 +80,47 @@ export class DiffBundleCache {
   }
 
   /**
-   * Apply a watch batch (repo-relative paths) to the project's cache: a git-state
-   * signal clears everything (baseline changed); otherwise only entries for the
-   * changed file paths are dropped.
+   * Apply a watch batch to the project's cache.
+   *
+   * `worktreePath` set (a batch from the EXTRA active-external-worktree watch,
+   * local_repo_explorer-g1je): `paths` are relative to THAT worktree, not the
+   * project root, so this only ever matches entries whose OWN stored
+   * `worktreePath` equals the tag (string equality) AND whose `path` is in the
+   * changed set — an entry for a DIFFERENT worktree (including the project
+   * root) is never dropped by a sibling worktree's own edits, since their
+   * paths live in a completely different namespace. A tagged batch never
+   * clears the whole project on a git-state signal — the active-external-
+   * worktree watch never emits git-state signals at all (see
+   * `WorkspaceProvider.subscribeWorktreeWatch`'s doc comment), so this branch
+   * is never reached with one.
+   *
+   * `worktreePath` absent (undefined — the PRIMARY root-rooted watch): keeps
+   * the EXISTING behavior byte-for-byte — a git-state signal clears the whole
+   * project (a baseline change affects every worktree's diff); otherwise only
+   * entries whose stored `path` is in the changed set are dropped, regardless
+   * of THEIR stored `worktreePath`.
+   *
+   * KNOWN PRE-EXISTING GAP (not introduced by, and not fixed by, this bead):
+   * for a NESTED linked worktree (checked out inside the project root, so it
+   * has no extra watch of its own — the primary watch already covers it), an
+   * untagged event's path is project-ROOT-relative while that worktree's own
+   * cache entries store a WORKTREE-relative `path` — the two shapes can
+   * mismatch, so an untagged batch can silently fail to invalidate a nested
+   * worktree's cached bundle. A follow-up bead should precompute the
+   * root-relative form at `set()` time (mirroring FoldingView's own
+   * root-relative conversion, local_repo_explorer-w5x0) rather than storing
+   * only the worktree-relative path.
    */
-  onWatch(projectId: string, paths: readonly string[]): void {
+  onWatch(projectId: string, paths: readonly string[], worktreePath?: string): void {
     const m = this.byProject.get(projectId);
     if (!m || paths.length === 0) return;
+    if (worktreePath !== undefined) {
+      const changed = new Set(paths);
+      for (const [k, entry] of m) {
+        if (entry.worktreePath === worktreePath && changed.has(entry.path)) m.delete(k);
+      }
+      return;
+    }
     if (paths.some(isGitStateSignal)) {
       m.clear();
       return;

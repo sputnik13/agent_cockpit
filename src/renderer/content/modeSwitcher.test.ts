@@ -4,7 +4,9 @@ import {
   defaultModeFor,
   isHtmlPath,
   isImagePath,
+  isJsonPath,
   isMarkdownPath,
+  isYamlPath,
   modesFor,
   viewFor,
 } from './modeSwitcher';
@@ -31,8 +33,17 @@ describe('classOf (pure, path-only classification)', () => {
     expect(classOf('src/index.ts')).toBe('text');
   });
 
-  it('classifies a JSON file as text', () => {
-    expect(classOf('package.json')).toBe('text');
+  it('classifies json extensions, including jsonc but not json5 — json is now its own class (see the module doc comment for the .jsonc/.json5 decision), not text', () => {
+    expect(classOf('package.json')).toBe('json');
+    expect(classOf('tsconfig.jsonc')).toBe('json');
+    // .json5 is a materially different grammar jsonc-parser does not parse
+    // — deliberately falls through to 'text', unchanged from today.
+    expect(classOf('data.json5')).toBe('text');
+  });
+
+  it('classifies yaml extensions as their own class, not text', () => {
+    expect(classOf('config.yaml')).toBe('yaml');
+    expect(classOf('config.yml')).toBe('yaml');
   });
 
   it('classifies an unknown/binary extension as text — unknown-at-classification-time, never a guessed generic-binary (classOf is pure/path-only and stays that way; runtime reclassification happens one layer up, in ContentViewer — see the module doc comment)', () => {
@@ -61,8 +72,13 @@ describe('modesFor (availability table)', () => {
     expect(modesFor('src/index.ts', 'change')).toEqual(['diff', 'rendered', 'raw']);
   });
 
-  it('a JSON file: diff, rendered, raw', () => {
+  it('a JSON file: diff, rendered, raw (own class now, not text — see classOf)', () => {
     expect(modesFor('package.json', 'file')).toEqual(['diff', 'rendered', 'raw']);
+  });
+
+  it('a YAML file: diff, rendered, raw (same availability as json/text)', () => {
+    expect(modesFor('config.yaml', 'file')).toEqual(['diff', 'rendered', 'raw']);
+    expect(modesFor('config.yml', 'change')).toEqual(['diff', 'rendered', 'raw']);
   });
 
   it('an unknown/binary extension: diff, rendered, raw — same as any other text-like file today (RawFile/DiffView already tolerate real binary content at runtime)', () => {
@@ -73,6 +89,8 @@ describe('modesFor (availability table)', () => {
     expect(modesFor('src/index.ts', 'external-file')).toEqual(['rendered', 'raw']);
     expect(modesFor('README.md', 'external-file')).toEqual(['rendered', 'raw']);
     expect(modesFor('mockup.html', 'external-file')).toEqual(['rendered', 'raw']);
+    expect(modesFor('data.json', 'external-file')).toEqual(['rendered', 'raw']);
+    expect(modesFor('config.yaml', 'external-file')).toEqual(['rendered', 'raw']);
   });
 
   it('external-file image/generic-binary: raw only (no baseline-free comparison view exists yet — matches today)', () => {
@@ -102,9 +120,14 @@ describe('defaultModeFor', () => {
     expect(defaultModeFor('src/index.ts', 'file')).toBe('raw');
   });
 
-  it('a JSON file defaults to diff for a change, raw for a file', () => {
+  it('a JSON file defaults to diff for a change, raw for a file (own class now, not text)', () => {
     expect(defaultModeFor('package.json', 'change')).toBe('diff');
     expect(defaultModeFor('package.json', 'file')).toBe('raw');
+  });
+
+  it('a YAML file defaults to diff for a change, raw for a file (same as json/text)', () => {
+    expect(defaultModeFor('config.yaml', 'change')).toBe('diff');
+    expect(defaultModeFor('config.yaml', 'file')).toBe('raw');
   });
 
   it('an unknown/binary extension defaults like any other text-like file', () => {
@@ -115,6 +138,8 @@ describe('defaultModeFor', () => {
   it('external-file never defaults to diff (no git baseline)', () => {
     expect(defaultModeFor('src/index.ts', 'external-file')).toBe('raw');
     expect(defaultModeFor('assets/logo.png', 'external-file')).toBe('raw');
+    expect(defaultModeFor('data.json', 'external-file')).toBe('raw');
+    expect(defaultModeFor('config.yaml', 'external-file')).toBe('raw');
   });
 });
 
@@ -137,6 +162,21 @@ describe('viewFor — the (class, mode) -> component dispatch table', () => {
     // runtime `highlight` prop ContentViewer passes, not a separate ViewKind.
     expect(viewFor('text', 'rendered')).toBe('raw-file');
     expect(viewFor('text', 'raw')).toBe('raw-file');
+  });
+
+  it('json', () => {
+    expect(viewFor('json', 'diff')).toBe('diff-view');
+    // The one new cell this leaf introduces: Rendered dispatches to
+    // FoldingView (a temporary RawFile pass-through — see FoldingView.tsx),
+    // not directly to raw-file the way 'text' still does.
+    expect(viewFor('json', 'rendered')).toBe('folding-view');
+    expect(viewFor('json', 'raw')).toBe('raw-file');
+  });
+
+  it('yaml', () => {
+    expect(viewFor('yaml', 'diff')).toBe('diff-view');
+    expect(viewFor('yaml', 'rendered')).toBe('folding-view');
+    expect(viewFor('yaml', 'raw')).toBe('raw-file');
   });
 
   it('image', () => {
@@ -168,6 +208,9 @@ describe('modesFor / defaultModeFor with knownBinary (runtime reclassification o
     expect(modesFor('archive.pdf', 'file', true)).toEqual(['diff', 'rendered']);
     // Even a recognized extension is overridden once runtime-confirmed binary.
     expect(modesFor('src/index.ts', 'change', true)).toEqual(['diff', 'rendered']);
+    // ... and json/yaml are no exception, despite now being their own classes.
+    expect(modesFor('data.json', 'change', true)).toEqual(['diff', 'rendered']);
+    expect(modesFor('config.yaml', 'change', true)).toEqual(['diff', 'rendered']);
   });
 
   it('modesFor: external-file + knownBinary still falls back to raw only, same as image', () => {
@@ -209,5 +252,18 @@ describe('path predicates (still exported; classOf composes them)', () => {
   it('isImagePath', () => {
     expect(isImagePath('a.png')).toBe(true);
     expect(isImagePath('a.ts')).toBe(false);
+  });
+
+  it('isJsonPath', () => {
+    expect(isJsonPath('a.json')).toBe(true);
+    expect(isJsonPath('a.jsonc')).toBe(true);
+    expect(isJsonPath('a.json5')).toBe(false);
+    expect(isJsonPath('a.ts')).toBe(false);
+  });
+
+  it('isYamlPath', () => {
+    expect(isYamlPath('a.yaml')).toBe(true);
+    expect(isYamlPath('a.yml')).toBe(true);
+    expect(isYamlPath('a.ts')).toBe(false);
   });
 });

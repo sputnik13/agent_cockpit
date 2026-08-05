@@ -105,6 +105,13 @@ const api: RendererApi = {
       ),
   },
 
+  watch: {
+    setActiveWorktree: (projectId, worktreePath) =>
+      invoke<{ ok: true }>(Channels.watchSetActiveWorktree, { projectId, worktreePath }).then(
+        () => undefined,
+      ),
+  },
+
   terminal: {
     open: (opts) => invoke<{ terminalId: string }>(Channels.terminalOpen, { opts }).then((r) => r.terminalId),
     write: (terminalId, data) =>

@@ -393,6 +393,37 @@ event}`); the renderer hub reads that tag and `panelDataSync` routes by
 `(projectId, category)` to the right per-project slice. Do not reintroduce a
 renderer-driven `watch.subscribe` keyed on `activeId`.
 
+**Watch coverage is `rootPath`/`remotePath` PLUS, lazily, at most ONE active
+EXTERNAL worktree (local_repo_explorer-g1je).** A session's watch is no longer
+just the primary root-rooted subscription: `SessionManager` also owns (in
+`worktreeWatchSubs`) at most one EXTRA subscription, rooted at the project's
+currently-ACTIVE worktree, established via `provider.subscribeWorktreeWatch`
+ONLY when that worktree is external to the project root (neither the root
+itself nor nested under it — a nested worktree is already covered by the
+primary watch, so a second subscription there would be redundant). The
+renderer (`panelDataSync`, following `worktreeStore`'s selection) is the SOLE
+driver of `SessionManager.setActiveWorktree`, via the one renderer→main watch
+channel, `watch:set-active-worktree` — main keeps no independent "desired
+worktree" cache of its own beyond the bookkeeping needed to (de)establish the
+subscription itself. Events from this extra subscription carry a
+`worktreePath` tag (`WatchPushEvent.worktreePath` / `HubWatchEvent.worktreePath`,
+both optional/absent for the primary watch's own events) so `diffCache` and
+`FoldingView`'s read cache (`watchTarget: {kind:'root'|'worktree'; ...}`)
+match a worktree-relative batch against only that SAME worktree's own
+entries, never against the primary root-rooted namespace. **Do NOT
+reintroduce an eager per-known-worktree fanout** — a worktree's watch follows
+the active SELECTION, not the worktree LIST; every OTHER known worktree stays
+deliberately unwatched, with staleness during the unwatched interval handled
+by `FoldingView`'s switch-away cache-eviction guard (evicts cached entries
+for a worktree the moment the selection moves away from it), not by adding
+more watchers. The session-owned teardown stays symmetric: `stopWatch` tears
+down BOTH the primary and the extra subscription in one place, so every
+existing teardown edge (disconnected/failed, eviction, `closeAll`) covers
+both without a second, independently-called teardown path. Full design
+(diagram, event tagging, covered/deferred scope boundary):
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) "Active-external-worktree watch
+(lazy, at most one; local_repo_explorer-g1je)".
+
 **Required configuration:**
 
 - `LocalWatchProvider` reads exclusions, signal paths, and
@@ -580,38 +611,172 @@ relabel the others. New tabs default to the project directory's basename.
 Double-click a tab, type a name, Enter → it persists across command runs and tab
 switches. `terminalConfig.test.ts` pins `automatic-rename off` in both openers.
 
-## Control-mode tab refresh is two-tier (repaint + resize round-trip; gated re-seed)
+## Control-mode tab refresh is three-tier (repaint + resize round-trip + per-pane row nudge; gated re-seed)
 
 **Invariant:** The toolbar refresh button (`refreshActiveTab(hard)` in
-`ControlTerminalPanel.tsx`) has two modes, both of which:
+`ControlTerminalPanel.tsx`) has two click modes (normal / shift), and BOTH run
+all three tiers below:
 
 1. repaint every pane **from xterm's OWN buffer** via the **non-destructive**
    `recover()`/`recoverTab()` (`controlPaneRegistry.ts`) — refit (`fit`) +
    glyph-atlas rebuild (`webgl?.clearTextureAtlas()` / `term.clearTextureAtlas?.()`)
-   + `term.refresh(0, rows-1)`; and
+   + `term.refresh(0, rows-1)`;
 2. force a **real client resize round-trip** via `nudgeClientSize(host)`
-   (`controlSession.ts`) — shrink one row, then restore. This is load-bearing:
-   tmux only re-emits `%output` (and SIGWINCHes the pane apps) when the client
-   size actually CHANGES, so a same-size `pushClientSize` is a tmux no-op — which
-   is why a plain repaint rarely fixes mis-wrapped / size-desynced output. The
-   manual resize the user does (drag the window) worked for exactly this reason.
+   (`controlSession.ts`) — shrink one row from tmux's own current size, then
+   restore that exact same value. This is load-bearing: tmux only re-emits
+   `%output` (and SIGWINCHes the pane apps) when the client size actually
+   CHANGES, so a same-size `pushClientSize` is a tmux no-op — which is why a
+   plain repaint rarely fixes mis-wrapped / size-desynced output. The manual
+   resize the user does (drag the window) worked for exactly this reason;
+   and
+3. force a **per-pane absolute-height resize round-trip** via
+   `nudgePaneRows(projectId, windowId)` (`controlSession.ts`, sibling of
+   `nudgeClientSize`, same store/command seams). ROOT CAUSE tier 3 closes: tmux's
+   `layout_resize_adjust` distributes a same-axis ±1 cell change to **only the
+   first child** of a split (live tmux 3.7b probe: a stacked/top-bottom window's
+   1-row client nudge SIGWINCHes just the first pane; a side-by-side split is
+   unaffected because rows are the perpendicular axis there) — so tier 2 alone
+   only visibly refreshes ONE pane of a multi-pane stacked split. `nudgePaneRows`
+   walks every LEAF of the window's full layout and, for each with `h >= 2`,
+   sends three SEPARATE `command()` calls: shrink (`resize-pane -t <pane> -y
+   <h-1>`), a server-side pure delay (`run-shell -d 0.05`, no shell command — it
+   gives the pane app a chance to OBSERVE the shrunken size before the restore
+   arrives, guarding against SIGWINCH coalescing / an app like ncurses not
+   redrawing on a same-size no-op; on tmux < 3.2, where `-d` doesn't exist yet,
+   this `%error`s harmlessly since it is its own command line, degrading to
+   at-worst tier-2-only behavior), then restore (`resize-pane -t <pane> -y <h>`,
+   the EXACT original height read from tmux's own layout).
 
-**Normal click = tiers 1+2 (always non-destructive).** `recover()` itself MUST
-stay non-destructive: do NOT make it dispose the xterm, re-seed from
+**Tier 2's shrink base and restore target are read from tmux's own layout
+root, captured ONCE at click time — never recomputed at restore
+(local_repo_explorer-ppjp).** `nudgeClientSize` reads the active window's
+`visibleLayout ?? layout` root `w`/`h` (the same `LayoutNode` tree tier 3's
+`nudgePaneRows` already reads; a live probe confirmed a control-mode client's
+`window_layout` root height equals the pushed client rows 1:1, with no
+status-line subtraction) instead of `clientCells(host)` — the pixel-derived
+estimate is now used ONLY as a defensive fallback when no layout exists yet
+(e.g. before the first window). Both the shrink value (`rows - 1`) and the
+restore value (`rows`) are captured **once**, before either command is sent;
+the rAF restore pushes the captured value verbatim, never re-derives it. Two
+specific regressions a future "simplification" could reintroduce here:
+
+- **Recomputing the restore via `pushClientSize`/`clientCells` instead of
+  reusing the click-time-captured value.** `clientCells` sums each pane's
+  LIVE, independently `fit()`-floored `term.rows` — a real cross-layer
+  rounding authority (React flex → xterm FitAddon floor → sum). Because the
+  shrink itself perturbs the layout (`%layout-change` → flex reweight → each
+  pane refits), recomputing at restore time can read a DIFFERENT sum than the
+  click-time value, producing a deterministic ±1-row `window_layout`
+  oscillation on repeated clicks against an otherwise-settled split — and made
+  the shrink itself a silent tmux no-op (no SIGWINCH) on every OTHER click
+  (the prior click's wrong "restore" became the next click's stale shrink
+  base).
+- **Changing `clientCells`/`clientCellsFromLayout` ITSELF to read layout-root
+  totals instead of summing live pane sizes.** `clientCells`'s OTHER callers
+  (via `pushClientSize`, from the host `ResizeObserver`, `onCellSizeReady`,
+  font-change, project-switch, and structural-command triggers) are genuine
+  resize paths whose entire purpose is deriving a NEW size from actual
+  pixel/font changes — sourcing from tmux's OWN current layout would make
+  every one of those a permanent no-op. The fix therefore lives ONLY inside
+  `nudgeClientSize`; `clientCells`/`clientCellsFromLayout` are unchanged and
+  must stay that way.
+
+**Known residual (out of ppjp's scope): a THIRD, separate trigger can still
+push a disagreeing size shortly after tier 2's now-correct restore.**
+`recover()` (`controlPaneRegistry.ts`, tier 1, runs first in
+`refreshActiveTab`) unconditionally calls `invalidateCellSize()` for every
+pane, every click. When tier 2/3's own cascading layout changes later cause
+ANY pane to `fit()` again, `fit()` finds the cache cleared and repopulates it
+(`populateCellCacheFrom`), which fires the `onCellSizeReady` listener in
+`ControlTerminalPanel.tsx` — an INDEPENDENT `pushClientSize(host)` call, i.e.
+the same `clientCells` pane-summing rounding-disagreement described above,
+just reached through a different door, on a timer tier 2 does not control.
+Because this fires causally AFTER tier 2's restore (it is triggered BY tier
+2/3's own commands settling), it can land LATER in the command channel's FIFO
+queue and overwrite tier 2's correct restore with a disagreeing value.
+Confirmed by live bisection (2026-08-05, local_repo_explorer-ppjp): with
+`recover()`'s `invalidateCellSize()` call temporarily no-op'd, repeated
+refresh clicks against a settled split produced a byte-identical
+`window_layout` across every sample; restoring it (the shipped, unmodified
+behavior) reproduces the SAME ±1-row oscillation this bead was filed to fix —
+now sourced from `recover()`/`onCellSizeReady`, not from `nudgeClientSize`'s
+own restore. This is a separate, pre-existing interaction, orthogonal to and
+NOT reintroduced by this fix (it does not touch `nudgeClientSize`, and fixing
+it would require touching `recover()`/`clientCells`, both out of this bead's
+guardrails) — tracked as a follow-up rather than folded in here, mirroring how
+this bead itself was spun out of local_repo_explorer-bvni. Full evidence:
+local_repo_explorer-ppjp's bead comments.
+
+**Tier 3 is ADDITIVE and an identity round-trip — do not conflate it with tiers
+1-2 or the *separate* "tight-split ghost `%`" issue below.** `nudgeClientSize`'s
+per-window (not per-pane) resize semantics are UNCHANGED by tier 3. The restore
+height is an integer read straight from tmux's own layout and written back
+verbatim — no pixel/FitAddon math anywhere in tier 3 — so the final
+`window_layout` is checksum-identical before/after (probe-verified across
+TB2/LR2/nested-TB-LR/TB3/h=2/h=1 topologies) and tier 3 cannot introduce a new
+rounding-mismatch bug class. It is also a **ONE-SHOT** action fired only by an
+explicit refresh click or a channel reattach — never by a resize-drag/
+layout-ack loop — so it does NOT reintroduce the every-drag cascade + IPC
+chatter hazard that the ghost-`%` entry separately (and permanently) rejected
+per-pane `resize-pane` for; that rejection was about doing it on EVERY resize
+drag, not a one-shot user-triggered action.
+
+**Skip conditions (each a plain bail, zero commands sent):** a **zoomed** window
+(`win.isZoomed`) — `resize-pane -y` on a zoomed window silently UNZOOMS it and
+can corrupt sizes read from the single-pane zoomed layout (probe-proven hazard;
+a zoomed window is already fully covered by tier 2); a **single-pane** window
+(fewer than 2 layout leaves) — already fully covered by tier 2; and, per leaf,
+`h < 2` (a `-y 0` restore clamps silently, so it is skipped rather than sent).
+
+**Ordering is load-bearing: `nudgePaneRows` MUST be called IMMEDIATELY AFTER
+`nudgeClientSize` in the same synchronous code path** — both current call sites
+(`refreshActiveTab` and the `subscribeReinit` reattach handler in
+`ControlTerminalPanel.tsx`) do this; do not reorder or separate them. Both defer
+to a single `requestAnimationFrame`; rAF callbacks fire in registration order,
+so `nudgePaneRows`'s rAF runs after `nudgeClientSize`'s own restore push was
+SENT, and the command channel's FIFO ordering then guarantees every pane-nudge
+command EXECUTES after the client shrink+restore completes, at the window's
+true (already-restored) size. This ordering contract is what lets tier 3 use a
+plain per-leaf loop with no client/pane resize interleaving analysis.
+
+**Single-flight per project.** A module-level guard (`paneNudgeInFlight` in
+`controlSession.ts`) makes a rapid second refresh click during an in-flight
+nudge a no-op: without it, a second call could read TRANSIENT heights from the
+store (a layout-change notification from the first nudge landing mid-flight)
+and "restore" to the wrong, already-shrunken height permanently. It clears once
+every command from the run has settled (or been swallowed by its own `.catch`),
+or immediately on a pre-send bail (a zoomed/single-pane window, or the active
+project switching before the deferred rAF fires — commands route via main's
+`activeControl()`, i.e. whichever project is active AT SEND TIME, so bailing
+before the first send guarantees a shrunken pane can never be stranded on an
+inactive/switched-away project).
+
+**CRITICAL — the three per-leaf commands (shrink / delay / restore) MUST NEVER
+be `;`-sequenced into one command line.** A live probe confirmed control mode
+emits a SEPARATE `%begin`/`%end` reply block PER SUB-COMMAND of a `;`-sequenced
+line (3 blocks for 1 written line), which desyncs the command manager's
+pending-reply FIFO correlation (each `command()` call expects exactly one reply
+block). Always send three genuinely separate `command()` calls, back-to-back
+with no `await` between them — the channel's FIFO ordering preserves send order
+regardless.
+
+**Normal click = tiers 1+2+3 (always non-destructive).** `recover()` itself
+MUST stay non-destructive: do NOT make it dispose the xterm, re-seed from
 `capture-pane`, or remount — a re-seed writes the captured screen as plain buffer
 lines that a live **alt-screen TUI** (Claude Code, vim, htop) redraws over,
 producing **runaway scroll**.
 
-**Shift-click = hard refresh, with a STRICTLY GATED re-seed.** `hardRecoverTab()`
-queries each pane's tmux `#{alternate_on}` (`listPanesAltScreen`, one
-`list-panes` round-trip) and re-seeds ONLY panes positively on the **normal**
+**Shift-click = hard refresh (tiers 1+2+3 plus a STRICTLY GATED re-seed).**
+`hardRecoverTab()` queries each pane's tmux `#{alternate_on}` (`listPanesAltScreen`,
+one `list-panes` round-trip) and re-seeds ONLY panes positively on the **normal**
 screen (`reseedPane`: clear `ESC[3J ESC[2J ESC[H` + re-write via the shared
 `seedBytesFromCapture` latin1 re-encode). Alternate-screen panes get only the
-non-destructive repaint and rely on the resize round-trip's SIGWINCH to redraw.
-The safety gate is `mayReseed(alt) === (alt === false)`: **unknown /
-query-failed / alternate ALL fall back to repaint**, never re-seed. Do NOT widen
-`reseedPane` to alt-screen panes or flip the safe default — that reintroduces the
-runaway-scroll bug the gate prevents. Both modes work on local and remote
+non-destructive repaint, now backed by tier 3's per-pane SIGWINCH (previously
+only tier 2's first-pane-only SIGWINCH) to redraw. The safety gate is
+`mayReseed(alt) === (alt === false)`: **unknown / query-failed / alternate ALL
+fall back to repaint**, never re-seed. Do NOT widen `reseedPane` to alt-screen
+panes or flip the safe default — that reintroduces the runaway-scroll bug the
+gate prevents. All three tiers work on local and remote
 (`capturePane`/`resizeClient`/`command` exist on both transports).
 
 **Ordering trap (keep it fixed):** the resize round-trip's first (shrink) push
@@ -632,7 +797,23 @@ intact, diagnostic `trigger=manual-refresh` logged. Desync a plain **shell**
 pane, **shift-click** → it re-seeds correctly (`trigger=hard-refresh`); do the
 same with a TUI in the pane → it must NOT re-seed (no runaway scroll). Switch
 projects during a refresh → the other project is never resized. Create a split →
-typing immediately goes to the new pane.
+typing immediately goes to the new pane. **Multi-pane (tier 3):** create a
+TOP/BOTTOM (stacked) split with 2+ panes, desync a pane that is NOT the first
+one, click refresh → that pane must now ALSO visibly refresh (not just the
+first); `tmux display-message -p '#{window_layout}'` for the window must be
+BYTE-IDENTICAL before and after the click (tier 3 is a true layout no-op); a
+LEFT/RIGHT (side-by-side) split must keep refreshing exactly as before (tier 2
+alone already covered it — no regression). **Tier 2 restore correctness
+(ppjp):** `controlSession.test.ts`'s `nudgeClientSize` suite pins the fix in
+isolation — click-time layout-root capture, no restore-time recompute, the
+project-switch guard, and the pixel-derived fallback. End-to-end, repeated
+refresh clicks against a settled split can STILL show `window_layout` drift —
+this is the separate, known residual documented above (`recover()` →
+`onCellSizeReady` → `pushClientSize` → `clientCells`), not a regression of
+tier 2's own restore, which the unit suite plus a live bisection (temporarily
+no-op'ing `recover()`'s `invalidateCellSize()` call, which then keeps
+`window_layout` byte-identical across repeated clicks) confirm is now a
+strict identity round-trip on tmux's own integers.
 
 ## Remote `ssh2` is encapsulated behind `RemoteTransport`
 
@@ -920,6 +1101,41 @@ lists `M package.json` with `scripts`/`devDependencies` removed; `git checkout -
 package.json` returns the tree to clean (`node -e "const p=require('./package.json');
 p.scripts && p.devDependencies"` truthy again). No packaging run should ever be
 committed with a modified `package.json`.
+
+## Folding view: resolve exclusive-end offsets with `lastTouchedLine`, never `offsetToLine`
+
+**Invariant:** In the Content panel's folding pipeline
+(`src/renderer/content/foldingRows.ts` / `FoldingView.tsx`), any EXCLUSIVE end
+offset from a fold region (`region.end`, `region.headerEnd`,
+`row.suffixStart`) MUST be resolved to a line via
+`lastTouchedLine(starts, exclusiveEnd, minOffset)` (= the line containing
+`exclusiveEnd - 1`, clamped), never `offsetToLine(starts, exclusiveEnd)`
+directly. Relatedly, token lines are indexed by ORIGINAL source line
+(`tokenLines[row.line]`), never by visible-row position — folding hides rows,
+it never renumbers them.
+
+**Why this matters:** the `yaml` package's node ranges routinely extend
+through a block region's trailing `\n`, so a YAML region's end lands EXACTLY
+on the NEXT line's start offset; `offsetToLine` then resolves one line too
+far. jsonc-parser's offsets are always strictly mid-line, so **every JSON
+test passes with the naive resolution** — the bug is reachable only via
+YAML-shaped regions. Shipped in the JSON-only leaf (.5) and found in .6 with
+two real consequences: a document-ending collapsed region swallowed the next
+document's `---` marker line entirely, and a block scalar's folded row
+mis-anchored one line below its `|`/`>` indicator (inert indicator line,
+empty prefix).
+
+**Required:** keep `lastTouchedLine` at all three call sites
+(`visibleFoldRows`'s header/end resolution, `FoldedRowContent`'s
+`suffixLine`, `FoldingView`'s `expandableAt`). Do not "simplify" it back to
+`offsetToLine` — JSON tests cannot catch the regression.
+
+**Regression check:** the three dedicated tests in `foldingRows.test.ts`
+against real `yamlFoldModel` output (document-boundary `---` preservation,
+block-scalar fold-row anchoring, `lastTouchedLine` itself) must stay green;
+in the app, collapse the last region of document N in a multi-document YAML
+file — document N+1's `---` marker line must remain visible with its own
+line number.
 
 ## Known upstream noise
 

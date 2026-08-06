@@ -4,6 +4,7 @@ import {
   Badge,
   ContextMenu,
   EmptyState,
+  IconButton,
   Panel,
   PanelBody,
   PanelFullscreenButton,
@@ -136,6 +137,15 @@ export function ChangesPanel(): JSX.Element {
 
   const count = `${filtered.length}/${surfaced.length}`;
 
+  // Manual refresh escape hatch (store-backed): re-invokes the existing
+  // refresh action for the active project. No new data path — refresh()
+  // reads the active worktree internally and keeps last-good on a
+  // same-worktree reload (changesStore.ts:90-96), so this never blanks the
+  // file list.
+  const onRefresh = (): void => {
+    if (activeId) void useChangesStore.getState().refresh(activeId);
+  };
+
   return (
     <Panel>
       <Toolbar>
@@ -192,6 +202,9 @@ export function ChangesPanel(): JSX.Element {
             {feedbackMessage}
           </span>
         )}
+        <IconButton label="Refresh changes" size="sm" disabled={!activeId} onClick={onRefresh}>
+          ⟳
+        </IconButton>
         <PanelFullscreenButton />
       </Toolbar>
 

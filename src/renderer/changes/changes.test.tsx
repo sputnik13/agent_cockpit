@@ -433,3 +433,88 @@ describe('worktree selection drives the changeset reload', () => {
     expect(useWorktreeStore.getState().byProject[PROJECT]!.activeWorktree).toBe('/repo/B');
   });
 });
+
+describe('manual refresh (vqyh)', () => {
+  it('renders "Refresh changes" and clicking it reloads the active project exactly once', async () => {
+    const getChangeset = vi
+      .fn()
+      .mockResolvedValue(makeChangeset([makeFile({ status: 'modified', newPath: 'src/edit.ts' })]));
+    installApi({ getChangeset });
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+    expect(getChangeset).toHaveBeenCalledTimes(1);
+
+    const refresh = screen.getByRole('button', { name: 'Refresh changes' });
+    // Byte-consistent with the TerminalPanel/RunPanel/ControlTerminalPanel
+    // precedent: an IconButton whose only child is the '⟳' glyph.
+    expect(refresh).toHaveTextContent('⟳');
+    expect(refresh).toHaveAttribute('title', 'Refresh changes');
+
+    await act(async () => {
+      fireEvent.click(refresh);
+      // Flush refresh()'s microtasks (getChangeset resolves immediately here —
+      // no deferred promise in this test).
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Exactly one additional read landed from the single click — proves
+    // refresh(activeId) fired exactly once, not zero or multiple times.
+    expect(getChangeset).toHaveBeenCalledTimes(2);
+  });
+
+  it('disables "Refresh changes" when there is no active project', async () => {
+    installApi();
+    const { ChangesPanel } = await loadModules();
+    const { useProjectsStore } = await import('@renderer/providerClient');
+    render(<ChangesPanel />);
+    await loadSlice();
+    expect(screen.getByRole('button', { name: 'Refresh changes' })).not.toBeDisabled();
+
+    act(() => {
+      useProjectsStore.setState({ activeId: null });
+    });
+
+    expect(screen.getByRole('button', { name: 'Refresh changes' })).toBeDisabled();
+  });
+
+  it('manual refresh on the same worktree keeps previously rendered rows visible throughout — no flicker', async () => {
+    const row = makeFile({ status: 'modified', newPath: 'src/edit.ts' });
+    const getChangeset = vi.fn().mockResolvedValue(makeChangeset([row]));
+    installApi({ getChangeset });
+    const { ChangesPanel, useChangesStore } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    await screen.findByText('src/edit.ts');
+
+    // Defer the next read so the click's loading:true window is actually
+    // observable while the previous changeset is still held.
+    let resolveChangeset!: (c: Changeset) => void;
+    getChangeset.mockReturnValueOnce(
+      new Promise<Changeset>((r) => {
+        resolveChangeset = r;
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh changes' }));
+
+    // Mid-refresh, same worktree: changesStore.refresh() does NOT clear the
+    // changeset before the read resolves (changesStore.ts:90-96) — verified
+    // here, not assumed. The row must stay visible the whole time, never a
+    // blank frame.
+    await waitFor(() => {
+      expect(useChangesStore.getState().byProject[PROJECT]!.loading).toBe(true);
+    });
+    expect(screen.getByText('src/edit.ts')).toBeInTheDocument();
+
+    resolveChangeset(makeChangeset([row]));
+
+    await waitFor(() => {
+      expect(useChangesStore.getState().byProject[PROJECT]!.loading).toBe(false);
+    });
+    expect(screen.getByText('src/edit.ts')).toBeInTheDocument();
+  });
+});

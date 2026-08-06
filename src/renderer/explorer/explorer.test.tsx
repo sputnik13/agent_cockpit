@@ -464,6 +464,106 @@ describe('row menu feedback (D3, wired in Explorer per the coordinator note)', (
   });
 });
 
+describe('manual refresh (Refresh files button)', () => {
+  it('renders a "Refresh files" IconButton in the Explorer toolbar', async () => {
+    const listDir = makeListDir();
+    installApi(listDir);
+    const { ExplorerPanel, useWorktreeStore } = await loadModules();
+    render(<ExplorerPanel />);
+    await act(async () => {
+      await useWorktreeStore.getState().loadWorktrees(PROJECT);
+    });
+    await screen.findByText('README.md');
+
+    expect(screen.getByRole('button', { name: 'Refresh files' })).toBeInTheDocument();
+  });
+
+  it('re-lists every mounted directory exactly once per click, leaves collapsed directories unlisted, shows no loading flash while in flight, and preserves expansion/selection/DOM identity (no remount)', async () => {
+    // Per-dirPath fixture: root has a file, an expanded dir (`src`), and a
+    // collapsed dir (`docs`) that must stay unlisted throughout. `refreshed`
+    // flips once the button is clicked so post-click calls resolve via a
+    // controllable (deferred) promise — letting the test inspect the DOM
+    // while the refresh is genuinely in flight.
+    const initial: Record<string, DirEntry[]> = {
+      '': [dir('README.md'), dir('src', true), dir('docs', true)],
+      src: [dir('index.ts')],
+    };
+    const refreshedEntries: Record<string, DirEntry[]> = {
+      '': [dir('README.md'), dir('NEW.md'), dir('src', true), dir('docs', true)],
+      src: [dir('index.ts'), dir('new-in-src.ts')],
+    };
+    let refreshed = false;
+    const pending: { dirPath: string; resolve: (es: DirEntry[]) => void }[] = [];
+    const listDir = vi.fn((dirPath: string, _worktreePath?: string): Promise<DirEntry[]> => {
+      if (!refreshed) return Promise.resolve(initial[dirPath] ?? []);
+      return new Promise<DirEntry[]>((resolve) => {
+        pending.push({ dirPath, resolve });
+      });
+    });
+    installApi(listDir);
+    const { ExplorerPanel, useExplorerStore, useWorktreeStore, useContentSelection } = await loadModules();
+    render(<ExplorerPanel />);
+    await act(async () => {
+      await useWorktreeStore.getState().loadWorktrees(PROJECT);
+    });
+    await screen.findByText('README.md');
+
+    // Expand `src`; leave `docs` collapsed. (Root fires listDir twice before
+    // this point — once with `worktreePath: undefined` on first mount, once
+    // more when `loadWorktrees` resolves the active worktree — a pre-existing
+    // effect-dependency behavior unrelated to this leaf, so the baseline count
+    // is captured dynamically below rather than asserted as a literal.)
+    fireEvent.click(await screen.findByText('src'));
+    await screen.findByText('index.ts');
+    expect(listDir).not.toHaveBeenCalledWith('docs', expect.anything());
+
+    // Select README.md so the test can prove the Content-panel selection and
+    // active-row highlight survive the refresh (NO REMOUNT), and capture the
+    // row's DOM node to prove it's the SAME node afterward, not a re-created one.
+    const readmeRow = screen.getByText('README.md').closest('div')!;
+    fireEvent.click(screen.getByText('README.md'));
+    expect(useContentSelection.getState().selectionFor(PROJECT)).toMatchObject({ path: 'README.md' });
+    expect(readmeRow.className).toMatch(/border-accent/);
+
+    const callsBeforeRefresh = listDir.mock.calls.length;
+    refreshed = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh files' }));
+
+    // RE-LISTING PROOF: exactly one more listDir call per mounted DirChildren
+    // (root + the expanded `src`); still zero for the collapsed `docs`.
+    expect(listDir).toHaveBeenCalledTimes(callsBeforeRefresh + 2);
+    expect(pending.map((p) => p.dirPath).sort()).toEqual(['', 'src']);
+    expect(listDir).not.toHaveBeenCalledWith('docs', expect.anything());
+
+    // NO LOADING FLASH: with the refresh genuinely in flight (the mocked
+    // listDir calls above are still unresolved), the previously rendered rows
+    // are still on screen — not the "loading…" placeholder — and the README
+    // row is the SAME DOM node (NO REMOUNT), not a newly created one.
+    expect(screen.queryByText('loading…')).not.toBeInTheDocument();
+    expect(screen.getByText('README.md').closest('div')).toBe(readmeRow);
+    expect(screen.getByText('index.ts')).toBeInTheDocument();
+    // Selection and active-row highlight are untouched mid-flight.
+    expect(useContentSelection.getState().selectionFor(PROJECT)).toMatchObject({ path: 'README.md' });
+    expect(readmeRow.className).toMatch(/border-accent/);
+    // EXPANSION PRESERVED mid-flight: explorerStore's `expanded` set is
+    // untouched by the refresh (a re-listing, never a tree reset).
+    expect(useExplorerStore.getState().isExpanded(PROJECT, 'src')).toBe(true);
+
+    // Resolve the in-flight listings with updated entries.
+    await act(async () => {
+      pending.forEach(({ dirPath, resolve }) => resolve(refreshedEntries[dirPath]));
+    });
+
+    // The new entries from the re-listing are now visible.
+    await screen.findByText('NEW.md');
+    await screen.findByText('new-in-src.ts');
+    // Still expanded, selection/highlight still intact, still the same node.
+    expect(useExplorerStore.getState().isExpanded(PROJECT, 'src')).toBe(true);
+    expect(useContentSelection.getState().selectionFor(PROJECT)).toMatchObject({ path: 'README.md' });
+    expect(screen.getByText('README.md').closest('div')).toBe(readmeRow);
+  });
+});
+
 describe('FileNode scroll-into-view (Row forwardRef, wrapper <div> dropped)', () => {
   it('scrolls the row into view when it becomes the reveal target, using Row itself as the ref target', async () => {
     const listDir = makeListDir();

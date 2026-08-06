@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   EmptyState,
+  IconButton,
   Panel,
   PanelBody,
   PanelFullscreenButton,
@@ -104,6 +105,14 @@ export function BeadsPanel(): JSX.Element {
   };
   const pinnedEpicIds = new Set(focusEpicIds);
 
+  // Manual refresh escape hatch (store-backed): re-invokes the existing load
+  // action for the active project. No new data path — see CLAUDE.md
+  // "Workgraph refresh keeps the view MOUNTED" for why this is safe to call
+  // while a graph is already rendered.
+  const onRefresh = (): void => {
+    if (activeId) void useBeadsStore.getState().load(activeId);
+  };
+
   // Escape exits focus (FA-5), in tree or graph view.
   useEffect(() => {
     if (!focusId) return;
@@ -151,6 +160,9 @@ export function BeadsPanel(): JSX.Element {
         ) : (
           <ToolbarSpacer />
         )}
+        <IconButton label="Refresh tasks" size="sm" disabled={!activeId} onClick={onRefresh}>
+          ⟳
+        </IconButton>
         <PanelFullscreenButton />
       </Toolbar>
       {focusIssue && (

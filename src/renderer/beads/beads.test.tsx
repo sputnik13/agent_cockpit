@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
 import type { BeadsTaskGraph } from '@shared/ipc/channels';
@@ -626,6 +626,56 @@ describe('TreeView render (T3, FR2/FR4)', () => {
     expect(within(treeAfter).getByRole('button', { name: 'Expand' })).toBeInTheDocument();
   });
 
+  it('manual Refresh click preserves tree collapse and never shows the full-panel spinner (vqyh)', async () => {
+    installApi(TREE_FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+    fireEvent.click(screen.getByRole('radio', { name: 'Tree view' }));
+
+    const tree = screen.getByRole('tree', { name: 'Task tree' });
+    // Collapse the epic → its child is hidden.
+    fireEvent.click(within(tree).getByRole('button', { name: 'Collapse' }));
+    expect(within(tree).queryByText('child')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status', { name: 'Loading' })).not.toBeInTheDocument();
+
+    // Defer the graph read so the click's loading:true state is actually
+    // committed and rendered, same technique as the watch-driven reload test
+    // above — this is the manual-click counterpart to it (e7c0's sibling).
+    let resolveGraph!: (g: BeadsTaskGraph) => void;
+    api.provider.getTaskGraph.mockReturnValueOnce(
+      new Promise<BeadsTaskGraph>((r) => {
+        resolveGraph = r;
+      }),
+    );
+
+    const refresh = screen.getByRole('button', { name: 'Refresh tasks' });
+    await act(async () => {
+      fireEvent.click(refresh);
+      // Flush the resolved detectBeads() so load() parks on the deferred read.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Mid-refresh: loading is true, but no full-panel Spinner appears and the
+    // Tree view stays mounted with its collapse intact (CLAUDE.md "Workgraph
+    // refresh keeps the view MOUNTED").
+    expect(useBeadsStore.getState().byProject[PROJECT]!.loading).toBe(true);
+    expect(screen.queryByRole('status', { name: 'Loading' })).not.toBeInTheDocument();
+    const treeDuring = screen.getByRole('tree', { name: 'Task tree' });
+    expect(within(treeDuring).queryByText('child')).not.toBeInTheDocument();
+
+    // Finish the refresh; collapse still preserved (caret offers Expand), and
+    // still no spinner ever appeared.
+    resolveGraph(TREE_FIXTURE);
+    await waitFor(() => {
+      expect(useBeadsStore.getState().byProject[PROJECT]!.loading).toBe(false);
+    });
+    expect(screen.queryByRole('status', { name: 'Loading' })).not.toBeInTheDocument();
+    const treeAfterRefresh = screen.getByRole('tree', { name: 'Task tree' });
+    expect(within(treeAfterRefresh).queryByText('child')).not.toBeInTheDocument();
+    expect(within(treeAfterRefresh).getByRole('button', { name: 'Expand' })).toBeInTheDocument();
+  });
+
   it('allows collapsing subtrees inside focus mode (e009)', async () => {
     installApi(TREE_FIXTURE);
     render(<BeadsPanel />);
@@ -939,5 +989,50 @@ describe('Columns pin affordance + density (qkav.5)', () => {
     expect(
       within(screen.getByRole('list', { name: 'Epic columns' })).getAllByRole('listitem'),
     ).toHaveLength(3);
+  });
+});
+
+describe('manual refresh (vqyh)', () => {
+  it('renders "Refresh tasks" as the last toolbar element before fullscreen, and clicking it reloads the active project exactly once', async () => {
+    installApi(FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+    // `api.provider.getTaskGraph` is a module-scoped (vi.hoisted) mock shared
+    // across every test in this file with no per-test mockClear(), so its call
+    // count accumulates file-wide — assert the DELTA from the click, not an
+    // absolute count.
+    const before = api.provider.getTaskGraph.mock.calls.length;
+
+    const refresh = screen.getByRole('button', { name: 'Refresh tasks' });
+    // Byte-consistent with the TerminalPanel/RunPanel/ControlTerminalPanel
+    // precedent: an IconButton whose only child is the '⟳' glyph.
+    expect(refresh).toHaveTextContent('⟳');
+    expect(refresh).toHaveAttribute('title', 'Refresh tasks');
+
+    await act(async () => {
+      fireEvent.click(refresh);
+      // Flush load()'s microtasks (detectBeads then getTaskGraph resolve
+      // immediately here — no deferred promise in this test).
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Exactly one additional graph read landed from the single click — proves
+    // load(activeId) fired exactly once, not zero or multiple times.
+    expect(api.provider.getTaskGraph.mock.calls.length).toBe(before + 1);
+  });
+
+  it('disables "Refresh tasks" when there is no active project', async () => {
+    installApi(FIXTURE);
+    render(<BeadsPanel />);
+    await loadSlice();
+    expect(screen.getByRole('button', { name: 'Refresh tasks' })).not.toBeDisabled();
+
+    act(() => {
+      useProjectsStore.setState({ activeId: null });
+    });
+
+    expect(screen.getByRole('button', { name: 'Refresh tasks' })).toBeDisabled();
   });
 });

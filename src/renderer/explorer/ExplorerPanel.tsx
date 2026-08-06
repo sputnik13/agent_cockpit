@@ -22,6 +22,7 @@ import {
 import {
   ContextMenu,
   EmptyState,
+  IconButton,
   Panel,
   PanelBody,
   PanelFullscreenButton,
@@ -69,6 +70,11 @@ export function ExplorerPanel(): JSX.Element {
   // shared transient-feedback hook into a visible confirmation here, shown
   // in the toolbar next to the worktree selector.
   const { message: feedbackMessage, notify: onActionComplete } = useRowMenuFeedback();
+  // Manual "force refresh" trigger (local component state, not explorerStore —
+  // this is a re-LISTING, never a tree reset). Bumped by the toolbar button and
+  // threaded as a prop through DirChildren/DirNode; each mounted DirChildren
+  // re-runs its listDir effect once per bump without remounting.
+  const [refreshKey, setRefreshKey] = useState(0);
   if (!activeId) {
     return (
       <Panel>
@@ -115,11 +121,16 @@ export function ExplorerPanel(): JSX.Element {
             {feedbackMessage}
           </span>
         )}
+        <IconButton label="Refresh files" size="sm" onClick={() => setRefreshKey((k) => k + 1)}>
+          ⟳
+        </IconButton>
         <PanelFullscreenButton />
       </Toolbar>
       <PanelBody>
         {/* key on project+base so the tree resets on reconnect AND on a base
-            switch (worktree or root) — drops stale expanded children */}
+            switch (worktree or root) — drops stale expanded children.
+            refreshKey is a PROP, never part of this key — bumping it must
+            re-list in place, not remount the tree. */}
         <DirChildren
           key={`${activeId}:${base ?? ''}`}
           dirPath=""
@@ -127,6 +138,7 @@ export function ExplorerPanel(): JSX.Element {
           worktreePath={base}
           external={rootBrowse}
           onActionComplete={onActionComplete}
+          refreshKey={refreshKey}
         />
       </PanelBody>
     </Panel>
@@ -139,6 +151,7 @@ function DirChildren({
   worktreePath,
   external = false,
   onActionComplete,
+  refreshKey,
 }: {
   dirPath: string;
   depth: number;
@@ -149,6 +162,10 @@ function DirChildren({
   /** D3 feedback: forwarded into the row menu context for both file and dir
    *  rows. See `ExplorerPanel`'s `useRowMenuFeedback` wiring. */
   onActionComplete: (message: string) => void;
+  /** Bumped by the toolbar Refresh button; re-runs the listDir effect below.
+   *  Never resets `entries` to null on its own, so a bump re-lists in place
+   *  with no loading flash — see the effect's lack of a reset on dep change. */
+  refreshKey: number;
 }): JSX.Element {
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
 
@@ -163,7 +180,7 @@ function DirChildren({
     return () => {
       active = false;
     };
-  }, [dirPath, worktreePath]);
+  }, [dirPath, worktreePath, refreshKey]);
 
   if (entries === null) {
     return (
@@ -183,6 +200,7 @@ function DirChildren({
             worktreePath={worktreePath}
             external={external}
             onActionComplete={onActionComplete}
+            refreshKey={refreshKey}
           />
         ) : (
           <FileNode
@@ -205,12 +223,16 @@ function DirNode({
   worktreePath,
   external = false,
   onActionComplete,
+  refreshKey,
 }: {
   entry: DirEntry;
   depth: number;
   worktreePath?: string;
   external?: boolean;
   onActionComplete: (message: string) => void;
+  /** Forwarded straight through to the nested DirChildren when open — see
+   *  DirChildren's own refreshKey doc comment. */
+  refreshKey: number;
 }): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
   const activeProject = useProjectsStore(selectActiveProject);
@@ -255,6 +277,7 @@ function DirNode({
           worktreePath={worktreePath}
           external={external}
           onActionComplete={onActionComplete}
+          refreshKey={refreshKey}
         />
       )}
     </>

@@ -116,6 +116,11 @@ export function assembleChangeset(
   };
 }
 
+// Read cap for a remote .beads/issues.jsonl fetch (see getTaskGraph). Well
+// under the helper's maxReadFileCapBytes (12 MiB) ceiling, generous relative
+// to the helper's 2 MiB default text-read cap.
+const GRAPH_READ_MAX_BYTES = 10 << 20; // 10 MiB
+
 /** Parse a remote `.beads/issues.jsonl` body into a BeadsTaskGraph. */
 function parseBeadsJsonl(path: string, text: string): BeadsTaskGraph {
   const issues: BeadsIssue[] = [];
@@ -152,6 +157,23 @@ function parseBeadsJsonl(path: string, text: string): BeadsTaskGraph {
     }
   }
   return { source: { kind: 'jsonl', path }, schemaCompatible: true, issues, deps };
+}
+
+/** Turn a `readFile` RPC result for `.beads/issues.jsonl` into a task graph.
+ *  Never silently parses a truncated read as an empty-but-valid graph
+ *  (`parseBeadsJsonl('')` → `{issues:[],deps:[]}`) — that would render as an
+ *  ordinary "no tasks" empty state with no indication anything is wrong.
+ *  Throwing here surfaces through `beadsStore.load()`'s catch as an explicit
+ *  "Failed to load workgraph" error instead (local_repo_explorer video_manager
+ *  diagnosis: a JSONL over GRAPH_READ_MAX_BYTES was silently read as empty). */
+export function toTaskGraph(path: string, file: ReadFileResult): BeadsTaskGraph {
+  if (file.truncated) {
+    throw new Error(
+      `.beads/issues.jsonl is too large to read (over ${String(GRAPH_READ_MAX_BYTES / (1 << 20))} MiB); ` +
+        'the workgraph cannot be loaded until it is pruned (e.g. tombstone compaction via br).',
+    );
+  }
+  return parseBeadsJsonl(path, file.content);
 }
 
 /** tmux session names cannot contain '.' or ':'. */
@@ -745,8 +767,13 @@ export class RemoteProvider implements WorkspaceProvider {
     if (!exists.exists) {
       return { source: { kind: 'jsonl', path: '' }, schemaCompatible: false, issues: [], deps: [] };
     }
-    const file = await this.rpc().readFile(remotePath);
-    return parseBeadsJsonl(remotePath, file.content);
+    // Override the helper's default 2 MiB text-read cap: issues.jsonl is
+    // full task history (including tombstones), not a preview, and routinely
+    // outgrows 2 MiB on active projects. GRAPH_READ_MAX_BYTES sits well under
+    // the helper's own 12 MiB frame-size ceiling (maxReadFileCapBytes), which
+    // clamps a caller-requested override rather than honoring it verbatim.
+    const file = await this.rpc().readFile(remotePath, { maxBytes: GRAPH_READ_MAX_BYTES });
+    return toTaskGraph(remotePath, file);
   }
   async getTask(issueId: string): Promise<BeadsIssue | null> {
     const graph = await this.getTaskGraph();

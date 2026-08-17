@@ -64,7 +64,42 @@ interface ChangesState {
   evict: (projectId: string) => void;
 }
 
+/**
+ * Refresh scheduling is deliberately kept outside the Zustand state: it is
+ * transient control flow, not panel data. Each project gets one active drain
+ * plus one coalesced follow-up request, so a watch burst cannot create a queue
+ * of full provider reads.
+ */
+interface RefreshCoordinator {
+  lifecycle: number;
+  requestGeneration: number;
+  pending: boolean;
+  drain: Promise<void> | null;
+}
+
+interface RefreshRun {
+  lifecycle: number;
+  requestGeneration: number;
+  activeWorktree: string | null;
+  target: DiffTarget;
+}
+
 export const useChangesStore = create<ChangesState>((set, get) => {
+  const refreshCoordinators = new Map<string, RefreshCoordinator>();
+
+  const coordinatorFor = (projectId: string): RefreshCoordinator => {
+    const existing = refreshCoordinators.get(projectId);
+    if (existing) return existing;
+    const coordinator: RefreshCoordinator = {
+      lifecycle: 0,
+      requestGeneration: 0,
+      pending: false,
+      drain: null,
+    };
+    refreshCoordinators.set(projectId, coordinator);
+    return coordinator;
+  };
+
   /** Patch a single project's slice immutably; absent slices start empty. */
   const patch = (projectId: string, p: Partial<ChangesSlice>): void =>
     set((s) => ({
@@ -74,63 +109,149 @@ export const useChangesStore = create<ChangesState>((set, get) => {
       },
     }));
 
+  const invalidateRefresh = (projectId: string): void => {
+    const coordinator = coordinatorFor(projectId);
+    coordinator.lifecycle += 1;
+    coordinator.requestGeneration += 1;
+    // A request made before the lifecycle transition must not cause a rerun
+    // after disconnect/eviction. A later refresh can still join the active
+    // drain and will execute against this new lifecycle.
+    coordinator.pending = false;
+  };
+
+  const isCurrentRun = (
+    projectId: string,
+    coordinator: RefreshCoordinator,
+    run: RefreshRun,
+  ): boolean =>
+    coordinator.lifecycle === run.lifecycle &&
+    coordinator.requestGeneration === run.requestGeneration &&
+    (useWorktreeStore.getState().byProject[projectId]?.activeWorktree ?? null) === run.activeWorktree &&
+    (get().byProject[projectId]?.target ?? 'head') === run.target;
+
+  const runRefresh = async (
+    projectId: string,
+    coordinator: RefreshCoordinator,
+  ): Promise<RefreshRun> => {
+    // The active worktree is owned by `worktreeStore` (single owner of
+    // `(worktrees, activeWorktree)`); read the current selection from there.
+    const activeWorktree =
+      useWorktreeStore.getState().byProject[projectId]?.activeWorktree ?? null;
+    const slice = get().byProject[projectId];
+    const target: DiffTarget = slice?.target ?? 'head';
+    const run: RefreshRun = {
+      lifecycle: coordinator.lifecycle,
+      requestGeneration: coordinator.requestGeneration,
+      activeWorktree,
+      target,
+    };
+    const isCurrent = (): boolean => isCurrentRun(projectId, coordinator, run);
+
+    if (activeWorktree === null) {
+      if (isCurrent()) patch(projectId, { changeset: null });
+      return run;
+    }
+
+    // If the last changeset belonged to a DIFFERENT worktree, the selection
+    // just changed (picker / cwd-follow): drop the stale changeset + selection
+    // so the panel shows a spinner instead of another worktree's files. A
+    // same-worktree refresh (a watch event) keeps last-good — no flicker.
+    if (slice?.changeset && slice.changeset.worktree !== activeWorktree && isCurrent()) {
+      patch(projectId, { changeset: null, selectedPath: null });
+    }
+    if (isCurrent()) patch(projectId, { loading: true });
+
+    try {
+      // Re-resolve the branch-point on every refresh so it tracks new commits.
+      let baseline: string | undefined;
+      let branchPoint: BranchPoint | null | undefined = get().byProject[projectId]?.branchPoint;
+      if (target === 'branchPoint') {
+        const resolved = await agentCockpit.provider.resolveBranchPoint(activeWorktree, projectId);
+        if (!isCurrent()) return run;
+        branchPoint = resolved;
+        baseline = resolved?.mergeBase;
+        patch(projectId, { branchPoint });
+      } else {
+        // HEAD mode: clear any stale branch-point and use the provider default.
+        baseline = undefined;
+        branchPoint = undefined;
+      }
+
+      const changeset = await agentCockpit.provider.getChangeset(activeWorktree, baseline, projectId);
+      if (!isCurrent()) return run;
+      patch(projectId, { changeset, baseline, branchPoint });
+      // Restore the per-project selected file, but only when nothing is
+      // selected yet (don't clobber an active selection) and it still exists.
+      if (get().byProject[projectId]?.selectedPath == null) {
+        const saved = readFocus('ch-sel', projectId);
+        if (saved && changeset.files.some((f) => f.newPath === saved) && isCurrent()) {
+          patch(projectId, { selectedPath: saved });
+        }
+      }
+    } catch {
+      if (!isCurrent()) return run;
+      // Keep last-good changeset on transient errors. The drain owns clearing
+      // loading so it remains true while a coalesced trailing run is pending.
+    }
+    return run;
+  };
+
+  const drainRefreshes = async (
+    projectId: string,
+    coordinator: RefreshCoordinator,
+    drain: Promise<void>,
+    resolveDrain: () => void,
+  ): Promise<void> => {
+    while (true) {
+      coordinator.pending = false;
+      const completedRun = await runRefresh(projectId, coordinator);
+      if (coordinator.pending) continue;
+
+      // Clear ownership before either notifying loading=false subscribers or
+      // resolving callers. A refresh queued in a later microtask therefore
+      // starts a new drain instead of attaching to one that has already ended.
+      // Identity prevents an old drain's finalizer from clearing a replacement.
+      if (coordinator.drain !== drain) return;
+      coordinator.drain = null;
+      resolveDrain();
+
+      // Never let a stale run's finalizer mutate newer target/worktree/lifecycle
+      // state. Evicted slices are intentionally not recreated.
+      if (get().byProject[projectId] && isCurrentRun(projectId, coordinator, completedRun)) {
+        patch(projectId, { loading: false });
+      }
+      return;
+    }
+  };
+
+  const scheduleRefresh = (projectId: string): Promise<void> => {
+    const coordinator = coordinatorFor(projectId);
+    coordinator.requestGeneration += 1;
+    if (coordinator.drain) {
+      coordinator.pending = true;
+      return coordinator.drain;
+    }
+
+    // An idle project with no active worktree has no provider pipeline to
+    // coordinate; preserve the existing no-op behavior.
+    if (useWorktreeStore.getState().byProject[projectId]?.activeWorktree == null) {
+      patch(projectId, { changeset: null, loading: false });
+      return Promise.resolve();
+    }
+
+    let resolveDrain!: () => void;
+    const drain = new Promise<void>((resolve) => {
+      resolveDrain = resolve;
+    });
+    coordinator.drain = drain;
+    void drainRefreshes(projectId, coordinator, drain, resolveDrain);
+    return drain;
+  };
+
   return {
     byProject: {},
 
-    refresh: async (projectId) => {
-      // The active worktree is owned by `worktreeStore` (single owner of
-      // `(worktrees, activeWorktree)`); read the current selection from there.
-      const activeWorktree =
-        useWorktreeStore.getState().byProject[projectId]?.activeWorktree ?? null;
-      const slice = get().byProject[projectId];
-      if (activeWorktree === null) {
-        patch(projectId, { changeset: null });
-        return;
-      }
-      // If the last changeset belonged to a DIFFERENT worktree, the selection
-      // just changed (picker / cwd-follow): drop the stale changeset + selection
-      // so the panel shows a spinner instead of another worktree's files. A
-      // same-worktree refresh (a watch event) keeps last-good — no flicker.
-      if (slice?.changeset && slice.changeset.worktree !== activeWorktree) {
-        patch(projectId, { changeset: null, selectedPath: null });
-      }
-      const target: DiffTarget = get().byProject[projectId]?.target ?? 'head';
-      patch(projectId, { loading: true });
-      try {
-        // Re-resolve the branch-point on every refresh so it tracks new commits.
-        let baseline: string | undefined;
-        let branchPoint: BranchPoint | null | undefined = get().byProject[projectId]?.branchPoint;
-        if (target === 'branchPoint') {
-          const resolved = await agentCockpit.provider.resolveBranchPoint(activeWorktree, projectId);
-          // Stale guard: slice may have been evicted while awaiting the RPC.
-          if (!get().byProject[projectId]) return;
-          branchPoint = resolved;
-          baseline = resolved?.mergeBase;
-          patch(projectId, { branchPoint });
-        } else {
-          // HEAD mode: clear any stale branch-point and use the provider default.
-          baseline = undefined;
-          branchPoint = undefined;
-        }
-
-        const changeset = await agentCockpit.provider.getChangeset(activeWorktree, baseline, projectId);
-        // Stale-resolution guard: discard if the slice was evicted mid-load.
-        if (!get().byProject[projectId]) return;
-        patch(projectId, { changeset, baseline, branchPoint, loading: false });
-        // Restore the per-project selected file, but only when nothing is
-        // selected yet (don't clobber an active selection) and it still exists.
-        if (get().byProject[projectId]?.selectedPath == null) {
-          const saved = readFocus('ch-sel', projectId);
-          if (saved && changeset.files.some((f) => f.newPath === saved)) {
-            patch(projectId, { selectedPath: saved });
-          }
-        }
-      } catch {
-        if (!get().byProject[projectId]) return;
-        // Keep last-good changeset (transient) but clear loading.
-        patch(projectId, { loading: false });
-      }
-    },
+    refresh: scheduleRefresh,
 
     select: (projectId, path) => {
       writeFocus('ch-sel', projectId, path);
@@ -142,16 +263,20 @@ export const useChangesStore = create<ChangesState>((set, get) => {
       await get().refresh(projectId);
     },
 
-    clearForDisconnect: (projectId) =>
-      set((s) => ({ byProject: { ...s.byProject, [projectId]: emptySlice() } })),
+    clearForDisconnect: (projectId) => {
+      invalidateRefresh(projectId);
+      set((s) => ({ byProject: { ...s.byProject, [projectId]: emptySlice() } }));
+    },
 
-    evict: (projectId) =>
+    evict: (projectId) => {
+      invalidateRefresh(projectId);
       set((s) => {
         if (!(projectId in s.byProject)) return s;
         const next = { ...s.byProject };
         delete next[projectId];
         return { byProject: next };
-      }),
+      });
+    },
   };
 });
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FileChange, FileChangeStatus } from '@shared/ipc/channels';
 import {
   Badge,
@@ -50,6 +50,34 @@ const FILTERS: { id: FilterMode; label: string }[] = [
   { id: 'untracked', label: 'untracked' },
 ];
 
+/**
+ * Changes rows are deliberately fixed-height so the PanelBody scroll range can
+ * be virtualized without measuring every file. Eight viewport-adjacent rows
+ * are retained above/below the viewport for smooth wheel scrolling.
+ */
+const CHANGE_ROW_HEIGHT = 28;
+const CHANGE_ROW_OVERSCAN = 8;
+const DEFAULT_VIEWPORT_HEIGHT = 400;
+
+interface VirtualRange {
+  start: number;
+  end: number;
+}
+
+function getVirtualRange(
+  itemCount: number,
+  scrollTop: number,
+  viewportHeight: number,
+): VirtualRange {
+  const firstVisible = Math.floor(scrollTop / CHANGE_ROW_HEIGHT);
+  const visibleCount = Math.ceil(viewportHeight / CHANGE_ROW_HEIGHT);
+
+  return {
+    start: Math.max(0, firstVisible - CHANGE_ROW_OVERSCAN),
+    end: Math.min(itemCount, firstVisible + visibleCount + CHANGE_ROW_OVERSCAN),
+  };
+}
+
 /** Tracked (changed) statuses, i.e. not untracked/ignored. */
 function isChanged(status: FileChangeStatus): boolean {
   return status !== 'untracked' && status !== 'ignored';
@@ -99,6 +127,9 @@ export function ChangesPanel(): JSX.Element {
 
   const [text, setText] = useState('');
   const [mode, setMode] = useState<FilterMode>('all');
+  const listRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(DEFAULT_VIEWPORT_HEIGHT);
   const showAllChanges = useSettingsStore((s) => s.settings.showAllChanges);
 
   const files = useMemo(() => changeset?.files ?? [], [changeset]);
@@ -136,6 +167,43 @@ export function ChangesPanel(): JSX.Element {
   ];
 
   const count = `${filtered.length}/${surfaced.length}`;
+  const virtualRange = getVirtualRange(filtered.length, scrollTop, viewportHeight);
+
+  // PanelBody remains the only scroll owner. The list is its direct child, so
+  // use its parent to observe and drive the virtual window without introducing
+  // a nested scrolling region.
+  useLayoutEffect(() => {
+    const scroller = listRef.current?.parentElement;
+    if (!scroller) return;
+
+    const nextViewportHeight = scroller.clientHeight || DEFAULT_VIEWPORT_HEIGHT;
+    const maxScrollTop = Math.max(0, filtered.length * CHANGE_ROW_HEIGHT - nextViewportHeight);
+    if (scroller.scrollTop > maxScrollTop) scroller.scrollTop = maxScrollTop;
+
+    setViewportHeight(nextViewportHeight);
+    setScrollTop(scroller.scrollTop);
+  }, [filtered.length]);
+
+  useEffect(() => {
+    const scroller = listRef.current?.parentElement;
+    if (!scroller) return;
+
+    const syncViewport = (): void => {
+      setViewportHeight(scroller.clientHeight || DEFAULT_VIEWPORT_HEIGHT);
+      setScrollTop(scroller.scrollTop);
+    };
+
+    syncViewport();
+    scroller.addEventListener('scroll', syncViewport);
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(syncViewport);
+    resizeObserver?.observe(scroller);
+
+    return () => {
+      scroller.removeEventListener('scroll', syncViewport);
+      resizeObserver?.disconnect();
+    };
+  }, [filtered.length]);
 
   // Manual refresh escape hatch (store-backed): re-invokes the existing
   // refresh action for the active project. No new data path — refresh()
@@ -229,39 +297,50 @@ export function ChangesPanel(): JSX.Element {
         ) : filtered.length === 0 ? (
           <EmptyState title="No matching files" hint="Adjust the filter to see changes" />
         ) : (
-          filtered.map((file) => {
-            const glyph = STATUS_GLYPH[file.status];
-            const descriptor: FileRowDescriptor = {
-              relPath: file.newPath,
-              worktreePath: activeWorktree,
-              isDir: false,
-              downloadable: file.status !== 'deleted',
-            };
-            const menuItems = buildFileRowMenuItems(descriptor, { activeProject, onActionComplete });
-            return (
-              <ContextMenu key={file.newPath} items={menuItems}>
-                <Row
-                  active={selectedPath === file.newPath}
-                  onClick={() => selectFile(file)}
-                  prefix={
-                    <Badge tone={glyph.tone} aria-label={file.status} title={file.status}>
-                      {glyph.letter}
-                    </Badge>
-                  }
-                  suffix={
-                    <span className="flex items-center gap-1 text-[10px] text-dim">
-                      {file.isBinary && <span title="binary">bin</span>}
-                      {file.staged && <span title="staged" className="text-added">staged</span>}
+          <div
+            ref={listRef}
+            data-testid="changes-virtual-list"
+            className="relative"
+            style={{ height: filtered.length * CHANGE_ROW_HEIGHT }}
+          >
+            {filtered.slice(virtualRange.start, virtualRange.end).map((file, index) => {
+              const rowIndex = virtualRange.start + index;
+              const glyph = STATUS_GLYPH[file.status];
+              const descriptor: FileRowDescriptor = {
+                relPath: file.newPath,
+                worktreePath: activeWorktree,
+                isDir: false,
+                downloadable: file.status !== 'deleted',
+              };
+              const menuItems = buildFileRowMenuItems(descriptor, { activeProject, onActionComplete });
+              return (
+                <ContextMenu key={file.newPath} items={menuItems}>
+                  <Row
+                    data-testid="change-file-row"
+                    active={selectedPath === file.newPath}
+                    onClick={() => selectFile(file)}
+                    className="absolute inset-x-0"
+                    style={{ top: rowIndex * CHANGE_ROW_HEIGHT, height: CHANGE_ROW_HEIGHT }}
+                    prefix={
+                      <Badge tone={glyph.tone} aria-label={file.status} title={file.status}>
+                        {glyph.letter}
+                      </Badge>
+                    }
+                    suffix={
+                      <span className="flex items-center gap-1 text-[10px] text-dim">
+                        {file.isBinary && <span title="binary">bin</span>}
+                        {file.staged && <span title="staged" className="text-added">staged</span>}
+                      </span>
+                    }
+                  >
+                    <span className={cn('truncate', file.isGenerated && 'text-dim italic')}>
+                      {file.newPath}
                     </span>
-                  }
-                >
-                  <span className={cn('truncate', file.isGenerated && 'text-dim italic')}>
-                    {file.newPath}
-                  </span>
-                </Row>
-              </ContextMenu>
-            );
-          })
+                  </Row>
+                </ContextMenu>
+              );
+            })}
+          </div>
         )}
       </PanelBody>
     </Panel>

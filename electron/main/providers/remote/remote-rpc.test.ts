@@ -16,7 +16,7 @@ import {
   encodeFrame,
   type RpcStream,
 } from './rpcClient';
-import { assembleChangeset, mapGitStatus, toFileBytesResult, toFileReadResult } from './index';
+import { assembleChangeset, mapGitStatus, toFileBytesResult, toFileReadResult, toTaskGraph } from './index';
 import type { ReadFileBytesResult, ReadFileResult } from './rpcClient';
 import { deriveWatchSpec } from '@shared/watch/policy';
 
@@ -407,6 +407,36 @@ describe('toFileReadResult (br r3s6 REJECT fix: content-nulling + true sizeBytes
     const result = toFileReadResult(malformed);
     expect(result.isBinary).toBe(false);
     expect(result.content).toBe('text');
+  });
+});
+
+describe('toTaskGraph (video_manager diagnosis: truncated .beads/issues.jsonl must not read as an empty graph)', () => {
+  // Same no-transport-injection precedent as toFileReadResult above: this pure
+  // adapter is exported from index.ts so getTaskGraph()'s truncation handling
+  // is unit-testable without a live SSH host + built helper.
+
+  it('parses a normal (non-truncated) read into a task graph', () => {
+    const line = JSON.stringify({
+      id: 'h1.1',
+      title: 'Do the thing',
+      status: 'open',
+      priority: 2,
+      issue_type: 'task',
+    });
+    const res: ReadFileResult = { content: line, truncated: false, isBinary: false, sizeBytes: line.length };
+    const graph = toTaskGraph('/srv/repo/.beads/issues.jsonl', res);
+    expect(graph.schemaCompatible).toBe(true);
+    expect(graph.issues).toHaveLength(1);
+    expect(graph.issues[0]?.id).toBe('h1.1');
+  });
+
+  it('throws (never silently parses empty content as a zero-issue graph) when the helper reports truncated: true', () => {
+    // This is the exact wire shape returned when issues.jsonl exceeds the
+    // helper's read cap: content is empty, truncated is true. Before the fix,
+    // this parsed to {issues: [], deps: []} and rendered as an ordinary
+    // "no tasks" empty state with no error surfaced anywhere.
+    const res: ReadFileResult = { content: '', truncated: true, isBinary: false, sizeBytes: 2_099_063 };
+    expect(() => toTaskGraph('/srv/repo/.beads/issues.jsonl', res)).toThrow(/too large/i);
   });
 });
 

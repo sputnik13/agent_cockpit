@@ -48,6 +48,17 @@ function makeChangeset(files: FileChange[]): Changeset {
   };
 }
 
+function makeLargeChangeset(count: number): Changeset {
+  return makeChangeset(
+    Array.from({ length: count }, (_, index) =>
+      makeFile({
+        status: index % 2 === 0 ? 'modified' : 'untracked',
+        newPath: `src/${index.toString().padStart(5, '0')}.ts`,
+      }),
+    ),
+  );
+}
+
 function installApi(overrides: {
   listWorktrees?: ReturnType<typeof vi.fn>;
   getChangeset?: ReturnType<typeof vi.fn>;
@@ -221,6 +232,66 @@ describe('ChangesPanel', () => {
     });
     await screen.findByText('.beads/issues.jsonl');
     expect(screen.getByText('2/2')).toBeInTheDocument();
+  });
+
+  it('virtualizes a 10,000-row list while preserving scroll, selection, and context menus', async () => {
+    installApi({ getChangeset: vi.fn().mockResolvedValue(makeLargeChangeset(10_000)) });
+    const { ChangesPanel, useChangesStore } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    await screen.findByText('src/00000.ts');
+    // jsdom has no layout, so ChangesPanel's documented 400 px viewport fallback
+    // mounts at most 31 rows: ceil(400 / 28) visible + 8-row overscan per side.
+    expect(screen.getAllByTestId('change-file-row')).toHaveLength(23);
+
+    const list = screen.getByTestId('changes-virtual-list');
+    expect(list).toHaveStyle({ height: '280000px' });
+    const scroller = list.parentElement!;
+    scroller.scrollTop = 28 * 9_000;
+    fireEvent.scroll(scroller);
+
+    const laterRow = await screen.findByText('src/09000.ts');
+    expect(screen.queryByText('src/00000.ts')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('change-file-row').length).toBeLessThanOrEqual(31);
+
+    fireEvent.click(laterRow);
+    await waitFor(() => {
+      expect(useChangesStore.getState().byProject[PROJECT]!.selectedPath).toBe('src/09000.ts');
+    });
+
+    fireEvent.contextMenu(laterRow);
+    expect(await screen.findByText(COPY_RELATIVE_LABEL)).toBeInTheDocument();
+  });
+
+  it('clamps virtual scrolling when a text filter or refreshed changeset shrinks the list', async () => {
+    const getChangeset = vi
+      .fn()
+      .mockResolvedValueOnce(makeLargeChangeset(10_000))
+      .mockResolvedValueOnce(makeChangeset([makeFile({ status: 'modified', newPath: 'src/after.ts' })]));
+    installApi({ getChangeset });
+    const { ChangesPanel } = await loadModules();
+    render(<ChangesPanel />);
+    await loadSlice();
+
+    const list = await screen.findByTestId('changes-virtual-list');
+    const scroller = list.parentElement!;
+    scroller.scrollTop = 28 * 9_000;
+    fireEvent.scroll(scroller);
+    await screen.findByText('src/09000.ts');
+
+    fireEvent.change(screen.getByLabelText('Filter files'), { target: { value: '09999' } });
+    expect(await screen.findByText('src/09999.ts')).toBeInTheDocument();
+    expect(scroller.scrollTop).toBe(0);
+
+    fireEvent.change(screen.getByLabelText('Filter files'), { target: { value: '' } });
+    scroller.scrollTop = 28 * 9_000;
+    fireEvent.scroll(scroller);
+    await screen.findByText('src/09000.ts');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh changes' }));
+    expect(await screen.findByText('src/after.ts')).toBeInTheDocument();
+    expect(scroller.scrollTop).toBe(0);
   });
 });
 

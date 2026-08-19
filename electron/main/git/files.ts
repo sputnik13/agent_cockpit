@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import simpleGit from 'simple-git';
 
 const DEFAULT_MAX_BYTES = 1024 * 256; // 256 KiB
@@ -36,7 +36,7 @@ export async function getFile(
     }
     return { content: buf.toString('utf8'), truncated: false, isBinary: false, sizeBytes };
   }
-  const full = join(worktreePath, filePath);
+  const full = isAbsolute(filePath) ? filePath : join(worktreePath, filePath);
   let st;
   try {
     st = statSync(full);

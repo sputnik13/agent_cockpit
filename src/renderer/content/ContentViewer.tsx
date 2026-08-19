@@ -420,6 +420,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                   changedLineSet={changedLineSet}
                   linkContext={{ projectId: activeId, base: linkBase }}
                   filePath={path}
+                  oldSource={diff.kind === 'ready' ? diff.oldContent : null}
                 />
               ))}
 

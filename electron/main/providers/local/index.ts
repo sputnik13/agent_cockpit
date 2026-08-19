@@ -125,9 +125,14 @@ export class LocalProvider implements WorkspaceProvider {
       // worktree's content is highlighted — matching remote, which already reads
       // the new side from the worktree.
       localReadFile(this.rootPath, filePath, { worktreePath: cwd }),
-      baseline
-        ? localReadFile(this.rootPath, filePath, { ref: baseline, worktreePath: cwd })
-        : Promise.resolve(null),
+      // No explicit baseline means "compare against HEAD" (the default diff
+      // target), not "there is no old side" — read at the literal 'HEAD' ref so
+      // the default view resolves old content the same way an explicit
+      // baseline would. A genuinely new file still resolves to null: getFile's
+      // ref branch catches a failed `git cat-file` (path absent at that ref)
+      // and returns content: null, so "no history at this ref" and "no
+      // baseline supplied" stay correctly distinct.
+      localReadFile(this.rootPath, filePath, { ref: baseline || 'HEAD', worktreePath: cwd }),
     ]);
     const usable = (r: FileReadResult | null): string | null =>
       r && !r.truncated && !r.isBinary ? r.content : null;

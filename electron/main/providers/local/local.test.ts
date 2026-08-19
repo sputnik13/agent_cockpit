@@ -71,6 +71,24 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     expect(diff).toContain('changed');
   });
 
+  it('reads an absolute path outside the project root (external-file Explorer selection)', async () => {
+    // Regression: getFile() used to unconditionally `join(worktreePath,
+    // filePath)`, which mangles an already-absolute filePath into a bogus
+    // nested path (e.g. /project/root/private/tmp/...) instead of resolving
+    // it as-is — the "file not found" bug for an Explorer external-file
+    // selection outside the project tree.
+    const outside = mkdtempSync(join(tmpdir(), 'cockpit-external-'));
+    try {
+      const externalFile = join(outside, 'external.txt');
+      writeFileSync(externalFile, 'outside content\n');
+      const p = new LocalProvider('proj', repo);
+      const file = await p.readFile(externalFile, { worktreePath: '' });
+      expect(file.content).toContain('outside content');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('lists directories (dirs first) relative to the project root', async () => {
     mkdirSync(join(repo, 'src'), { recursive: true });
     writeFileSync(join(repo, 'src', 'a.ts'), 'a');
@@ -118,6 +136,39 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     const p = new LocalProvider('proj', repo);
     expect((await p.stat('README.md')).exists).toBe(true);
     expect((await p.stat('nope.md')).exists).toBe(false);
+  });
+
+  describe('getDiffBundle (default-target old-content, local_repo_explorer-1jpc)', () => {
+    it('resolves non-null oldContent for a HEAD-tracked file under the default (no baseline) target', async () => {
+      const p = new LocalProvider('proj', repo);
+      const bundle = await p.getDiffBundle(repo, 'README.md');
+      expect(bundle.oldContent).toContain('original');
+      expect(bundle.newContent).toContain('changed');
+    });
+
+    it('still resolves null oldContent for a genuinely new (untracked, no HEAD copy) file under the default target', async () => {
+      const p = new LocalProvider('proj', repo);
+      const bundle = await p.getDiffBundle(repo, 'new.txt');
+      expect(bundle.oldContent).toBeNull();
+      expect(bundle.newContent).toContain('hello');
+    });
+
+    it('leaves explicit-baseline behavior unchanged: an explicit ref resolves old content AT that ref, not HEAD', async () => {
+      // Commit the working change so HEAD moves past the original content, then
+      // pass the FIRST commit's SHA as an explicit baseline — if the default-
+      // to-HEAD fix ever regressed explicit baselines to silently mean HEAD,
+      // this would return the (wrong) second commit's content instead of the
+      // first's.
+      const firstSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+      git(repo, ['add', '.']);
+      git(repo, ['commit', '-q', '-m', 'second']);
+      writeFileSync(join(repo, 'README.md'), '# Title\n\nchanged again\n');
+
+      const p = new LocalProvider('proj', repo);
+      const bundle = await p.getDiffBundle(repo, 'README.md', firstSha);
+      expect(bundle.oldContent).toContain('original');
+      expect(bundle.newContent).toContain('changed again');
+    });
   });
 
   describe('exportFile (Download capability)', () => {

@@ -944,3 +944,166 @@ func TestGitBranchPointUpstream(t *testing.T) {
 	}
 }
 
+// --- handleGetDiffBundle (local_repo_explorer-1jpc, amendment 1) ---
+//
+// Server-side counterpart to LocalProvider.getDiffBundle's `ref: baseline ||
+// 'HEAD'` fix: when no explicit Baseline is supplied (the app's default
+// "Working tree vs HEAD" diff target), the old-side read must still resolve
+// against HEAD instead of being skipped, while the patch-generation branch
+// (git's own diff default: index vs working tree) stays untouched.
+
+// stageFile stages path (relative to dir) into the index WITHOUT committing —
+// used to set up a staged-vs-unstaged split for the patch-args regression
+// guard below.
+func stageFile(t *testing.T, dir string, paths ...string) {
+	t.Helper()
+	addArgs := append([]string{"add"}, paths...)
+	addCmd := exec.Command("git", addArgs...)
+	addCmd.Dir = dir
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+}
+
+// TestGetDiffBundleDefaultBaseline pins the two shapes amendment 1 must
+// distinguish, IN THE SAME test run: an empty Baseline resolves old content
+// at HEAD when the file exists there, and still resolves no old content —
+// for the RIGHT reason, a real absent-at-HEAD gitShowCapped failure, not a
+// blanket skip — when the file is genuinely new.
+func TestGetDiffBundleDefaultBaseline(t *testing.T) {
+	t.Run("file exists at HEAD", func(t *testing.T) {
+		dir := initRepo(t) // commits tracked.txt = "hello\n"
+		if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("hello\nworld\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := handleGetDiffBundle(json.RawMessage(`{"cwd":` + jstr(dir) + `,"path":"tracked.txt"}`))
+		if err != nil {
+			t.Fatalf("getDiffBundle: %v", err)
+		}
+		r := res.(getDiffBundleResult)
+		if !r.OldReadable {
+			t.Fatalf("expected OldReadable=true for a file present at HEAD with empty Baseline, got %+v", r)
+		}
+		if r.OldContent != "hello\n" {
+			t.Fatalf("OldContent = %q, want %q (HEAD content)", r.OldContent, "hello\n")
+		}
+		if r.OldTruncated {
+			t.Fatalf("unexpected truncation: %+v", r)
+		}
+		if !r.NewReadable || r.NewContent != "hello\nworld\n" {
+			t.Fatalf("unexpected new side: %+v", r)
+		}
+		if !strings.Contains(r.Patch, "+world") {
+			t.Fatalf("expected patch to contain the working-tree addition, got:\n%s", r.Patch)
+		}
+	})
+
+	t.Run("genuinely new file absent at HEAD", func(t *testing.T) {
+		dir := initRepo(t)
+		if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("brand new\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := handleGetDiffBundle(json.RawMessage(`{"cwd":` + jstr(dir) + `,"path":"new.txt"}`))
+		if err != nil {
+			t.Fatalf("getDiffBundle: %v", err)
+		}
+		r := res.(getDiffBundleResult)
+		if r.OldReadable {
+			t.Fatalf("expected OldReadable=false for a file absent at HEAD (real absent-at-ref detection, not a blanket skip), got %+v", r)
+		}
+		if r.OldContent != "" {
+			t.Fatalf("expected empty OldContent for a file absent at HEAD, got %q", r.OldContent)
+		}
+		if !r.NewReadable || r.NewContent != "brand new\n" {
+			t.Fatalf("unexpected new side: %+v", r)
+		}
+	})
+}
+
+// TestGetDiffBundleExplicitBaselineUnchanged pins that an explicit Baseline
+// (e.g. a Branch-point ref) still reads old content AT that ref, not HEAD —
+// pre-existing behavior the amendment-1 fix must not regress.
+func TestGetDiffBundleExplicitBaselineUnchanged(t *testing.T) {
+	dir := initRepo(t) // commit 1: tracked.txt = "hello\n"
+
+	revParse := exec.Command("git", "rev-parse", "HEAD")
+	revParse.Dir = dir
+	out, err := revParse.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v\n%s", err, out)
+	}
+	firstSHA := strings.TrimSpace(string(out))
+
+	// Commit 2 moves HEAD past the captured baseline.
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("hello\nsecond\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, dir, "second commit", "tracked.txt")
+
+	// Uncommitted working-tree edit on top of commit 2.
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("hello\nsecond\nthird\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := handleGetDiffBundle(json.RawMessage(`{"cwd":` + jstr(dir) + `,"path":"tracked.txt","baseline":` + jstr(firstSHA) + `}`))
+	if err != nil {
+		t.Fatalf("getDiffBundle: %v", err)
+	}
+	r := res.(getDiffBundleResult)
+	if !r.OldReadable || r.OldContent != "hello\n" {
+		t.Fatalf("expected old content read AT the explicit baseline (commit 1), got OldReadable=%v OldContent=%q", r.OldReadable, r.OldContent)
+	}
+	if !strings.Contains(r.Patch, "+second") {
+		t.Fatalf("expected patch computed against the explicit baseline, got:\n%s", r.Patch)
+	}
+}
+
+// TestGetDiffBundlePatchUnchangedByFix is the patch-args regression guard:
+// the patch-generation branch (git's own diff default — index vs working
+// tree) must be unaffected by the old-side HEAD default this fix
+// introduces. A staged addition is deliberately invisible to `git diff`
+// with no baseline (it's already in the index); if a future edit ever
+// widened the HEAD default to the patch args too, the staged line would
+// wrongly appear in the returned Patch.
+func TestGetDiffBundlePatchUnchangedByFix(t *testing.T) {
+	dir := initRepo(t) // tracked.txt = "hello\n" at HEAD
+
+	// Stage one addition (index now differs from HEAD; working tree == index).
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("hello\nalpha-staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stageFile(t, dir, "tracked.txt")
+
+	// Then make a further, UNSTAGED edit on top (working tree now differs
+	// from the index too).
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("hello\nalpha-staged\nbeta-unstaged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := handleGetDiffBundle(json.RawMessage(`{"cwd":` + jstr(dir) + `,"path":"tracked.txt"}`))
+	if err != nil {
+		t.Fatalf("getDiffBundle: %v", err)
+	}
+	r := res.(getDiffBundleResult)
+
+	// Patch guardrail: git's default `git diff` (no baseline) compares the
+	// INDEX to the working tree, so only the unstaged line is new — the
+	// staged line is already in the index and must NOT appear as an
+	// addition. This is exactly today's pre-fix behavior for the args
+	// branch (untouched by this change): a regression that defaulted
+	// Baseline to HEAD for patch generation too would make "alpha-staged"
+	// show up as an addition as well.
+	if !strings.Contains(r.Patch, "+beta-unstaged") {
+		t.Fatalf("expected patch to show the unstaged addition, got:\n%s", r.Patch)
+	}
+	if strings.Contains(r.Patch, "+alpha-staged") {
+		t.Fatalf("patch must not show the already-staged line as an addition (would indicate the patch-args branch regressed to a HEAD default), got:\n%s", r.Patch)
+	}
+
+	// Old-side guardrail: the OLD side still defaults to HEAD regardless of
+	// the staged index — this is the fix's own new behavior, independent of
+	// the untouched patch-args branch above.
+	if !r.OldReadable || r.OldContent != "hello\n" {
+		t.Fatalf("expected old content read at HEAD despite staged changes, got OldReadable=%v OldContent=%q", r.OldReadable, r.OldContent)
+	}
+}

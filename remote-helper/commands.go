@@ -433,11 +433,20 @@ func handleGetDiffBundle(raw json.RawMessage) (interface{}, error) {
 	if content, truncated, rerr := readCappedFile(filepath.Join(p.Cwd, p.Path)); rerr == nil {
 		res.NewContent, res.NewTruncated, res.NewReadable = content, truncated, true
 	}
-	// Old side: content at the baseline ref. Tolerant — an added file has none.
-	if p.Baseline != "" {
-		if content, truncated, gerr := gitShowCapped(p.Cwd, p.Baseline, p.Path); gerr == nil {
-			res.OldContent, res.OldTruncated, res.OldReadable = content, truncated, true
-		}
+	// Old side: content at the baseline ref, defaulting to HEAD when no
+	// explicit baseline was supplied (the default "Working tree vs HEAD" diff
+	// target) — mirrors the TS-side `ref: baseline || 'HEAD'` fix in
+	// LocalProvider.getDiffBundle. Tolerant: gitShowCapped failing (path
+	// absent at that ref) leaves OldReadable false, so a genuinely new file
+	// still resolves to no old content — "no baseline supplied" and "no
+	// history at this ref" stay distinct. The patch-generation args above are
+	// untouched; Baseline keeps its exact current meaning there.
+	oldRef := p.Baseline
+	if oldRef == "" {
+		oldRef = "HEAD"
+	}
+	if content, truncated, gerr := gitShowCapped(p.Cwd, oldRef, p.Path); gerr == nil {
+		res.OldContent, res.OldTruncated, res.OldReadable = content, truncated, true
 	}
 	return res, nil
 }

@@ -52,7 +52,13 @@ import type { RemoteTransport } from './transportTypes';
 import { writeStreamToDest } from '../exportWrite';
 import { FILE_BYTES_CAP } from '@shared/providers/fileBytesCap';
 import { RemoteHelperLauncher, type LaunchedHelper } from './helper';
-import type { GitStatusEntry, HelperRpcClient, ReadFileBytesResult, ReadFileResult } from './rpcClient';
+import type {
+  GitDiffBundleResult,
+  GitStatusEntry,
+  HelperRpcClient,
+  ReadFileBytesResult,
+  ReadFileResult,
+} from './rpcClient';
 import { beadsArgs, beadsErrorMessage, parseComments, parseCreatedId } from '../../beads/runner';
 import { RemoteTerminalManager } from './tmux';
 import { RemoteTmuxControlManager, type ControlChannel } from './tmuxControl';
@@ -332,6 +338,21 @@ export function toFileReadResult(res: ReadFileResult): FileReadResult {
     truncated,
     isBinary,
     sizeBytes,
+  };
+}
+
+/** Map the helper's getDiffBundle RPC result into the shared DiffBundle shape.
+ *  Old-side content is gated on the helper's own `oldReadable`/`oldTruncated`
+ *  flags alone — the same gate already applied to `newContent` — never
+ *  re-gated on whether the caller supplied an explicit `baseline`. The helper
+ *  is the sole authority on whether it found old content at the requested
+ *  ref; double-gating here on `baseline` would incorrectly null out old
+ *  content the helper actually read back. */
+export function toDiffBundle(res: GitDiffBundleResult): DiffBundle {
+  return {
+    patch: res.patch,
+    newContent: res.newReadable && !res.newTruncated ? res.newContent : null,
+    oldContent: res.oldReadable && !res.oldTruncated ? res.oldContent : null,
   };
 }
 
@@ -652,14 +673,20 @@ export class RemoteProvider implements WorkspaceProvider {
     // One round trip: patch + both sides' content. The helper reads the new side
     // from the working tree and the old side via `git show <baseline>:<path>`
     // (repo-relative). Unreadable/truncated sides come back as null so the
-    // renderer falls back to plain text for that side.
+    // renderer falls back to plain text for that side. `baseline` is forwarded
+    // exactly as given (including undefined) — this method must not widen it to
+    // a literal 'HEAD' here, because the helper's `getDiffBundle` RPC reuses the
+    // same param to build the `git diff` args for `patch`, and substituting
+    // 'HEAD' would change patch semantics whenever the index has staged changes
+    // (out of scope; patch generation already matches git's own default). See
+    // toDiffBundle's doc comment for the old-content mapping fix on this side;
+    // handleGetDiffBundle (remote-helper/commands.go) completes the other half
+    // server-side — it now defaults its old-side READ (not the patch-args
+    // above) to HEAD when Baseline is empty, so default-target old-content
+    // parity with LocalProvider is complete end to end.
     const cwd = worktreePath || this.spec.remotePath;
     const res = await this.rpc().getDiffBundle(cwd, this.repoRelative(filePath), baseline);
-    return {
-      patch: res.patch,
-      newContent: res.newReadable && !res.newTruncated ? res.newContent : null,
-      oldContent: baseline && res.oldReadable && !res.oldTruncated ? res.oldContent : null,
-    };
+    return toDiffBundle(res);
   }
   async resolveBranchPoint(worktreePath: string): Promise<BranchPoint | null> {
     const cwd = worktreePath || this.spec.remotePath;

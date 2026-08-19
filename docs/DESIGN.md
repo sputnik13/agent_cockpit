@@ -933,6 +933,19 @@ See ARCHITECTURE "Content Panel Structural Folding (JSON/YAML)" for the fold
 model, the worker/cache delivery, the view dispatch, and the runtime
 reclassification rule these decisions produced.
 
+### Rendered-markdown diff highlighting (design breakout)
+
+The Content panel's rendered-markdown preview highlights a changed list by
+wrapping the entire `<ul>`/`<ol>` in one treatment whenever any line inside
+it changed, so a single edited item reads as "the whole list changed." The
+decided fix moves highlighting to per-item granularity — intraline
+word-level diff for a clean edit, a struck-through ghost row for a deleted
+item, and an always-visible detail marker reserved for the one case (complex
+inline markup) where old/new text isn't otherwise both visible at once. See
+[docs/design/ui-rendered-markdown-diff.md](design/ui-rendered-markdown-diff.md)
+for the full decision, alternatives considered, mockups, and design-language
+usage.
+
 ### Terminal & Workgraph Feature Batch
 
 A batch of control-mode-terminal, panel, and workgraph features layered on the
@@ -1135,3 +1148,7 @@ src/shared/
   topology, ownership.
 - [docs/TEST_PLAN.md](TEST_PLAN.md) — test strategy, scope, and known runner
   constraint.
+- [docs/design/ui-rendered-markdown-diff.md](design/ui-rendered-markdown-diff.md) —
+  rendered-view per-item diff-highlighting design breakout.
+- [docs/design/ui-design-language.md](design/ui-design-language.md) — UI
+  design-language record (color roles, component patterns).

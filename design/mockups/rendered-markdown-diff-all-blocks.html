@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Intraline diff for all block types — mockup</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --color-bg: #002b36;
+    --color-panel: #073642;
+    --color-panel-2: #0a3a47;
+    --color-elev: #0d4150;
+    --color-fg: #93a1a1;
+    --color-dim: #586e75;
+    --color-muted: #43585f;
+    --color-accent: #268bd2;
+    --color-edge: #0f3e4b;
+    --color-edge-strong: #164b5a;
+    --color-added: #859900;
+    --color-removed: #dc322f;
+    --color-warn: #b58900;
+    --color-info: #268bd2;
+    --radius: 5px;
+    --font-mono: 'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --mono-size: 13px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  body { padding: 28px 32px 90px; max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 18px; color: var(--color-fg); margin: 0 0 4px; }
+  .sub { color: var(--color-dim); margin: 0 0 24px; font-size: 13px; max-width: 860px; }
+  h2 { font-size: 14px; color: var(--color-fg); margin: 44px 0 4px; border-top: 1px solid var(--color-edge); padding-top: 20px; }
+  .example-note { color: var(--color-dim); font-size: 12px; margin: 0 0 12px; max-width: 860px; }
+
+  .legend {
+    display: flex; gap: 18px; flex-wrap: wrap;
+    padding: 12px 14px; background: var(--color-panel);
+    border: 1px solid var(--color-edge); border-radius: var(--radius);
+    margin-bottom: 8px; font-size: 12px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; flex-shrink: 0; }
+  .swatch.bar { width: 3px; height: 14px; border-radius: 0; }
+
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  .col-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--color-dim); margin-bottom: 6px; font-weight: 600;
+  }
+  .col-label.proposed { color: var(--color-accent); }
+
+  .panel {
+    background: var(--color-bg);
+    border: 1px solid var(--color-edge);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .panel-chrome {
+    padding: 4px 10px; color: var(--color-dim); background: var(--color-panel);
+    border-bottom: 1px solid var(--color-edge); font-size: 11px;
+    font-family: var(--font-mono);
+  }
+  .agent-cockpit-markdown {
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    line-height: 1.55;
+  }
+  .agent-cockpit-markdown h2 {
+    all: revert; font-size: 1.05em; margin: 0 0 0.5em; color: var(--color-fg); font-weight: 600;
+    border-bottom: 1px solid var(--color-edge); padding-bottom: 0.25em;
+  }
+  .agent-cockpit-markdown p { margin: 0.6em 0; }
+
+  /* Whole-block wash — the legacy treatment every non-list block still gets today. */
+  .block-wrap { margin: 8px 0; position: relative; }
+  .block-wrap.changed {
+    padding: 8px;
+    border-left: 2px solid var(--color-accent);
+    background: rgba(91, 141, 239, 0.06);
+  }
+  .changed-tag {
+    position: absolute; top: 2px; right: 6px; font-size: 10px;
+    color: var(--color-accent); background: var(--color-panel);
+    padding: 1px 4px; border-radius: 3px; border: 1px solid var(--color-edge);
+  }
+
+  /* Intraline word diff — shared across every prose block type. */
+  .del-span {
+    color: var(--color-removed); text-decoration: line-through; text-decoration-thickness: 1.5px;
+    background: rgba(220, 50, 47, 0.14); border-radius: 3px; padding: 0 2px;
+  }
+  .add-span {
+    color: var(--color-added); background: rgba(133, 153, 0, 0.16);
+    border-radius: 3px; padding: 0 2px; font-weight: 600;
+  }
+
+  /* Paragraph/heading: no per-item container needed (single unit) — the
+     block itself carries a thin amber rail (echoes the list-item "edited"
+     rail) so a scan of the document still shows WHERE things changed,
+     without the old opaque wash. */
+  .prose-changed {
+    border-left: 2px solid var(--color-warn);
+    background: rgba(181, 137, 0, 0.05);
+    padding: 6px 8px; margin: 0.6em 0; border-radius: 0 3px 3px 0;
+  }
+  .prose-added {
+    border-left: 2px solid var(--color-added);
+    background: rgba(133, 153, 0, 0.08);
+    padding: 6px 8px; margin: 0.6em 0; border-radius: 0 3px 3px 0;
+  }
+  .mini-tag {
+    font-size: 9.5px; margin-left: 8px; vertical-align: 1px;
+    padding: 0 5px; border-radius: 999px; border: 1px solid;
+  }
+  .mini-tag.added { color: var(--color-added); border-color: rgba(133,153,0,0.5); background: rgba(133,153,0,0.12); }
+
+  /* Table: per-row classification, reusing the exact item-edited/item-added/
+     item-removed rail+wash language from the list-item work, applied to <tr>. */
+  .agent-cockpit-markdown table { border-collapse: collapse; margin: 0.8em 0; width: max-content; max-width: 100%; }
+  .agent-cockpit-markdown th, .agent-cockpit-markdown td {
+    border: 1px solid var(--color-edge); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  .agent-cockpit-markdown thead th { background: var(--color-panel); font-weight: 600; }
+  tr.row-edited td:first-child { border-left: 2px solid var(--color-warn); background: rgba(181, 137, 0, 0.06); }
+  tr.row-added td:first-child { border-left: 2px solid var(--color-added); background: rgba(133, 153, 0, 0.08); }
+  tr.row-removed td { color: var(--color-dim); text-decoration: line-through; text-decoration-thickness: 1.5px; }
+  tr.row-removed td:first-child { border-left: 2px dashed var(--color-removed); background: rgba(220, 50, 47, 0.05); }
+
+  /* Blockquote: per-CHILD classification (usually paragraphs), same rail
+     language nested one level in — only the child that changed is marked,
+     the blockquote's own border-left stays as pure structural chrome. */
+  .agent-cockpit-markdown blockquote {
+    margin: 0.8em 0; padding: 0.1em 0.9em; border-left: 3px solid var(--color-edge-strong);
+    color: var(--color-dim); background: var(--color-panel); border-radius: 0 var(--radius) var(--radius) 0;
+  }
+  .agent-cockpit-markdown blockquote .prose-changed,
+  .agent-cockpit-markdown blockquote .prose-added { color: var(--color-fg); }
+
+  /* Code block, variant A: LINE-level diff — mirrors DiffView.tsx's own
+     add/del row backgrounds, applied inside the rendered fenced block. */
+  .agent-cockpit-pre {
+    margin: 8px 0; padding: 10px 12px; background: var(--color-panel);
+    border: 1px solid var(--color-edge); border-radius: var(--radius);
+    overflow-x: auto; font-family: var(--font-mono); font-size: var(--mono-size); line-height: 1.5;
+  }
+  .code-line { display: block; padding: 0 4px; margin: 0 -4px; white-space: pre; }
+  .code-line.add { background: rgba(133, 153, 0, 0.16); }
+  .code-line.del { background: rgba(220, 50, 47, 0.16); }
+
+  /* Code block, variant B: WORD-level diff — the same del/add span
+     mechanism as prose, applied inside a code line. */
+  .code-line.word-changed { background: transparent; }
+
+  .callout {
+    margin-top: 10px; font-size: 12px; color: var(--color-dim);
+    padding: 8px 10px; background: var(--color-panel-2); border-radius: var(--radius);
+    border: 1px solid var(--color-edge); max-width: 860px;
+  }
+  .callout b { color: var(--color-fg); }
+  .callout.pick {
+    border-color: var(--color-edge-strong);
+  }
+</style>
+</head>
+<body>
+  <h1>Intraline diff, extended to every block type</h1>
+  <p class="sub">Follow-on to the list-item work: today only <code>list</code> blocks get per-item classification
+    + intraline diff; every other block type still gets the old whole-block wash. This mockup shows the
+    extension to paragraphs/headings, tables, and blockquotes — plus two candidate treatments for fenced code
+    blocks, side by side, for you to pick between. Placeholder content throughout.</p>
+
+  <div class="legend">
+    <div class="legend-item"><span class="swatch bar" style="background: var(--color-accent);"></span> Today: whole-block wash (still used for anything not yet converted)</div>
+    <div class="legend-item"><span class="swatch bar" style="background: var(--color-warn);"></span> Proposed: this unit edited</div>
+    <div class="legend-item"><span class="swatch bar" style="background: var(--color-added);"></span> Proposed: this unit is new</div>
+    <div class="legend-item"><span class="swatch" style="background: var(--color-removed); border-radius: 3px;"></span> removed text</div>
+    <div class="legend-item"><span class="swatch" style="background: var(--color-added); border-radius: 3px;"></span> added text</div>
+  </div>
+
+  <h2>Paragraphs &amp; headings</h2>
+  <p class="example-note">A single-word edit to one paragraph among several. No per-item classification is
+    needed here — a lone paragraph is already one correctly-scoped unit — this is purely about swapping the
+    whole-block wash for intraline spans.</p>
+
+  <div class="cols">
+    <div>
+      <div class="col-label">Today</div>
+      <div class="panel">
+        <div class="panel-chrome">Rendered · notes.md</div>
+        <div class="agent-cockpit-markdown">
+          <h2>Release notes</h2>
+          <p>This release focuses on stability and performance.</p>
+          <div class="block-wrap changed">
+            <span class="changed-tag">changed</span>
+            <p style="margin:0;">The terminal now reconnects automatically after a dropped connection.</p>
+          </div>
+          <p>See the changelog for the full list of fixes.</p>
+        </div>
+      </div>
+      <div class="callout">The whole paragraph is washed blue for one word's worth of change — no
+        indication of what specifically changed.</div>
+    </div>
+    <div>
+      <div class="col-label proposed">Proposed</div>
+      <div class="panel">
+        <div class="panel-chrome">Rendered · notes.md</div>
+        <div class="agent-cockpit-markdown">
+          <h2>Release notes</h2>
+          <p>This release focuses on stability and performance.</p>
+          <p class="prose-changed">The terminal now <span class="del-span">reconnects</span><span class="add-span">recovers</span> automatically after a dropped connection.</p>
+          <p>See the changelog for the full list of fixes.</p>
+        </div>
+      </div>
+      <div class="callout">Only "reconnects" &rarr; "recovers" is highlighted. The thin amber rail still
+        marks which paragraph changed, at a glance, without an opaque wash.</div>
+    </div>
+  </div>
+
+  <h2>Tables — per-row classification</h2>
+  <p class="example-note">One row edited, one row added. Same rail/wash language as list items, applied to
+    <code>&lt;tr&gt;</code>; the changed row additionally gets per-cell intraline diff so only the actual
+    changed cell's text is highlighted, not the whole row.</p>
+
+  <div class="cols">
+    <div>
+      <div class="col-label">Today</div>
+      <div class="panel">
+        <div class="panel-chrome">Rendered · shortcuts.md</div>
+        <div class="agent-cockpit-markdown">
+          <div class="block-wrap changed">
+            <span class="changed-tag">changed</span>
+            <table style="margin:0;">
+              <thead><tr><th>Action</th><th>Shortcut</th></tr></thead>
+              <tbody>
+                <tr><td>New tab</td><td>&#8984;T</td></tr>
+                <tr><td>Close tab</td><td>&#8984;W</td></tr>
+                <tr><td>Split pane</td><td>&#8984;D</td></tr>
+                <tr><td>Zoom pane</td><td>&#8984;&#8679;Z</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="callout">The entire table is flagged changed. Only "Split pane" actually changed and
+        "Zoom pane" is new — no way to tell from this view.</div>
+    </div>
+    <div>
+      <div class="col-label proposed">Proposed</div>
+      <div class="panel">
+        <div class="panel-chrome">Rendered · shortcuts.md</div>
+        <div class="agent-cockpit-markdown">
+          <table style="margin:0;">
+            <thead><tr><th>Action</th><th>Shortcut</th></tr></thead>
+            <tbody>
+              <tr><td>New tab</td><td>&#8984;T</td></tr>
+              <tr><td>Close tab</td><td>&#8984;W</td></tr>
+              <tr class="row-edited"><td>Split pane</td><td><span class="del-span">&#8984;D</span><span class="add-span">&#8984;&#8679;D</span></td></tr>
+              <tr class="row-added"><td>Zoom pane <span class="mini-tag added">new</span></td><td>&#8984;&#8679;Z</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="callout">Only the "Split pane" row is marked edited (with just the shortcut cell's
+        intraline diff), and "Zoom pane" is marked added. "New tab"/"Close tab" render with zero decoration.</div>
+    </div>
+  </div>
+
+  <h2>Table — a row removed</h2>
+  <div class="panel" style="max-width: 480px;">
+    <div class="panel-chrome">Rendered · shortcuts.md</div>
+    <div class="agent-cockpit-markdown">
+      <table style="margin:0;">
+        <thead><tr><th>Action</th><th>Shortcut</th></tr></thead>
+        <tbody>
+          <tr><td>New tab</td><td>&#8984;T</td></tr>
+          <tr class="row-removed"><td>Reopen tab <span class="mini-tag" style="color: var(--color-removed); border-color: rgba(220,50,47,.45); background: rgba(220,50,47,.1);">removed</span></td><td>&#8984;&#8679;T</td></tr>
+          <tr><td>Close tab</td><td>&#8984;W</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="callout">Ghost row, same treatment as removed list items — struck through, dashed left edge,
+    reinserted at its original position.</div>
+
+  <h2>Blockquotes — per-child classification</h2>
+  <p class="example-note">A blockquote with two paragraphs; only the second changed.</p>
+
+  <div class="cols">
+    <div>
+      <div class="col-label">Today</div>
+      <div class="panel">
+        <div class="panel-chrome">Rendered · design-notes.md</div>
+        <div class="agent-cockpit-markdown">
+          <div class="block-wrap changed">
+            <span class="changed-tag">changed</span>
+            <blockquote style="margin:0;">
+              <p>The original proposal used a modal dialog for this flow.</p>
+              <p>We switched to an inline panel after user testing showed the modal felt disruptive.</p>
+            </blockquote>
+          </div>
+        </div>
+      </div>
+      <div class="callout">Both paragraphs read as changed, even though the first is untouched.</div>
+    </div>
+    <div>
+      <div class="col-label proposed">Proposed</div>
+      <div class="panel">
+        <div class="panel-chrome">Rendered · design-notes.md</div>
+        <div class="agent-cockpit-markdown">
+          <blockquote style="margin:0;">
+            <p style="margin:0 0 0.6em;">The original proposal used a modal dialog for this flow.</p>
+            <p class="prose-changed" style="margin:0;">We switched to an inline panel after user testing showed the modal felt <span class="del-span">disruptive</span><span class="add-span">jarring</span>.</p>
+          </blockquote>
+        </div>
+      </div>
+      <div class="callout">Only the second paragraph is marked; the first renders as plain quoted text.</div>
+    </div>
+  </div>
+
+  <h2>Code blocks — two candidate treatments</h2>
+  <p class="example-note">Source change: a function signature's parameter renamed, one line added. Same
+    underlying edit, two different diff granularities — pick whichever reads better for code specifically.</p>
+
+  <div class="cols">
+    <div>
+      <div class="col-label">A — Line-level (matches DiffView.tsx)</div>
+      <div class="panel">
+        <div class="panel-chrome">Rendered · example.md</div>
+        <div class="agent-cockpit-markdown">
+          <pre class="agent-cockpit-pre"><code
+><span class="code-line">function connect(</span
+><span class="code-line del">  host: string,</span
+><span class="code-line add">  hostname: string,</span
+><span class="code-line">  port: number,</span
+><span class="code-line add">  timeoutMs = 5000,</span
+><span class="code-line">): Promise&lt;Connection&gt; {</span
+><span class="code-line">  ...</span
+><span class="code-line">}</span
+></code></pre>
+        </div>
+      </div>
+      <div class="callout pick"><b>Whole changed lines</b> get a red/green background, exactly like the raw
+        diff view and like DiffView.tsx already does. Familiar to anyone who's read a code diff before; no new
+        mechanism to build (line-level diff already exists in this codebase for the raw view).</div>
+    </div>
+    <div>
+      <div class="col-label proposed">B — Word-level (matches prose)</div>
+      <div class="panel">
+        <div class="panel-chrome">Rendered · example.md</div>
+        <div class="agent-cockpit-markdown">
+          <pre class="agent-cockpit-pre"><code
+><span class="code-line">function connect(</span
+><span class="code-line word-changed">  <span class="del-span">host: string,</span><span class="add-span">hostname: string,</span></span
+><span class="code-line">  port: number,</span
+><span class="code-line word-changed"><span class="add-span">  timeoutMs = 5000,</span></span
+><span class="code-line">): Promise&lt;Connection&gt; {</span
+><span class="code-line">  ...</span
+><span class="code-line">}</span
+></code></pre>
+        </div>
+      </div>
+      <div class="callout pick"><b>Only the changed token</b> (<code>host</code> &rarr; <code>hostname</code>)
+        is highlighted within the line, same visual language as prose. Reads oddly on renames/refactors
+        where most of a line's tokens are unrelated to each other structurally (unlike prose words, which
+        read as a sentence) — e.g. here it's fine, but a line with multiple unrelated token changes could
+        look noisy with several small spans instead of one clean line-level bar.</div>
+    </div>
+  </div>
+
+  <div class="callout" style="margin-top:16px; max-width: 860px;">
+    My recommendation: <b>A (line-level)</b>, matching the raw diff view's existing convention and avoiding a
+    second bespoke diff mechanism for code specifically — word-level tokenization is tuned for natural-language
+    text (the LCS word-diff already built for prose), and code's token boundaries (operators, punctuation,
+    identifiers) don't map cleanly onto that. But this is exactly the kind of call better made by looking at
+    both side by side, which is why both are mocked out above.
+  </div>
+
+</body>
+</html>

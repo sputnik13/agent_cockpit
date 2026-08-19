@@ -16,8 +16,15 @@ import {
   encodeFrame,
   type RpcStream,
 } from './rpcClient';
-import { assembleChangeset, mapGitStatus, toFileBytesResult, toFileReadResult, toTaskGraph } from './index';
-import type { ReadFileBytesResult, ReadFileResult } from './rpcClient';
+import {
+  assembleChangeset,
+  mapGitStatus,
+  toDiffBundle,
+  toFileBytesResult,
+  toFileReadResult,
+  toTaskGraph,
+} from './index';
+import type { GitDiffBundleResult, ReadFileBytesResult, ReadFileResult } from './rpcClient';
 import { deriveWatchSpec } from '@shared/watch/policy';
 
 /**
@@ -407,6 +414,70 @@ describe('toFileReadResult (br r3s6 REJECT fix: content-nulling + true sizeBytes
     const result = toFileReadResult(malformed);
     expect(result.isBinary).toBe(false);
     expect(result.content).toBe('text');
+  });
+});
+
+describe('toDiffBundle (local_repo_explorer-1jpc: default-target old-content parity)', () => {
+  // Same no-transport-injection precedent as toFileReadResult above: this pure
+  // adapter is exported from index.ts specifically to make
+  // RemoteProvider.getDiffBundle's response mapping directly unit-testable
+  // without a live SSH host + built helper.
+  const baseRes: GitDiffBundleResult = {
+    patch: '@@ -1 +1 @@',
+    newContent: 'new content',
+    newReadable: true,
+    newTruncated: false,
+    oldContent: 'old content',
+    oldReadable: true,
+    oldTruncated: false,
+  };
+
+  it('resolves oldContent whenever the helper reports oldReadable, regardless of whether an explicit baseline was requested', () => {
+    // The bug fixed by local_repo_explorer-1jpc: the response mapping used to
+    // ALSO gate on a (now-removed) `baseline` variable from the call site, so
+    // even a helper response that successfully found old content at its own
+    // default ref got nulled out here. This function receives only the
+    // helper's own result — there is no baseline to (re-)gate on — proving the
+    // mapping layer itself now trusts oldReadable alone.
+    expect(toDiffBundle(baseRes)).toEqual({
+      patch: '@@ -1 +1 @@',
+      newContent: 'new content',
+      oldContent: 'old content',
+    });
+  });
+
+  it('nulls oldContent when the helper reports the old side unreadable — the genuinely-absent-at-ref case, not merely no baseline given', () => {
+    // Post-fix, the helper (handleGetDiffBundle in remote-helper/commands.go)
+    // only reports oldReadable: false when gitShowCapped genuinely fails to
+    // find the file at the resolved ref — HEAD by default when no baseline
+    // was supplied, or the explicit baseline otherwise — because the old-side
+    // read branch now defaults to HEAD instead of skipping the read entirely.
+    // This mapping function receives only that already-resolved
+    // oldReadable/oldContent pair, so it pins the TS-side half of the
+    // contract: given oldReadable: false, oldContent must resolve to null,
+    // symmetric with the newContent gate below. The server-side half of the
+    // same contract — that oldReadable is false ONLY for a genuinely-
+    // absent-at-ref file, and true with real content for a file present at
+    // HEAD under the default target — is covered by
+    // TestGetDiffBundleDefaultBaseline in remote-helper/commands_test.go, not
+    // by this TS-only test.
+    const res: GitDiffBundleResult = { ...baseRes, oldReadable: false, oldContent: '' };
+    expect(toDiffBundle(res).oldContent).toBeNull();
+  });
+
+  it('nulls oldContent when the helper reports it truncated, even though readable', () => {
+    const res: GitDiffBundleResult = { ...baseRes, oldTruncated: true };
+    expect(toDiffBundle(res).oldContent).toBeNull();
+  });
+
+  it('nulls newContent under the same readable/truncated gate, symmetric with oldContent', () => {
+    const res: GitDiffBundleResult = { ...baseRes, newReadable: false };
+    expect(toDiffBundle(res).newContent).toBeNull();
+  });
+
+  it('passes the patch through unchanged', () => {
+    const res: GitDiffBundleResult = { ...baseRes, patch: '@@ -3,2 +3,4 @@ context\n' };
+    expect(toDiffBundle(res).patch).toBe('@@ -3,2 +3,4 @@ context\n');
   });
 });
 

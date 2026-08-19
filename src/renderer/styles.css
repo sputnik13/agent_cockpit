@@ -73,8 +73,7 @@ body,
   overflow: hidden;
   background: var(--color-bg);
   color: var(--color-fg);
-  font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   font-size: 13px;
   line-height: 1.5;
 }
@@ -247,6 +246,339 @@ body,
   accent-color: var(--color-accent);
 }
 
+/* Per-item change treatment (docs/design/ui-rendered-markdown-diff.md).
+   Applied to a SPECIFIC <li> instead of the whole enclosing <ul>/<ol> — see
+   markdown.tsx's decoratedListHtml/decorateListItems. Values match
+   design/mockups/rendered-markdown-diff.html exactly. */
+.agent-cockpit-markdown li.ac-item-edited {
+  position: relative;
+  margin-left: -10px;
+  padding: 1px 8px;
+  border-left: 2px solid var(--color-warn);
+  background: rgba(181, 137, 0, 0.07);
+  border-radius: 0 3px 3px 0;
+}
+.agent-cockpit-markdown li.ac-item-added {
+  position: relative;
+  margin-left: -10px;
+  padding: 1px 8px;
+  border-left: 2px solid var(--color-added);
+  background: rgba(133, 153, 0, 0.1);
+  border-radius: 0 3px 3px 0;
+}
+/* Mini-tag pill — flows inline with item text (unlike ChangedTag, which is
+   absolutely positioned and block-scoped) since items vary in height/wrap. */
+.agent-cockpit-markdown .ac-mini-tag {
+  display: inline-block;
+  font-size: 9.5px;
+  margin-left: 8px;
+  vertical-align: 1px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+.agent-cockpit-markdown .ac-mini-tag-added {
+  color: var(--color-added);
+  border-color: rgba(133, 153, 0, 0.5);
+  background: rgba(133, 153, 0, 0.12);
+}
+.agent-cockpit-markdown .ac-mini-tag-changed {
+  color: var(--color-warn);
+  border-color: rgba(181, 137, 0, 0.5);
+  background: rgba(181, 137, 0, 0.12);
+}
+
+/* Intraline word-level diff spans (docs/design/ui-design-language.md,
+   "Intraline diff spans"; docs/design/ui-rendered-markdown-diff.md, Decision
+   item 3). Sit inline in prose — no monospace override, unlike DiffView's
+   separate diffHighlight/diffTokens concept for the raw line-diff view (out
+   of scope for this treatment). Values match
+   design/mockups/rendered-markdown-diff.html's .del-span/.add-span rules. */
+.agent-cockpit-markdown .ac-del-span {
+  color: var(--color-removed);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  background: rgba(220, 50, 47, 0.14);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.agent-cockpit-markdown .ac-add-span {
+  color: var(--color-added);
+  background: rgba(133, 153, 0, 0.16);
+  border-radius: 3px;
+  padding: 0 2px;
+  font-weight: 600;
+}
+
+/* Always-visible detail marker (docs/design/ui-design-language.md, "Always-
+   visible detail marker"; docs/design/ui-rendered-markdown-diff.md, Decision
+   item 4) — the ONLY item state that carries it: an edited item whose
+   word-level diff could not be cleanly spliced
+   (li.ac-item-edited[data-diff-fallback-reason], markdown.tsx's
+   appendDetailMarker). Native <details>/<summary> — no custom popover — so
+   Tab + Enter/Space and screen-reader access come for free; its body is the
+   details element's own real content (nested inside it, revealed by the
+   native open/closed toggle), never a separately positioned overlay. Values
+   match design/mockups/rendered-markdown-diff.html's .detail/.detail-body
+   rules (renamed to the ac- prefix used throughout this file). */
+.agent-cockpit-markdown .ac-detail {
+  display: inline-block;
+  margin-left: 6px;
+  vertical-align: -3px;
+}
+.agent-cockpit-markdown .ac-detail summary {
+  list-style: none;
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-dim);
+  border: 1px solid transparent;
+  font-size: 11px;
+}
+.agent-cockpit-markdown .ac-detail summary::-webkit-details-marker {
+  display: none;
+}
+.agent-cockpit-markdown .ac-detail summary:hover,
+.agent-cockpit-markdown .ac-detail summary:focus-visible {
+  color: var(--color-fg);
+  background: var(--color-elev);
+  border-color: var(--color-edge-strong);
+  outline: none;
+}
+.agent-cockpit-markdown .ac-detail[open] summary {
+  color: var(--color-warn);
+  background: var(--color-elev);
+}
+.agent-cockpit-markdown .ac-detail-body {
+  margin: 4px 0 2px;
+  padding: 6px 10px;
+  background: var(--color-panel-2);
+  border: 1px solid var(--color-edge);
+  border-radius: var(--radius);
+  font-size: 12px;
+  display: inline-block;
+  max-width: 100%;
+}
+.agent-cockpit-markdown .ac-detail-reason {
+  color: var(--color-dim);
+  margin-bottom: 4px;
+}
+.agent-cockpit-markdown .ac-detail-body .ac-kv {
+  display: flex;
+  gap: 8px;
+  margin: 2px 0;
+  align-items: flex-start;
+}
+.agent-cockpit-markdown .ac-detail-body .ac-k {
+  color: var(--color-dim);
+  width: 42px;
+  flex-shrink: 0;
+}
+.agent-cockpit-markdown .ac-detail-body .ac-before,
+.agent-cockpit-markdown .ac-detail-body .ac-after {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.agent-cockpit-markdown .ac-detail-body .ac-before {
+  color: var(--color-removed);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+.agent-cockpit-markdown .ac-detail-body .ac-after {
+  color: var(--color-added);
+}
+
+/* Mouse-hover quick preview (docs/design/ui-rendered-markdown-diff.md,
+   Diagram's "mouse-hover quick preview" note) — a convenience layered on top
+   of the always-visible marker above, never the only way to see the change
+   (everything it shows is also in the marker's body). Pure CSS :hover, so it
+   can never intercept pointer events or need JS-managed hover state. Anchors
+   off li.ac-item-edited's own `position: relative` (declared above). */
+.agent-cockpit-markdown .ac-hover-tip {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  background: var(--color-elev);
+  border: 1px solid var(--color-edge-strong);
+  border-radius: var(--radius);
+  padding: 5px 9px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+  z-index: 5;
+}
+/* Child combinator (not descendant): scopes the reveal to the tip that is
+   THIS item's own direct child. A descendant combinator would also match a
+   nested descendant li.ac-item-edited's own tip (or vice versa) whenever a
+   nested-list ancestor/descendant pair is simultaneously :hover, revealing a
+   tip that belongs to a different item (local_repo_explorer-rendered-md-per-
+   item-diff-bibv.4 REJECT correction). */
+.agent-cockpit-markdown li.ac-item-edited:hover > .ac-hover-tip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+/* Prose rail (docs/design/ui-design-language.md, "Prose rail (new — non-list
+   block extension)"; docs/design/ui-rendered-markdown-diff.md, "Decision —
+   Extension: Non-List Block Types") — applied directly to a top-level
+   `<p>`/`<h1>`-`<h6>` (markdown.tsx's decorateProseBlock). Same rail + wash
+   COLORS as the item-level edited/added states above, but the wash ALPHAS
+   deliberately differ (0.05/0.08 here vs. 0.07/0.1 for list items) — values
+   match design/mockups/rendered-markdown-diff-all-blocks.html's
+   .prose-changed/.prose-added rules exactly. Deliberately NO
+   `margin-left: -10px` inset (unlike li.ac-item-edited/li.ac-item-added
+   above): a paragraph isn't nested inside a container the way a list item
+   is, so it keeps its normal block margins (BlockView's wrapper already
+   owns `margin: 8px 0`) and gains only border-left + background + slightly
+   increased padding. */
+.agent-cockpit-markdown .ac-prose-changed {
+  position: relative;
+  border-left: 2px solid var(--color-warn);
+  background: rgba(181, 137, 0, 0.05);
+  padding: 6px 8px;
+  border-radius: 0 3px 3px 0;
+}
+.agent-cockpit-markdown .ac-prose-added {
+  position: relative;
+  border-left: 2px solid var(--color-added);
+  background: rgba(133, 153, 0, 0.08);
+  padding: 6px 8px;
+  border-radius: 0 3px 3px 0;
+}
+/* Hover-tip reveal for the prose fallback path — the SAME `.ac-hover-tip`
+   base rule is reused; only the reveal trigger differs by unit kind. Only
+   `.ac-prose-changed` ever actually carries a `.ac-hover-tip` (the fallback
+   marker is never attached for `.ac-prose-added` — see decorateProseBlock's
+   doc comment), so no analogous rule is needed for `.ac-prose-added`.
+   TWO selectors, not one, because the tip's DOM relationship to
+   `.ac-prose-changed` differs by element: for a HEADING (`<h1>`-`<h6>`) the
+   tip is a direct CHILD (flow content nests inside a heading safely — same
+   as `li.ac-item-edited` above, hence the matching CHILD combinator); for a
+   `<p>` specifically it is a later SIBLING instead (decorateProseBlock's own
+   doc comment has the full HTML-parsing rationale: `<details>`/`<div>`
+   cannot survive being nested inside a `<p>` through a serialize+reparse
+   round-trip), hence the GENERAL SIBLING combinator. The general-sibling
+   form is scoped-safe here (unlike a descendant combinator would be)
+   because each decorated block's marker/tip live in their OWN small,
+   per-block wrapper — never sharing a parent with any OTHER block's own
+   `.ac-prose-changed`/`.ac-hover-tip` pair. Also note: since the tip is a
+   sibling rather than a descendant for the `<p>` case, its `position:
+   absolute` anchors off the nearest positioned ANCESTOR up the tree (the
+   BlockView wrapper), not off `.ac-prose-changed` itself as it does
+   everywhere else — a documented, visually-negligible approximation (the
+   wrapper's box closely tracks the paragraph's own, since blockChanged is
+   false whenever a block is decorated and contributes no extra padding),
+   not a functional defect. */
+.agent-cockpit-markdown .ac-prose-changed:hover > .ac-hover-tip,
+.agent-cockpit-markdown .ac-prose-changed:hover ~ .ac-hover-tip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+/* Code rail (docs/design/ui-design-language.md, "Prose rail" — explicitly
+   lists "a fenced code block" as a target alongside <p>/<h1>-<h6>, so this
+   reuses that section's exact rail colors and wash ALPHAS — 0.05/0.08, not
+   the item-level 0.07/0.1 — rather than inventing a third pair). Applied to
+   the top-level `<pre>` of a fenced code block (markdown.tsx's
+   decorateCodeBlock). The wash is layered as `background-image` (a flat
+   two-stop gradient), NEVER a shorthand `background:` — `.agent-cockpit-
+   markdown pre` above already sets `background: var(--color-panel)`, and a
+   shorthand override here would reset that `background-color` to its
+   initial (transparent) value, destroying the panel ground hljs's own
+   (transparent-bg) token colors are painted against. `border-left` is the
+   ONLY border property set — `.agent-cockpit-markdown pre`'s existing
+   padding/overflow-x/font/border-radius are untouched, so a decorated code
+   block keeps its normal horizontal scroll and monospace rendering exactly
+   as shipped. */
+.agent-cockpit-markdown pre.ac-code-changed {
+  border-left: 2px solid var(--color-warn);
+  background-image: linear-gradient(rgba(181, 137, 0, 0.05), rgba(181, 137, 0, 0.05));
+}
+.agent-cockpit-markdown pre.ac-code-added {
+  border-left: 2px solid var(--color-added);
+  background-image: linear-gradient(rgba(133, 153, 0, 0.08), rgba(133, 153, 0, 0.08));
+}
+
+/* Fallback marker for a code block whose word-level diff could not be
+   cleanly spliced (markdown.tsx's decorateCodeBlock): the mini-tag pill and
+   <details> marker/hover-tip live OUTSIDE `<pre>`, as its later siblings,
+   never inside it — `<pre>`'s content model is phrasing content only (the
+   SAME HTML-parsing restriction `.ac-prose-changed`'s `<p>` case works
+   around above; see decorateProseBlock's doc comment for the full
+   serialize+reparse rationale), so `<details>`/`<div>` cannot survive being
+   nested inside it. The throwaway wrapper `decorateCodeBlock` builds to
+   compute this sibling structure is discarded before it ever reaches the
+   DOM (only its `.innerHTML` is used — same as `decorateProseBlock`'s `<p>`
+   case), so it carries no class to scope off; these rules instead scope off
+   `pre.ac-code-changed` ITSELF via the general-sibling combinator — that
+   class DOES survive (set directly on `<pre>`, which IS part of the
+   returned `.innerHTML`) and, for any OTHER block kind, is never a sibling
+   of a `.ac-hover-tip`/`.ac-detail`, so it scopes correctly with no
+   intermediate wrapper needed. */
+.agent-cockpit-markdown pre.ac-code-changed:hover ~ .ac-hover-tip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+/* The fallback marker's Before/After rows show the block's raw
+   fence-to-fence source (markdown.tsx's verbatimSourceSlice) — unlike
+   prose's run-on single-line text, a code block is multi-line, so its
+   before/after body must preserve newlines/indentation instead of
+   collapsing them, and read in the mono font like the code it quotes.
+   Scoped to a marker that is a later sibling of `pre.ac-code-changed`
+   (i.e. the code fallback specifically) — the shipped prose marker keeps
+   its own (single-line-oriented) styling untouched. */
+.agent-cockpit-markdown pre.ac-code-changed ~ .ac-detail .ac-detail-body .ac-before,
+.agent-cockpit-markdown pre.ac-code-changed ~ .ac-detail .ac-detail-body .ac-after {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+/* Removed item — a "ghost" row synthesized back into its original position
+   (docs/design/ui-rendered-markdown-diff.md, Decision item 5; "Ghost row
+   positioning"; ui-design-language.md, "Removed (ghost row)"). Dashed rail
+   (vs. the solid rails above) and struck-through dimmed text distinguish "no
+   longer here" from live content. The list marker stays visible but muted
+   for an unordered list (matches
+   design/mockups/rendered-markdown-diff.html's li.item-removed::marker); an
+   ORDERED list additionally suppresses it entirely (list-style: none) since
+   a ghost has no real position and ANY displayed number would be
+   misleading — markdown.tsx's renumberOrderedList separately compensates
+   every REAL following item's own `value` so their displayed numbers stay
+   exactly as if the ghost were never inserted. */
+.agent-cockpit-markdown li.ac-item-removed {
+  position: relative;
+  margin-left: -10px;
+  padding: 1px 8px;
+  border-left: 2px dashed var(--color-removed);
+  background: rgba(220, 50, 47, 0.05);
+  color: var(--color-dim);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  opacity: 0.9;
+}
+.agent-cockpit-markdown li.ac-item-removed::marker {
+  color: var(--color-muted);
+}
+.agent-cockpit-markdown ol li.ac-item-removed {
+  list-style: none;
+}
+.agent-cockpit-markdown .ac-mini-tag-removed {
+  color: var(--color-removed);
+  border-color: rgba(220, 50, 47, 0.45);
+  background: rgba(220, 50, 47, 0.1);
+}
+
 .agent-cockpit-markdown blockquote {
   margin: 0.8em 0;
   padding: 0.1em 0.9em;
@@ -259,6 +591,85 @@ body,
   margin-top: 0;
 }
 .agent-cockpit-markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* Blockquote per-child classification (docs/design/ui-rendered-markdown-diff.md,
+   "Decision — Extension: Non-List Block Types", "Blockquotes";
+   docs/design/ui-design-language.md, "Prose rail" — blockquote children
+   explicitly reuse the ITEM-level states verbatim, not the prose rail,
+   since a blockquote child IS a contained child of a multi-child
+   container like `<li>`/`<tr>`, not a standalone top-level block).
+   Applied directly to a blockquote's DECORATED direct child (typically
+   `<p>`, or `<h1>`-`<h6>` — markdown.tsx's decorateBlockquoteChildren).
+   Reuses the li.ac-item-edited/li.ac-item-added rail+wash VALUES exactly
+   (same colors, same 0.07/0.1 wash alphas) but WITHOUT the list item's
+   `margin-left: -10px` inset — a blockquote child isn't preceded by a list
+   marker the way an `<li>` is, matching how the prose-rail treatment also
+   omits that inset for the same structural reason. No `.ac-item-removed`
+   variant here — a removed blockquote child is never represented
+   (permanently out of scope; see markdown.tsx's `blockquoteClassification`
+   doc comment). */
+.agent-cockpit-markdown blockquote > .ac-item-edited {
+  position: relative;
+  padding: 1px 8px;
+  border-left: 2px solid var(--color-warn);
+  background: rgba(181, 137, 0, 0.07);
+  border-radius: 0 3px 3px 0;
+}
+.agent-cockpit-markdown blockquote > .ac-item-added {
+  position: relative;
+  padding: 1px 8px;
+  border-left: 2px solid var(--color-added);
+  background: rgba(133, 153, 0, 0.1);
+  border-radius: 0 3px 3px 0;
+}
+/* Legibility override — REQUIRED by this leaf's Contract, not optional:
+   `.agent-cockpit-markdown blockquote` (above) sets `color: var(--color-dim)`;
+   without this override a decorated child's own text AND its
+   `.ac-del-span`/`.ac-add-span` diff spans would inherit that dimmed color
+   and read poorly against the quote's already-muted styling. The mockup
+   (design/mockups/rendered-markdown-diff-all-blocks.html) demonstrates the
+   same restoration scoped to its own `.prose-changed`/`.prose-added` demo
+   class names; here it is scoped to the actual shipped `ac-item-*` classes
+   — see this leaf's Contract for why the class names differ from the
+   mockup while the legibility requirement itself does not. Descendant
+   (not child) combinator: safe globally, since `.ac-item-edited`/
+   `.ac-item-added` never coexist with being inside a `blockquote` for any
+   OTHER reason today (a list nested inside a blockquote never gets
+   per-item decoration — see the boundary documented in
+   markdown.tsx's `extractBlockquoteChildren`). */
+.agent-cockpit-markdown blockquote .ac-item-edited,
+.agent-cockpit-markdown blockquote .ac-item-added {
+  color: var(--color-fg);
+}
+/* Hover-tip reveal for a blockquote child's fallback marker (the SAME
+   shared `.ac-hover-tip` base rule declared above — no blockquote-specific
+   tip styling needed). TWO selectors, mirroring `.ac-prose-changed`'s own
+   pair exactly and for the SAME reason (see that rule's own comment): for
+   a HEADING child the tip is a direct CHILD (appended INSIDE the heading —
+   flow content nests safely there, same as `li.ac-item-edited`, hence the
+   child combinator); for a `<p>` child specifically it is a later SIBLING
+   instead (markdown.tsx's `decorateBlockquoteChildren` doc comment has the
+   full HTML-parsing rationale — `<details>`/`<div>` cannot nest inside a
+   `<p>`), hence the general-sibling combinator. */
+.agent-cockpit-markdown blockquote > .ac-item-edited:hover > .ac-hover-tip,
+.agent-cockpit-markdown blockquote > .ac-item-edited:hover ~ .ac-hover-tip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+/* Compensates for the fallback marker/tip landing as the actual last DOM
+   child once inserted (see markdown.tsx's decorateBlockquoteChildren) when
+   the decorated `<p>` itself was the blockquote's last child BEFORE that
+   insertion — `blockquote > :last-child` (above) would otherwise reset the
+   WRONG element's margin (the mini-tag/tip carry none anyway), leaving
+   this `<p>`'s own `margin: 0.6em 0` (above) bottom margin active and
+   producing stray space before the blockquote's own bottom
+   padding/border (Guardrail: the first/last-child margin resets must
+   still apply to a decorated child). See markdown.tsx's
+   `BLOCKQUOTE_TAIL_FALLBACK_CLASS` doc comment for the full rationale,
+   including why no first-child/heading analogue is needed. */
+.agent-cockpit-markdown blockquote > p.ac-blockquote-tail-fallback {
   margin-bottom: 0;
 }
 
@@ -285,8 +696,111 @@ body,
   background: var(--color-panel);
   font-weight: 600;
 }
-.agent-cockpit-markdown tbody tr:nth-child(even) td {
+/* Zebra striping — a table with NO ghost row relies on plain
+   `:nth-child(even)`, exactly as before. `.ac-table-restriped` (below) is
+   the escape hatch for once a ghost row can be present — see that pair's
+   own comment for why. `:where(:not(...))` itself always contributes ZERO
+   specificity, but tightening: attaching it to the new `table` type
+   selector still bumps this whole rule's specificity slightly versus the
+   pre-ghost bare rule, (0,2,3) -> (0,2,4) — harmless here, since the
+   row-classification rules below (`tr.ac-item-edited td:first-child` etc.)
+   carry MORE class selectors (3 vs. this rule's 2) and so still win
+   regardless of this rule's one extra type selector. */
+.agent-cockpit-markdown table:where(:not(.ac-table-restriped)) tbody tr:nth-child(even) td {
   background: var(--color-panel);
+}
+/* Zebra-stripe parity across a ghost-row insertion (docs/design/
+   ui-rendered-markdown-diff.md, "ZEBRA-STRIPING PARITY" — the table
+   analogue of markdown.tsx's `renumberOrderedList` ordinal-preservation
+   guarantee, but purely presentational: inserting a ghost `<tr>` shifts
+   every FOLLOWING real row's `:nth-child` parity, flipping stripes that
+   have nothing to do with the actual edit). `markdown.tsx`'s
+   `restripeTable` adds `.ac-table-restriped` to the `<table>` and
+   `.ac-row-even` to exactly the rows that should look striped — computed by
+   counting only NON-ghost rows, so the visual pattern for every real row is
+   identical to a ghost-free render, and no row index/ordinal is ever
+   user-visible (it is a boolean presentational class, nothing else).
+   `:nth-child(even of ...)` (CSS Selectors 4) would express this without a
+   JS-computed class, but is not reliably usable here: this repo's tests
+   assert this behavior under jsdom (markdown.test.tsx), whose CSS engine
+   does not reliably support the `of <selector>` syntax, so a test could not
+   pin the fix there — the explicit-class approach is verifiable in both
+   jsdom and a real browser. */
+.agent-cockpit-markdown .ac-table-restriped tbody tr:where(.ac-row-even) td {
+  background: var(--color-panel);
+}
+
+/* Table-row per-row classification (docs/design/ui-rendered-markdown-diff.md,
+   "Decision — Extension: Non-List Block Types", "Tables";
+   docs/design/ui-design-language.md, "Prose rail" — table rows explicitly
+   reuse the ITEM-level states verbatim, not the prose rail, since a `<tr>`
+   is a contained child of a multi-child container like `<li>`, not a
+   standalone block like `<p>`). Reuses the EXACT `ac-item-edited`/
+   `ac-item-added`/`ac-item-removed` (GHOST_ITEM_CLASS) class names list
+   items use — applied to `<tr>` instead of `<li>` — so the ghost guard
+   (`BlockView.onMove`'s `.closest('.' + GHOST_ITEM_CLASS)`) and the
+   mini-tag/detail-marker CSS need zero table-specific duplication.
+   Decoration lives on the CELLS (`td:first-child`/`td`, or `th:first-child`
+   for a decorated header row — see below), never on `<tr>` itself as
+   padding/margin/background the way `li.ac-item-edited` above does — a
+   table-row box does not support margin the way a list item's `<li>` does,
+   and with `border-collapse: collapse` a cell's own border is what actually
+   paints the rail. Values match
+   design/mockups/rendered-markdown-diff-all-blocks.html's
+   tr.row-edited/tr.row-added/tr.row-removed rules exactly (renamed to the
+   shared ac-item-* class names). */
+.agent-cockpit-markdown tr.ac-item-edited td:first-child,
+.agent-cockpit-markdown tr.ac-item-edited th:first-child {
+  border-left: 2px solid var(--color-warn);
+  background: rgba(181, 137, 0, 0.06);
+}
+.agent-cockpit-markdown tr.ac-item-added td:first-child,
+.agent-cockpit-markdown tr.ac-item-added th:first-child {
+  border-left: 2px solid var(--color-added);
+  background: rgba(133, 153, 0, 0.08);
+}
+.agent-cockpit-markdown tr.ac-item-removed td {
+  color: var(--color-dim);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+.agent-cockpit-markdown tr.ac-item-removed td:first-child {
+  border-left: 2px dashed var(--color-removed);
+  background: rgba(220, 50, 47, 0.05);
+}
+/* `th:first-child` rail rules above are the REJECT-corrected extension of
+   table-row decoration to header rows (markdown.tsx's `tableClassification`
+   doc comment has the full rationale): a header can classify 'edited' or
+   'added' but never 'removed'/ghosted (a persisting table's header always
+   pairs 1:1), so `tr.ac-item-removed` — ghost-row-only, and
+   `buildGhostTableRow` only ever builds `<td>` cells — has no `th` variant
+   and needs none. */
+
+/* Hover-tip reveal for a table row's fallback marker (same shared
+   `.ac-hover-tip` base rule declared above — no table-specific tip styling
+   needed). `position: relative` on `tr.ac-item-edited` itself — VERIFIED
+   directly against real Chromium rendering (not assumed) that
+   Chromium/Electron honors a positioned `<tr>` as a valid containing block
+   for an absolutely-positioned descendant even though the tip's actual DOM
+   parent is the first cell (`appendDetailMarker` always inserts INSIDE a
+   cell — see the foster-parenting trap this whole leaf's cell-insertion
+   discipline works around, and `decorateTableRows`'s own doc comment): the
+   tip lands ~10px past the ROW's own right edge (spanning every column),
+   not past just the first cell's edge, and not escaped to some other
+   positioned ancestor further up the tree. The `>` child-combinator chain
+   (`tr:hover > td:first-child > .ac-hover-tip`, and its `th:first-child`
+   twin for a decorated header row's own fallback marker) mirrors
+   `li.ac-item-edited:hover > .ac-hover-tip`'s own scoping intent (reveal
+   only THIS row's own tip, never a nested/ancestor one), adjusted for the
+   one extra level of nesting a table cell introduces between `<tr>` and the
+   tip itself. */
+.agent-cockpit-markdown tr.ac-item-edited {
+  position: relative;
+}
+.agent-cockpit-markdown tr.ac-item-edited:hover > td:first-child > .ac-hover-tip,
+.agent-cockpit-markdown tr.ac-item-edited:hover > th:first-child > .ac-hover-tip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
 }
 
 .agent-cockpit-markdown img {

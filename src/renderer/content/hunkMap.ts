@@ -26,15 +26,23 @@ function addHunkLines(set: Set<number>, h: PatchHunk): void {
 }
 
 function nearestNewContext(h: PatchHunk, oldLine: number): number | null {
-  let best: number | null = null;
+  // Track the best candidate's old-file AND new-file line together: the
+  // tie-break must only ever compare old-file distances against each
+  // other. `bestOldLine` is that comparison key; `bestNewLine` is the
+  // value we ultimately return. Comparing `oldLine` against a stored
+  // *new*-file number (as the previous implementation did) silently mixes
+  // coordinate spaces once a hunk's old/new offset has shifted.
+  let bestOldLine: number | null = null;
+  let bestNewLine: number | null = null;
   for (const ln of h.lines) {
     if (ln.kind === 'context' && ln.oldLine != null && ln.newLine != null) {
-      if (best == null || Math.abs(ln.oldLine - oldLine) < Math.abs((best ?? 0) - oldLine)) {
-        best = ln.newLine;
+      if (bestOldLine == null || Math.abs(ln.oldLine - oldLine) < Math.abs(bestOldLine - oldLine)) {
+        bestOldLine = ln.oldLine;
+        bestNewLine = ln.newLine;
       }
     }
   }
-  return best;
+  return bestNewLine;
 }
 
 export function mapHunksToBlocks(

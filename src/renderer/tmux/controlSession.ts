@@ -442,11 +442,21 @@ export function pushClientSize(host: HTMLElement | null): void {
  * `pushClientSize`, from real pixel/font/resize events) need a genuinely
  * pixel-derived size, not tmux's current one.
  */
-export function nudgeClientSize(host: HTMLElement | null): void {
+export function nudgeClientSize(host: HTMLElement | null, windowId?: string | null): void {
   if (!host) return;
   const st = useTmuxStore.getState();
   const view = selectActiveView(st);
-  const win = view.activeWindowId ? (view.windows[view.activeWindowId] ?? null) : null;
+  // `windowId`, when given, lets a caller that already knows exactly which
+  // window it means (e.g. the queued-refresh-on-focus effect, right after a
+  // LOCAL `currentWindow` change) read that window's own layout instead of
+  // `view.activeWindowId` — which the STORE only updates once tmux's
+  // `%session-window-changed` reply for a just-issued `select-window` lands,
+  // a reply that can still be in flight at the exact moment a queued refresh
+  // fires. Every window in a session shares the same client-driven viewport
+  // size in this app's usage model, so the two sources normally agree; the
+  // parameter removes the theoretical staleness rather than relying on that.
+  const targetWindowId = windowId ?? view.activeWindowId;
+  const win = targetWindowId ? (view.windows[targetWindowId] ?? null) : null;
   const root = win?.visibleLayout ?? win?.layout ?? null; // both roots carry window size
   const { cols, rows } = root ? { cols: root.w, rows: root.h } : clientCells(host);
   if (cols <= 0 || rows <= 0) return;
@@ -458,13 +468,18 @@ export function nudgeClientSize(host: HTMLElement | null): void {
   });
 }
 
-/** Per-project single-flight guard for {@link nudgePaneRows}. A rapid second
- *  click must not read TRANSIENT heights from the store while the first nudge's
- *  shrink/restore commands are still in flight — a layout-change notification
- *  from the first nudge landing mid-flight could make a second call "restore" to
- *  the wrong (already-shrunken) height permanently. Cleared once every command
- *  from the run has settled (or been swallowed by its own `.catch`), or
- *  immediately on a pre-send bail (see {@link nudgePaneRows}). */
+/** Per-(project, window) single-flight guard for {@link nudgePaneRows}, keyed
+ *  `${projectId}:${windowId}`. A rapid second nudge of the SAME window must not
+ *  read TRANSIENT heights from the store while the first nudge's shrink/restore
+ *  commands are still in flight — a layout-change notification from the first
+ *  nudge landing mid-flight could make a second call "restore" to the wrong
+ *  (already-shrunken) height permanently. Different windows' leaves are
+ *  independent geometry unaffected by each other's resize-pane calls, so
+ *  keying per-window (not just per-project) lets a reconnect refresh every tab
+ *  concurrently without the guard falsely serializing unrelated windows.
+ *  Cleared once every command from the run has settled (or been swallowed by
+ *  its own `.catch`), or immediately on a pre-send bail (see
+ *  {@link nudgePaneRows}). */
 const paneNudgeInFlight = new Set<string>();
 
 /** Leaf `{paneId, h}` pairs of a layout tree, depth-first left to right — the
@@ -521,8 +536,9 @@ export function nudgePaneRows(projectId: string, windowId: string): void {
   if (win.isZoomed) return;
   const leaves = collectLeafHeights(win.layout);
   if (leaves.length < 2) return; // single pane: nudgeClientSize already covers it
-  if (paneNudgeInFlight.has(projectId)) return; // a rapid second click must not read transient heights
-  paneNudgeInFlight.add(projectId);
+  const guardKey = `${projectId}:${windowId}`;
+  if (paneNudgeInFlight.has(guardKey)) return; // a rapid second nudge of this window must not read transient heights
+  paneNudgeInFlight.add(guardKey);
 
   requestAnimationFrame(() => {
     if (useTmuxStore.getState().activeProjectId !== projectId) {
@@ -531,7 +547,7 @@ export function nudgePaneRows(projectId: string, windowId: string): void {
       // than sending anyway) guarantees a shrunken pane can never be stranded on
       // an inactive/switched-away project. Mirrors nudgeClientSize's own guarded
       // restore.
-      paneNudgeInFlight.delete(projectId);
+      paneNudgeInFlight.delete(guardKey);
       return;
     }
     const sent: Promise<unknown>[] = [];
@@ -559,8 +575,113 @@ export function nudgePaneRows(projectId: string, windowId: string): void {
     }
     // Clear the single-flight guard once every reply (or its swallowed
     // rejection) has landed.
-    void Promise.allSettled(sent).finally(() => paneNudgeInFlight.delete(projectId));
+    void Promise.allSettled(sent).finally(() => paneNudgeInFlight.delete(guardKey));
   });
+}
+
+/** The ONE definition of "real, visible terminal tab": not a hidden/reserved
+ *  window, and past mid-creation (has a layout). A window without a layout
+ *  yet would otherwise render the empty "No panes yet" body behind a
+ *  clickable tab. Pure — takes plain `windowOrder`/`windows` rather than a
+ *  projectId, so `ControlTerminalPanel` can feed it its own React-subscribed,
+ *  reactively-updating values for the rendered tab strip (`tabWindows`),
+ *  while {@link visibleTabWindowIds} below feeds it a fresh store read for
+ *  imperative (non-render) call sites. One filter, two callers — do not
+ *  reintroduce a second inline copy of this predicate. */
+export function filterVisibleTabs(
+  windowOrder: readonly string[],
+  windows: Record<string, { name: string; layout: unknown } | undefined>,
+): string[] {
+  return windowOrder.filter((id) => !isHiddenWindow(windows[id]?.name) && windows[id]?.layout != null);
+}
+
+/** Real (non-hidden) terminal tabs for a project that currently have a
+ *  layout — {@link filterVisibleTabs} over a FRESH store read, for imperative
+ *  call sites outside React render (reinit, resize/font-change) that can't
+ *  depend on the component's rendered `tabWindows`. */
+export function visibleTabWindowIds(projectId: string): string[] {
+  const view = useTmuxStore.getState().byProject[projectId];
+  return filterVisibleTabs(view?.windowOrder ?? [], view?.windows ?? {});
+}
+
+/**
+ * Lazy refresh-on-focus queue for background tabs (local_repo_explorer:
+ * reconnect refresh should not race the whole window/pane inventory).
+ *
+ * A tab that isn't on screen right now can't be safely hard-refreshed the
+ * instant its window/pane inventory goes stale (reconnect) or its geometry
+ * goes stale (host resize, font change): doing so for every background tab at
+ * once — the previous approach — fires `hardRecoverTab` concurrently across
+ * many windows while tmux may still be replaying the `%layout-change`/
+ * `%window-add` catch-up stream, so a tab's capture-pane reply can land
+ * against layout that's already stale by the time it arrives (the "tab
+ * doesn't match its panel" symptom). Instead, a stale window is only ever
+ * QUEUED here; the refresh itself runs once — and only once — that window
+ * actually becomes the visible tab (see `ControlTerminalPanel`'s
+ * queued-refresh-on-focus effect, the sole consumer of
+ * {@link takePendingWindowRefresh}). At most one window is ever being
+ * refreshed at a time this way, well after tmux's own inventory has settled.
+ *
+ * `projectId -> Set<windowId>`, matching this file's other per-project state
+ * (`channelEpoch`, `reinitPending`, etc.) rather than a flat
+ * `${projectId}:${windowId}` composite-key Set: a per-project bulk clear (see
+ * `resetControlSession`) is then a direct O(1) `.delete(projectId)`, not a
+ * full-Set prefix scan. The inner `Set<windowId>` still gives per-window dedup
+ * for free — queuing an already-pending window is a no-op, so a resize drag or
+ * a burst of reattach retries never queues more than one pending refresh per
+ * window.
+ */
+const pendingWindowRefresh = new Map<string, Set<string>>();
+
+/** Queue a lazy refresh for one window. Idempotent. */
+export function queueWindowRefresh(projectId: string, windowId: string): void {
+  let windows = pendingWindowRefresh.get(projectId);
+  if (!windows) {
+    windows = new Set();
+    pendingWindowRefresh.set(projectId, windows);
+  }
+  windows.add(windowId);
+}
+
+/** Queue a lazy refresh for every window in `windowIds` except
+ *  `exceptWindowId` — typically the currently-visible window, which the
+ *  caller refreshes eagerly instead of queuing. */
+export function queueRefreshForOtherWindows(
+  projectId: string,
+  windowIds: readonly string[],
+  exceptWindowId: string | null,
+): void {
+  for (const id of windowIds) {
+    if (id === exceptWindowId) continue;
+    queueWindowRefresh(projectId, id);
+  }
+}
+
+/** {@link visibleTabWindowIds} + {@link queueRefreshForOtherWindows} in one
+ *  call — the common case all three background-tab-refresh triggers want
+ *  (reattach, host resize, font change): queue every visible tab of a project
+ *  except one. Use this directly unless the caller also needs the resolved
+ *  tab list itself for something else (e.g. a diagnostic log), in which case
+ *  call {@link visibleTabWindowIds} once and pass its result to
+ *  {@link queueRefreshForOtherWindows} instead of duplicating the read. */
+export function queueRefreshForOtherVisibleTabs(projectId: string, exceptWindowId: string | null): void {
+  queueRefreshForOtherWindows(projectId, visibleTabWindowIds(projectId), exceptWindowId);
+}
+
+/** If `windowId` has a queued refresh, clears it and returns true (the caller
+ *  should now run the refresh); otherwise a no-op returning false. */
+export function takePendingWindowRefresh(projectId: string, windowId: string): boolean {
+  const windows = pendingWindowRefresh.get(projectId);
+  if (!windows || !windows.has(windowId)) return false;
+  windows.delete(windowId);
+  if (windows.size === 0) pendingWindowRefresh.delete(projectId);
+  return true;
+}
+
+/** Drop every pending refresh queued for a project (disconnect/full reset) —
+ *  see {@link resetControlSession}. */
+function clearPendingWindowRefreshForProject(projectId: string): void {
+  pendingWindowRefresh.delete(projectId);
 }
 
 // ---- Project-scoped lifecycle (single shared subscription) ----
@@ -827,6 +948,7 @@ export function resetControlSession(projectId?: string): void {
     clearReinitRetry(projectId);
     inFlight.delete(projectId);
     ready.delete(projectId);
+    clearPendingWindowRefreshForProject(projectId);
     return;
   }
   subscription?.();
@@ -840,4 +962,5 @@ export function resetControlSession(projectId?: string): void {
   reinitRetryAttempts.clear();
   inFlight.clear();
   ready.clear();
+  pendingWindowRefresh.clear();
 }

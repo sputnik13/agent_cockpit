@@ -367,14 +367,19 @@ connection status; it is driven off a **channel-attach epoch**.
   stale-display class: it skipped re-init entirely on a reattach.
 - **Display restore.** After the window sync, `controlSession` fires
   `subscribeReinit`; `ControlTerminalPanel` mirrors the toolbar **hard refresh**
-  for the active project — `hardRecoverTab` (capture-pane re-seed of normal-screen
-  panes, so content missed during the drop is recovered; alt-screen TUIs are gated
-  to a repaint only, no runaway scroll) plus a `nudgeClientSize` resize round-trip
-  that makes tmux re-emit `%output` and SIGWINCH the pane apps, plus a
-  `nudgePaneRows` per-pane absolute-height round-trip (sent immediately after
-  `nudgeClientSize`, same ordering contract as the toolbar refresh) so every pane
-  of a multi-pane stacked split redraws, not just the first — see CLAUDE.md
-  "Control-mode tab refresh is three-tier" for the full mechanism.
+  for the tab ON SCREEN right now — `hardRecoverTab` (capture-pane re-seed of
+  normal-screen panes, so content missed during the drop is recovered; alt-screen
+  TUIs are gated to a repaint only, no runaway scroll) plus a `nudgeClientSize`
+  resize round-trip that makes tmux re-emit `%output` and SIGWINCH the pane apps,
+  plus a `nudgePaneRows` per-pane absolute-height round-trip (sent immediately
+  after `nudgeClientSize`, same ordering contract as the toolbar refresh) so
+  every pane of a multi-pane stacked split redraws, not just the first. Every
+  OTHER visible tab of the project is only QUEUED for this same refresh, run
+  lazily the instant it's actually focused — an eager, concurrent refresh of
+  every tab was tried first and reverted because it raced tmux's own
+  `%layout-change`/`%window-add` catch-up stream after a reattach. See CLAUDE.md
+  "Control-mode tab refresh is three-tier" and "Control-mode background-tab
+  refresh is lazy" for the full mechanism.
 - **Per-project teardown.** `resetControlSession(projectId)` clears only that
   project's lifecycle and **keeps** the shared `evt:tmux` subscription and that
   project's `channelEpoch`, so disconnecting one project never clobbers another
@@ -390,9 +395,13 @@ connection status; it is driven off a **channel-attach epoch**.
 
 **Regression check:** on a remote project, force a `-CC` channel flap (kill the
 SSH transport, or sleep/wake the host) so it auto-reattaches with **no** user
-action: the window list and every pane display must be correct without a manual
-refresh or window switch, and the tab focused must be the window the user was
-last working in (not the first).
+action: the window list must be correct and the tab ON SCREEN at reattach time
+must display correctly, with no manual refresh needed; the tab focused must be
+the window the user was last working in (not the first). With 2+ tabs open and
+a background tab desynced before the flap, that tab is NOT expected to refresh
+until it's actually switched to — by design (see "Control-mode background-tab
+refresh is lazy" in CLAUDE.md) — but switching to it must then show it already
+correct, with no manual refresh needed either.
 
 ### Terminal Lifecycle Decoupling (invariant)
 

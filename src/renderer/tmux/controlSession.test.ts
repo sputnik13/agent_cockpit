@@ -49,10 +49,14 @@ import {
   ensureWindows,
   nudgeClientSize,
   nudgePaneRows,
+  queueRefreshForOtherWindows,
+  queueWindowRefresh,
   reconcile,
   resetControlSession,
   restoreActiveWindow,
   syncFromTmux,
+  takePendingWindowRefresh,
+  visibleTabWindowIds,
   whenReady,
 } from './controlSession';
 import { emptyView, useTmuxStore } from './tmuxStore';
@@ -763,6 +767,112 @@ describe('nudgePaneRows (per-pane row round-trip — local_repo_explorer-bvni)',
     raf.flush();
     const issued = api.tmuxControl.command.mock.calls.map((c) => c[0] as string);
     expect(issued).toEqual([...triple('%0', 10), ...triple('%1', 12), ...triple('%2', 14)]);
+  });
+
+  it('a call for a DIFFERENT window of the same project proceeds concurrently (guard is per-window, not per-project)', () => {
+    const P = 'proj-nudge-multiwindow';
+    useTmuxStore.getState().setActiveProject(P);
+    seedWindow(P, '@0', tb3());
+    seedWindow(P, '@1', tb3());
+
+    nudgePaneRows(P, '@0');
+    expect(raf.pending()).toBe(1);
+    nudgePaneRows(P, '@1'); // a different window: must NOT be blocked by @0's in-flight guard
+    expect(raf.pending()).toBe(2);
+
+    raf.flush();
+    const issued = api.tmuxControl.command.mock.calls.map((c) => c[0] as string);
+    expect(issued).toEqual([
+      ...triple('%0', 10),
+      ...triple('%1', 12),
+      ...triple('%2', 14),
+      ...triple('%0', 10),
+      ...triple('%1', 12),
+      ...triple('%2', 14),
+    ]);
+  });
+});
+
+describe('window refresh queue (lazy refresh-on-focus)', () => {
+  beforeEach(() => {
+    useTmuxStore.getState().reset();
+  });
+
+  it('take returns false when nothing was queued, and does not consume anything', () => {
+    expect(takePendingWindowRefresh('proj-q1', '@0')).toBe(false);
+  });
+
+  it('queue then take: true once, false on a second take (consumed)', () => {
+    queueWindowRefresh('proj-q2', '@0');
+    expect(takePendingWindowRefresh('proj-q2', '@0')).toBe(true);
+    expect(takePendingWindowRefresh('proj-q2', '@0')).toBe(false);
+  });
+
+  it('dedups: queuing the same window twice is still just one pending entry', () => {
+    queueWindowRefresh('proj-q3', '@0');
+    queueWindowRefresh('proj-q3', '@0');
+    expect(takePendingWindowRefresh('proj-q3', '@0')).toBe(true);
+    expect(takePendingWindowRefresh('proj-q3', '@0')).toBe(false);
+  });
+
+  it('is keyed per (project, window): a queue for one window/project never leaks into another', () => {
+    queueWindowRefresh('proj-q4', '@0');
+    expect(takePendingWindowRefresh('proj-q4', '@1')).toBe(false); // different window, same project
+    expect(takePendingWindowRefresh('other-proj', '@0')).toBe(false); // same window id, different project
+    expect(takePendingWindowRefresh('proj-q4', '@0')).toBe(true); // the actual queued entry is untouched
+  });
+
+  it('queueRefreshForOtherWindows queues every window except the excluded one', () => {
+    const P = 'proj-q5';
+    queueRefreshForOtherWindows(P, ['@0', '@1', '@2'], '@1');
+    expect(takePendingWindowRefresh(P, '@0')).toBe(true);
+    expect(takePendingWindowRefresh(P, '@1')).toBe(false); // excluded — never queued
+    expect(takePendingWindowRefresh(P, '@2')).toBe(true);
+  });
+
+  it('queueRefreshForOtherWindows with exceptWindowId=null queues every window (nothing was refreshed eagerly)', () => {
+    const P = 'proj-q6';
+    queueRefreshForOtherWindows(P, ['@0', '@1'], null);
+    expect(takePendingWindowRefresh(P, '@0')).toBe(true);
+    expect(takePendingWindowRefresh(P, '@1')).toBe(true);
+  });
+
+  it('visibleTabWindowIds excludes hidden/reserved windows and windows without a layout yet', () => {
+    const P = 'proj-q7';
+    const leafNode = leaf('%0', 24);
+    useTmuxStore.setState((st) => ({
+      byProject: {
+        ...st.byProject,
+        [P]: {
+          ...emptyView(),
+          windowOrder: ['@0', '@1', 'persistent', 'run-1', '@2'],
+          windows: {
+            '@0': { windowId: '@0', name: 'shell', layout: leafNode },
+            '@1': { windowId: '@1', name: 'mid-create', layout: null }, // no layout yet
+            persistent: { windowId: 'persistent', name: 'persistent', layout: leafNode },
+            'run-1': { windowId: 'run-1', name: 'run-1', layout: leafNode },
+            '@2': { windowId: '@2', name: 'other', layout: leafNode },
+          },
+        },
+      },
+    }));
+    expect(visibleTabWindowIds(P)).toEqual(['@0', '@2']);
+  });
+
+  it('resetControlSession(projectId) clears only that project\'s pending queue', () => {
+    queueWindowRefresh('proj-q8a', '@0');
+    queueWindowRefresh('proj-q8b', '@0');
+    resetControlSession('proj-q8a');
+    expect(takePendingWindowRefresh('proj-q8a', '@0')).toBe(false);
+    expect(takePendingWindowRefresh('proj-q8b', '@0')).toBe(true); // untouched
+  });
+
+  it('resetControlSession() (full reset) clears every project\'s pending queue', () => {
+    queueWindowRefresh('proj-q9a', '@0');
+    queueWindowRefresh('proj-q9b', '@0');
+    resetControlSession();
+    expect(takePendingWindowRefresh('proj-q9a', '@0')).toBe(false);
+    expect(takePendingWindowRefresh('proj-q9b', '@0')).toBe(false);
   });
 });
 

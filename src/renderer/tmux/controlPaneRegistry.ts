@@ -517,6 +517,19 @@ export function mayReseed(alt: boolean | undefined): boolean {
   return alt === false;
 }
 
+/** In-flight guard for {@link hardRecoverTab}, keyed `${projectId} ${windowId}`
+ *  (same shape as {@link compositeId}, but over windowId — a separate id space
+ *  from paneId, so it's kept in its own Set rather than reusing that helper).
+ *  Multiple triggers can target the SAME window
+ *  (a queued-refresh-on-focus firing right as the user shift-clicks the manual
+ *  hard-refresh button, or a reattach racing a manual refresh) — without this,
+ *  two concurrent calls independently `capture-pane` + `reseedPane` the same
+ *  pane, and their CLEAR_BEFORE_SEED writes can interleave into a garbled
+ *  screen. Self-clearing (added/removed within one call's own lifetime), so —
+ *  unlike `pendingWindowRefresh` in controlSession.ts — a flat composite-key
+ *  Set is the right shape here: no per-project bulk clear is ever needed. */
+const hardRecoverInFlight = new Set<string>();
+
 /**
  * HARD-recover every pane in the active tab: re-seed panes on the NORMAL screen
  * from `capture-pane`, and cheap-repaint panes on the ALTERNATE screen (whose
@@ -525,29 +538,39 @@ export function mayReseed(alt: boolean | undefined): boolean {
  * learns each pane's `#{alternate_on}`. Safe default ({@link mayReseed}): a pane
  * is re-seeded ONLY when positively known to be on the normal screen; unknown /
  * query-failed / alternate all fall back to the non-destructive repaint.
+ *
+ * A second call for the SAME (projectId, windowId) while one is already
+ * running is a no-op — see {@link hardRecoverInFlight}.
  */
 export async function hardRecoverTab(projectId: string, windowId: string | null): Promise<void> {
   if (!windowId) return;
-  const layout = useTmuxStore.getState().byProject[projectId]?.windows[windowId]?.layout ?? null;
-  const paneIds = collectLayoutPaneIds(layout);
-  if (paneIds.length === 0) return;
-
-  let altById = new Map<string, boolean>();
+  const guardKey = `${projectId} ${windowId}`;
+  if (hardRecoverInFlight.has(guardKey)) return;
+  hardRecoverInFlight.add(guardKey);
   try {
-    const reply = await useTmuxStore.getState().command(listPanesAltScreen(windowId));
-    if (!reply.error) altById = parseAltScreenReply(reply.lines);
-  } catch {
-    /* query failed; every pane falls back to the safe repaint below */
-  }
+    const layout = useTmuxStore.getState().byProject[projectId]?.windows[windowId]?.layout ?? null;
+    const paneIds = collectLayoutPaneIds(layout);
+    if (paneIds.length === 0) return;
 
-  for (const paneId of paneIds) {
-    const e = entries.get(compositeId(projectId, paneId));
-    if (!e) continue;
-    if (mayReseed(altById.get(paneId))) {
-      await reseedPane(e); // positively normal-screen: full re-seed is safe
-    } else {
-      recover(e); // alt-screen / unknown: non-destructive repaint only
+    let altById = new Map<string, boolean>();
+    try {
+      const reply = await useTmuxStore.getState().command(listPanesAltScreen(windowId));
+      if (!reply.error) altById = parseAltScreenReply(reply.lines);
+    } catch {
+      /* query failed; every pane falls back to the safe repaint below */
     }
+
+    for (const paneId of paneIds) {
+      const e = entries.get(compositeId(projectId, paneId));
+      if (!e) continue;
+      if (mayReseed(altById.get(paneId))) {
+        await reseedPane(e); // positively normal-screen: full re-seed is safe
+      } else {
+        recover(e); // alt-screen / unknown: non-destructive repaint only
+      }
+    }
+  } finally {
+    hardRecoverInFlight.delete(guardKey);
   }
 }
 

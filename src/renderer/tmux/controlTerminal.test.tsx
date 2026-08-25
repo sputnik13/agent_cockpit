@@ -40,6 +40,7 @@ import { useTmuxStore, emptyView, selectActiveView, type WindowState } from './t
 import { resetControlSession } from './controlSession';
 import * as paneRegistry from './controlPaneRegistry';
 import { useProjectsStore, useSessionStore } from '@renderer/providerClient';
+import { useSettingsStore } from '../settings/settingsStore';
 
 const ACTIVE = 'proj-1';
 const leaf = (paneId: string): WindowState['layout'] => ({ type: 'leaf', paneId, w: 80, h: 24, x: 0, y: 0 });
@@ -100,15 +101,25 @@ describe('ControlTerminalPanel', () => {
     await waitFor(() => expect(container.querySelector('.ac-term')).not.toBeNull());
   });
 
-  it('re-seeds the active tab on a silent control-channel reattach (attached epoch, no status change)', async () => {
+  it('re-seeds the active tab immediately on a silent reattach, and QUEUES the rest for a refresh on focus (attached epoch, no status change)', async () => {
     const { container } = render(<ControlTerminalPanel />);
     await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
     act(() => {
       setActiveSlice({
-        windowOrder: ['@0'],
-        windows: { '@0': { windowId: '@0', name: 'shell', layout: leaf('%0') } },
+        // Two real tabs plus a reserved/hidden window — only real tabs are ever
+        // eligible for a refresh (eager or queued); the hidden one never is.
+        windowOrder: ['@0', '@1', 'persistent'],
+        windows: {
+          '@0': { windowId: '@0', name: 'shell', layout: leaf('%0') },
+          '@1': { windowId: '@1', name: 'other-tab', layout: leaf('%1') },
+          persistent: { windowId: 'persistent', name: 'persistent', layout: leaf('%9') },
+        },
         activeWindowId: '@0',
-        panes: { '%0': { paneId: '%0', windowId: '@0' } },
+        panes: {
+          '%0': { paneId: '%0', windowId: '@0' },
+          '%1': { paneId: '%1', windowId: '@1' },
+          '%9': { paneId: '%9', windowId: 'persistent' },
+        },
       });
     });
     await waitFor(() => expect(container.querySelector('.ac-term')).not.toBeNull());
@@ -117,7 +128,7 @@ describe('ControlTerminalPanel', () => {
     // not bail and fires the reinit notification the panel listens for.
     api.tmuxControl.command.mockImplementation(async (args: string) =>
       args.startsWith('list-windows')
-        ? { num: 1, error: false, lines: ['@0 shell'] }
+        ? { num: 1, error: false, lines: ['@0 shell', '@1 other-tab', 'persistent persistent'] }
         : { num: 1, error: false, lines: [] },
     );
     const hardSpy = vi.spyOn(paneRegistry, 'hardRecoverTab').mockResolvedValue(undefined);
@@ -126,10 +137,103 @@ describe('ControlTerminalPanel', () => {
     // status transition — the case that previously left the display stale.
     act(() => api.emitTmux({ projectId: ACTIVE, notification: { type: 'attached', epoch: 7 } }));
 
+    // The visible tab (@0) is hard-refreshed right away.
     await waitFor(() => expect(hardSpy).toHaveBeenCalledWith(ACTIVE, '@0'));
+    // The background tab (@1) is NOT — it's queued, not refreshed eagerly — and
+    // the hidden window is never a candidate at all.
+    expect(hardSpy).not.toHaveBeenCalledWith(ACTIVE, '@1');
+    expect(hardSpy).not.toHaveBeenCalledWith(ACTIVE, 'persistent');
+
+    // Switching to the background tab consumes its queued refresh.
+    fireEvent.click(screen.getByText('other-tab'));
+    await waitFor(() => expect(hardSpy).toHaveBeenCalledWith(ACTIVE, '@1'));
+    expect(hardSpy).not.toHaveBeenCalledWith(ACTIVE, 'persistent');
+
     hardSpy.mockRestore();
     api.tmuxControl.command.mockReset();
     api.tmuxControl.command.mockResolvedValue({ num: 1, error: false, lines: [] });
+  });
+
+  it('a font-size change queues background tabs for a refresh on focus, without touching the active tab', async () => {
+    render(<ControlTerminalPanel />);
+    await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
+    act(() => {
+      setActiveSlice({
+        windowOrder: ['@0', '@1'],
+        windows: {
+          '@0': { windowId: '@0', name: 'shell', layout: leaf('%0') },
+          '@1': { windowId: '@1', name: 'other-tab', layout: leaf('%1') },
+        },
+        activeWindowId: '@0',
+        panes: {
+          '%0': { paneId: '%0', windowId: '@0' },
+          '%1': { paneId: '%1', windowId: '@1' },
+        },
+      });
+    });
+    await waitFor(() => expect(screen.getByText('shell')).toBeInTheDocument());
+
+    const hardSpy = vi.spyOn(paneRegistry, 'hardRecoverTab').mockResolvedValue(undefined);
+    const originalFontSize = useSettingsStore.getState().settings.fontSize;
+
+    try {
+      act(() => {
+        useSettingsStore.setState((s) => ({ settings: { ...s.settings, fontSize: s.settings.fontSize + 1 } }));
+      });
+
+      // A font change alone never hard-refreshes anything directly — it only
+      // queues background tabs for a refresh once they're actually focused.
+      expect(hardSpy).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByText('other-tab'));
+      await waitFor(() => expect(hardSpy).toHaveBeenCalledWith(ACTIVE, '@1'));
+      // The tab that was already active when the font changed was never queued.
+      expect(hardSpy).not.toHaveBeenCalledWith(ACTIVE, '@0');
+    } finally {
+      hardSpy.mockRestore();
+      useSettingsStore.setState((s) => ({ settings: { ...s.settings, fontSize: originalFontSize } }));
+    }
+  });
+
+  it('remounting the panel with pre-existing tab state (e.g. a Dockview panel close+reopen) never queues a background tab for refresh', async () => {
+    const first = render(<ControlTerminalPanel />);
+    await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
+    act(() => {
+      setActiveSlice({
+        windowOrder: ['@0', '@1'],
+        windows: {
+          '@0': { windowId: '@0', name: 'shell', layout: leaf('%0') },
+          '@1': { windowId: '@1', name: 'other-tab', layout: leaf('%1') },
+        },
+        activeWindowId: '@0',
+        panes: {
+          '%0': { paneId: '%0', windowId: '@0' },
+          '%1': { paneId: '%1', windowId: '@1' },
+        },
+      });
+    });
+    await waitFor(() => expect(screen.getByText('shell')).toBeInTheDocument());
+    // Unmount WITHOUT touching tmuxStore — its per-project slice (including
+    // both windows above) survives, exactly like a Dockview panel close: only
+    // the component tree goes away, not the store.
+    first.unmount();
+
+    // Remount. Every dependency-array effect (the font-change queuing effect
+    // in particular) fires once on this fresh mount too — with real tab data
+    // ALREADY present this time (unlike a truly first mount, where no windows
+    // exist yet) — and must still not treat that firing as a real font change.
+    render(<ControlTerminalPanel />);
+    await waitFor(() => expect(screen.getByText('shell')).toBeInTheDocument());
+
+    const hardSpy = vi.spyOn(paneRegistry, 'hardRecoverTab').mockResolvedValue(undefined);
+    fireEvent.click(screen.getByText('other-tab'));
+    // Give any stray queued microtask/effect a chance to run before asserting
+    // the negative.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(hardSpy).not.toHaveBeenCalledWith(ACTIVE, '@1');
+    hardSpy.mockRestore();
   });
 
   it('routes notifications to the addressed project and only renders the active one', async () => {

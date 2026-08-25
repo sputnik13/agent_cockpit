@@ -16,14 +16,18 @@ import {
   acquireControlSession,
   controlBridgeReady,
   createTerminalWindow,
-  isHiddenWindow,
+  filterVisibleTabs,
   nudgeClientSize,
   nudgePaneRows,
   pushClientSize,
+  queueRefreshForOtherVisibleTabs,
+  queueRefreshForOtherWindows,
   releaseControlSession,
   resetControlSession,
   subscribeReinit,
   syncFromTmux,
+  takePendingWindowRefresh,
+  visibleTabWindowIds,
 } from './controlSession';
 import { killWindow as killWindowCmd, renameWindow as renameWindowCmd } from '@shared/tmux';
 import { Button, Dialog, EmptyState, IconButton, TabbedPanelHeader, cn } from '../ui';
@@ -139,11 +143,33 @@ export function ControlTerminalPanel(): JSX.Element {
     const host = hostRef.current;
     if (!host || !isOpen) return;
     let rafId: number | null = null;
+    // ResizeObserver.observe() always fires its callback once immediately with
+    // the CURRENT size (not a change) — that first firing is a baseline report,
+    // not a real resize, so it must not queue every background tab. Without
+    // this, every mount of this effect (including a Dockview panel remount when
+    // the Terminal panel is closed and reopened, which does not touch tmuxStore
+    // state at all) would spuriously mark every visited background tab pending,
+    // paying an unneeded hardRecoverTab/nudgePaneRows the next time it's
+    // focused — wasted traffic and, for normal-screen panes, a visible
+    // clear+rewrite flash on a tab that was never actually stale.
+    let sawFirstResize = false;
     const push = (): void => {
       if (rafId !== null) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         rafId = null;
         pushClientSize(host);
+        if (!sawFirstResize) {
+          sawFirstResize = true;
+          return;
+        }
+        // The client resize only actually redraws the ACTIVE window (tmux only
+        // SIGWINCHes panes on a real size change, and nudgeClientSize/nudgePaneRows
+        // target one window). Every other visible tab's geometry is now stale until
+        // it's visited — queue it for a refresh on focus instead of nudging it now
+        // (queuing is a Set add: a whole resize drag collapses to one pending entry
+        // per window). See queueRefreshForOtherVisibleTabs / takePendingWindowRefresh.
+        const pid = activeIdRef.current;
+        if (pid) queueRefreshForOtherVisibleTabs(pid, currentWindowRef.current);
       });
     };
     const ro = new ResizeObserver(push);
@@ -222,12 +248,29 @@ export function ControlTerminalPanel(): JSX.Element {
     // clientCells reads them.
   }, [isOpen, fontFamily, fontSize, activeId]);
 
-  // Terminal tabs are every window except the hidden reserved ones and windows
-  // that do not have a layout yet (mid-creation): a tab without a layout would
-  // otherwise render the empty "No panes yet" body behind a clickable tab.
-  const tabWindows = windowOrder.filter(
-    (id) => !isHiddenWindow(windows[id]?.name) && windows[id]?.layout != null,
-  );
+  // A font change re-fits EVERY pane's cell size, but the effect above only
+  // re-pushes the client size (and thus only visibly re-renders) the ACTIVE
+  // window. Queue every other visible tab for a refresh on focus — deliberately
+  // NOT keyed on `activeId` (unlike the effect above): a plain project switch
+  // must not queue that project's background tabs, only a genuine font change.
+  // Every dependency-array effect also fires once on mount (and Dockview
+  // remounts this whole component when the Terminal panel is closed and
+  // reopened, without touching fontFamily/fontSize at all) — that first firing
+  // isn't a font CHANGE, so it must not queue anything either; skip it via a
+  // ref that only ever flips once, mirroring the resize effect's `sawFirstResize`.
+  const skippedFirstFontEffect = useRef(false);
+  useEffect(() => {
+    if (!skippedFirstFontEffect.current) {
+      skippedFirstFontEffect.current = true;
+      return;
+    }
+    const pid = activeIdRef.current;
+    if (!pid) return;
+    queueRefreshForOtherVisibleTabs(pid, currentWindowRef.current);
+  }, [fontFamily, fontSize]);
+
+  // The one definition of "real, visible tab" — see filterVisibleTabs.
+  const tabWindows = filterVisibleTabs(windowOrder, windows);
   const currentWindow =
     selectedWindow && tabWindows.includes(selectedWindow) ? selectedWindow : tabWindows[0] ?? null;
   // `layout` stays the FULL layout (drives pane-id resolution + persistence);
@@ -300,34 +343,70 @@ export function ControlTerminalPanel(): JSX.Element {
   activeIdRef.current = activeId;
 
   // Restore live pane displays after a control-channel (re)attach. A SILENT
-  // `-CC` reattach (network/keepalive flap, sleep/wake) keeps the project
+  // `-CC` reattach (network/keepalive blip, sleep/wake) keeps the project
   // `connected`, so no status transition fires and nothing else re-seeds the
-  // panes or forces tmux to re-emit — the terminal would show its stale buffer
-  // until a manual refresh. controlSession fires `subscribeReinit` after the
-  // authoritative window sync for a fresh channel epoch; mirror the toolbar HARD
-  // refresh (re-seed normal-screen panes from capture-pane so content missed
-  // during the drop is recovered + a resize round-trip that SIGWINCHes the apps;
-  // alt-screen TUIs are gated to repaint-only inside hardRecoverTab, no runaway
-  // scroll). Subscribed once; reads live state via refs. Deferred a frame so any
-  // panes mounted by the just-synced layout are acquired into the registry first.
+  // panes or forces tmux to re-emit. controlSession fires `subscribeReinit`
+  // after the authoritative window sync for a fresh channel epoch; mirror the
+  // toolbar HARD refresh (re-seed normal-screen panes from capture-pane so
+  // content missed during the drop is recovered + a per-window resize
+  // round-trip that SIGWINCHes the apps; alt-screen TUIs are gated to
+  // repaint-only inside hardRecoverTab, no runaway scroll) for the tab ON
+  // SCREEN right now — same as before this change. Every OTHER visible tab is
+  // only QUEUED (see queueRefreshForOtherWindows in controlSession.ts): hard-
+  // refreshing every background tab eagerly and concurrently was tried and
+  // reverted — it raced tmux's own `%layout-change`/`%window-add` catch-up
+  // stream after a reattach and could reseed a tab against layout that was
+  // already stale by the time its capture-pane reply landed. The queued
+  // refresh instead runs once — and only once — a background tab actually
+  // becomes visible (the queued-refresh-on-focus effect below). Subscribed
+  // once; reads live state via refs / a fresh store read. Deferred a frame so
+  // any panes mounted by the just-synced layout are acquired into the
+  // registry first.
   useEffect(() => {
     return subscribeReinit((projectId) => {
       if (projectId !== activeIdRef.current) return; // only the visible project has mounted panes
       requestAnimationFrame(() => {
         const pid = activeIdRef.current;
+        if (!pid || pid !== projectId) return;
         const win = currentWindowRef.current;
-        if (!pid || pid !== projectId || !win) return;
-        void paneRegistry.hardRecoverTab(pid, win).catch(() => {});
-        nudgeClientSize(hostRef.current);
-        nudgePaneRows(pid, win);
+        if (win) {
+          void paneRegistry.hardRecoverTab(pid, win).catch(() => {});
+          nudgeClientSize(hostRef.current, win);
+          nudgePaneRows(pid, win);
+        }
+        const tabs = visibleTabWindowIds(pid);
+        queueRefreshForOtherWindows(pid, tabs, win);
         logDiagnostic(
           'info',
           'control-terminal',
-          `reattach-reseed project=${pid} window=${win} trigger=channel-reattach`,
+          `reattach-reseed project=${pid} window=${win ?? 'none'} ` +
+            `queued=${tabs.filter((id) => id !== win).join(',') || 'none'} trigger=channel-reattach`,
         );
       });
     });
   }, []);
+
+  // Run any refresh queued for the tab that just became visible — either a
+  // background tab that was queued at reattach time (above), or one queued
+  // after a host resize / font change (both queue every OTHER window; see
+  // controlSession.ts). Lazy on purpose: this is the ONLY place a queued
+  // refresh actually executes, and it only ever touches the ONE window that
+  // just became current, so it can never race a concurrent refresh of another
+  // tab. A no-op (`takePendingWindowRefresh` returns false) for the overwhelming
+  // majority of tab switches, where nothing was queued.
+  useEffect(() => {
+    if (!activeId || !currentWindow) return;
+    if (!takePendingWindowRefresh(activeId, currentWindow)) return;
+    const pid = activeId;
+    const win = currentWindow;
+    void paneRegistry.hardRecoverTab(pid, win).catch(() => {});
+    // Pass `win` explicitly — the STORE's activeWindowId may still lag behind
+    // this LOCAL currentWindow change (tmux's %session-window-changed reply
+    // for the select-window this tab click issued can still be in flight).
+    nudgeClientSize(hostRef.current, win);
+    nudgePaneRows(pid, win);
+    logDiagnostic('info', 'control-terminal', `focus-reseed project=${pid} window=${win} trigger=queued-refresh`);
+  }, [activeId, currentWindow]);
 
   // Persist the active pane per project so it can be restored on switch-back /
   // after an app restart. Guarded on layout membership: during a project switch
@@ -392,7 +471,7 @@ export function ControlTerminalPanel(): JSX.Element {
     } else {
       paneRegistry.recoverTab(projectId, windowId);
     }
-    nudgeClientSize(hostRef.current);
+    nudgeClientSize(hostRef.current, windowId);
     nudgePaneRows(projectId, windowId);
     const sizes = ids.map((id) => {
       const s = paneRegistry.getPaneTermSize(projectId, id);
@@ -460,10 +539,7 @@ export function ControlTerminalPanel(): JSX.Element {
         .catch(() => {});
     };
     const navTab = (dir: -1 | 1): void => {
-      const view = selectActiveView(useTmuxStore.getState());
-      const tabs = view.windowOrder.filter(
-        (id) => !isHiddenWindow(view.windows[id]?.name) && view.windows[id]?.layout != null,
-      );
+      const tabs = visibleTabWindowIds(activeIdRef.current ?? '');
       const idx = currentWindowRef.current ? tabs.indexOf(currentWindowRef.current) : -1;
       if (idx < 0 || tabs.length === 0) return;
       const next = tabs[(idx + dir + tabs.length) % tabs.length];
@@ -531,10 +607,7 @@ export function ControlTerminalPanel(): JSX.Element {
       void useTmuxStore.getState().command(args).then(afterStructural).catch(() => {});
     // Move active-window selection by `dir`, wrapping (mirrors the ⌘⇧[ / ] nav).
     const navTab = (dir: -1 | 1): void => {
-      const view = selectActiveView(useTmuxStore.getState());
-      const tabs = view.windowOrder.filter(
-        (id) => !isHiddenWindow(view.windows[id]?.name) && view.windows[id]?.layout != null,
-      );
+      const tabs = visibleTabWindowIds(activeIdRef.current ?? '');
       const idx = currentWindowRef.current ? tabs.indexOf(currentWindowRef.current) : -1;
       if (idx < 0 || tabs.length === 0) return;
       const next = tabs[(idx + dir + tabs.length) % tabs.length];

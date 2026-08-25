@@ -274,4 +274,48 @@ describe('recoverTab / hardRecoverTab (multi-pane iteration — local_repo_explo
     expect(e1.renderer.fit).toHaveBeenCalledTimes(1);
     expect(e1.renderer.repaintFromBuffer).toHaveBeenCalledTimes(1);
   });
+
+  it('a second concurrent hardRecoverTab for the SAME window is a no-op, not an interleaved double re-seed', async () => {
+    seedLayout(PROJ, WIN, { type: 'leaf', paneId: '%0', w: 80, h: 24, x: 0, y: 0 });
+    const e0 = acquire(PROJ, '%0');
+    await vi.waitFor(() => expect(h.capturePane).toHaveBeenCalledTimes(1));
+
+    h.command.mockImplementation(async (args: string) =>
+      args.startsWith('list-panes') ? { num: 1, error: false, lines: ['%0 0'] } : { num: 1, error: false, lines: [] },
+    );
+    // A capture-pane that never resolves on its own — the first call is left
+    // deliberately in flight so a second call has something to race against.
+    let resolveCapture: (lines: string[]) => void = () => {};
+    h.capturePane.mockReset();
+    h.capturePane.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCapture = resolve;
+        }),
+    );
+
+    const first = hardRecoverTab(PROJ, WIN);
+    const second = hardRecoverTab(PROJ, WIN); // fires synchronously — bails on the guard `first` already set
+    await second; // resolves immediately: it never awaits anything
+
+    // Let `first` actually progress past list-panes into reseedPane/capturePane
+    // before resolving it — otherwise `resolveCapture` would still be the
+    // stale no-op from before capturePane was ever called.
+    await vi.waitFor(() => expect(h.capturePane).toHaveBeenCalledTimes(1));
+    resolveCapture(['line one']);
+    await first;
+
+    // Exactly ONE capture-pane round trip and ONE re-seed write pair — the
+    // second call bailed immediately on the in-flight guard instead of
+    // independently re-querying/re-seeding the same pane.
+    expect(h.capturePane).toHaveBeenCalledTimes(1);
+    expect(e0.renderer.write).toHaveBeenCalledTimes(2); // CLEAR + content, once
+
+    // The guard clears once the call settles: a THIRD call afterward runs
+    // normally (not permanently stuck).
+    h.capturePane.mockReset();
+    h.capturePane.mockResolvedValue(['line two']);
+    await hardRecoverTab(PROJ, WIN);
+    expect(h.capturePane).toHaveBeenCalledTimes(1);
+  });
 });

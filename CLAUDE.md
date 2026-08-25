@@ -352,10 +352,12 @@ window closed during the drop replays no `%window-close`), reserved-window
 reconcile, `restoreActiveWindow` (adopts tmux's session-active window via a
 synthetic `session-window-changed` so reconnect focuses the LAST-worked window,
 not `tabWindows[0]`), then fires `subscribeReinit` so `ControlTerminalPanel`
-mirrors the toolbar HARD refresh (`hardRecoverTab` capture-pane re-seed of
-normal-screen panes — alt-screen gated to repaint-only, no runaway scroll — plus a
-`nudgeClientSize` resize round-trip). Re-init single-flights with a pending
-re-drain (catch a mid-sync epoch). It marks the epoch initialized **only when
+mirrors the toolbar HARD refresh for the tab ON SCREEN right now. Every OTHER
+visible tab of the project is only QUEUED for a refresh, executed lazily the
+moment it's actually focused — see "Control-mode background-tab refresh is
+lazy" below for why (an earlier eager-refresh-every-tab attempt raced tmux's
+own catch-up stream) and for the full mechanism. Re-init single-flights with a
+pending re-drain (catch a mid-sync epoch). It marks the epoch initialized **only when
 `syncFromTmux` actually read a non-empty window list** — a just-attached `-CC`
 session is briefly not queryable (empty/errored `list-windows`), and marking it
 then stranded the window list until a manual switch (the "wrong until I switch
@@ -375,6 +377,132 @@ boolean `initialized` guard or a status-inferred re-init. Full design:
 transport, or sleep/wake the host) so it auto-reattaches with NO user action: the
 window list and every pane display must be correct with no manual refresh/window
 switch, and the focused tab must be the window last worked in (not the first).
+With 2+ tabs open and a NON-active tab desynced before the flap, switching to
+that background tab after reattach must show it already correct — no manual
+refresh needed.
+
+## Control-mode background-tab refresh is lazy, queue-on-focus
+
+**Invariant:** A background tab (tmux window) whose display went stale — a
+control-channel reattach, a host resize, or a font change — is never
+hard-refreshed while it's off screen. It is only QUEUED
+(`src/renderer/tmux/controlSession.ts`: `queueWindowRefresh`/
+`queueRefreshForOtherWindows`/`queueRefreshForOtherVisibleTabs`, a
+`Map<projectId, Set<windowId>>` named `pendingWindowRefresh` — matching this
+file's other per-project state containers, e.g. `channelEpoch`/`reinitPending`,
+rather than a flat `${projectId}:${windowId}` composite-key Set), and the
+queued refresh executes exactly once, the moment that window actually becomes
+the visible tab — `ControlTerminalPanel`'s `[activeId, currentWindow]` effect
+calls `takePendingWindowRefresh` and, only if it returns true, runs the same
+tier-1/2/3 refresh (`hardRecoverTab`/`nudgeClientSize`/`nudgePaneRows`) the
+toolbar's manual refresh uses.
+
+**Why:** an earlier version hard-refreshed EVERY visible tab eagerly and
+concurrently on reattach. That raced tmux's own `%layout-change`/`%window-add`
+catch-up stream after a reattach — a background tab's `capture-pane` reply
+could land against layout that had already changed again by the time it
+arrived, producing a tab whose displayed content didn't match its own panel.
+Queuing removes the race by construction: at most one window is EVER being
+refreshed at a time (whichever tab the user just switched into), well after
+`syncFromTmux` has settled — see "Control-mode reconnect is epoch-driven"
+above for the reattach trigger itself.
+
+**Three triggers queue every OTHER visible tab (never the one on screen,
+which is refreshed eagerly instead), each via `queueRefreshForOtherVisibleTabs`
+(the `visibleTabWindowIds` + `queueRefreshForOtherWindows` pairing collapsed
+into one call — use this directly unless the caller also needs the resolved
+tab list for something else, as the reattach handler does for its diagnostic
+log):**
+- **Reattach** (`ControlTerminalPanel`'s `subscribeReinit` handler): eagerly
+  refreshes `currentWindowRef.current`, queues the rest.
+- **Host resize** (the `ResizeObserver`/`window resize` effect): `tmux` only
+  SIGWINCHes the ACTIVE window's panes on a client-size push; every other
+  tab's geometry is stale until visited, so it's queued on every settled
+  resize (a full drag collapses to one pending entry per window via the Set).
+  `ResizeObserver.observe()` always fires once immediately with the CURRENT
+  size — a baseline report, not a real resize — so the effect skips queuing
+  (but still pushes the size) on that first callback via a local
+  `sawFirstResize` flag; otherwise every mount of this effect, INCLUDING a
+  Dockview panel close+reopen (which remounts `ControlTerminalPanel` without
+  touching `tmuxStore` at all), would spuriously mark every background tab
+  pending.
+- **Font change** (`fontFamily`/`fontSize`): a DEDICATED effect keyed ONLY on
+  `[fontFamily, fontSize]` — deliberately NOT on `activeId` like the sibling
+  effect that re-pushes client size, so a plain project switch never queues
+  that project's background tabs, only a genuine font change does. Same
+  mount-firing hazard as the resize effect (every dependency-array effect
+  fires once on mount/remount too) — guarded the same way, via a
+  `skippedFirstFontEffect` ref instead of a closure-local flag (this effect,
+  unlike the resize one, doesn't get a fresh closure per "establishment").
+
+**`nudgeClientSize` takes an optional explicit `windowId`.** Without it, it
+reads `view.activeWindowId` from the STORE — which tmux only updates once the
+`%session-window-changed` reply for a just-issued `select-window` lands, a
+reply that can still be in flight at the exact moment the queued-refresh-on-
+focus effect fires (it runs off a LOCAL `currentWindow` state change, not a
+store update). The reinit handler, the manual refresh button, and the
+queued-refresh-on-focus effect all now pass their own already-known window id
+explicitly rather than relying on the store having caught up.
+
+**`hardRecoverTab` (`controlPaneRegistry.ts`) has its own in-flight guard**
+(`hardRecoverInFlight`, keyed `${projectId} ${windowId}`, self-clearing —
+correctly a flat Set, not nested, since it's per-call not per-project-bulk):
+multiple triggers can legitimately target the SAME window (a queued refresh
+firing right as the user shift-clicks the manual hard-refresh button, or a
+reattach racing a manual refresh) — without the guard, two concurrent calls
+independently `capture-pane` + re-seed the same pane and their
+`CLEAR_BEFORE_SEED` writes can interleave into a garbled screen. A second call
+for a window already being hard-recovered is a no-op.
+
+**Dedup is structural, not a separate mechanism:** each project's entry in
+`pendingWindowRefresh` is a `Set<windowId>`, so `queueWindowRefresh` is
+idempotent — queuing an already-pending window (a resize burst, overlapping
+triggers) is a no-op. `nudgePaneRows`'s own single-flight guard
+(`paneNudgeInFlight`) is a SEPARATE, narrower case — see "Single-flight per
+(project, window)" above.
+
+**Cleanup:** `resetControlSession(projectId)` clears that project's pending
+entries via a direct `pendingWindowRefresh.delete(projectId)` (O(1), same as
+every other per-project map in this file); the no-arg full reset `.clear()`s
+the whole map. A pending entry for a window that closes without ever being
+focused is a harmless, unbounded-but-tiny leak (one id in one project's Set)
+— not worth a `%window-close` hook.
+
+**Do NOT:**
+- reintroduce eager-refresh-every-visible-tab-on-reattach (the raced, reverted
+  approach);
+- fold the font-change queuing into the `activeId`-keyed client-size-push
+  effect (would spuriously queue every background tab on every plain project
+  switch);
+- flatten `pendingWindowRefresh` back into a `${projectId}:${windowId}`
+  composite-key Set (loses the O(1) per-project cleanup every sibling
+  container in this file relies on);
+- drop either mount-firing skip (`sawFirstResize` / `skippedFirstFontEffect`)
+  — without them a Dockview panel close+reopen spuriously queues every
+  background tab, causing a needless capture-pane re-seed (visible
+  clear+rewrite flash on normal-screen panes) the next time each is focused;
+- remove `hardRecoverTab`'s in-flight guard, or `nudgeClientSize`'s
+  `windowId` parameter and its explicit-pass call sites.
+
+`filterVisibleTabs(windowOrder, windows)` is the ONE definition of "real,
+visible tab" (not hidden/reserved, has a layout) — `ControlTerminalPanel`'s
+own render-time `tabWindows` and `visibleTabWindowIds`'s imperative,
+fresh-store-read variant both call it; do not reintroduce a third inline copy
+(the two keyboard-shortcut `navTab` closures already call `visibleTabWindowIds`
+directly rather than re-inlining the predicate a second time).
+
+**Regression check:** with 2+ tabs open, desync a background tab (or just note
+its content), then (a) force a `-CC` reattach, (b) resize the app window, or
+(c) change the terminal font size in Preferences — in each case the background
+tab must NOT visibly refresh yet (no flash/scroll on the tab you're NOT
+looking at); switching to it must show it correctly refreshed, with no manual
+refresh needed. Close and reopen the Terminal panel with 2+ tabs already open
+(no resize/font change) — no tab should refresh/flash when later focused.
+`controlSession.test.ts`'s "window refresh queue" suite covers dedup/
+exclusion/cleanup in isolation; `controlPaneRegistry.test.ts` covers the
+`hardRecoverTab` concurrency guard; `controlTerminal.test.tsx` covers the
+reattach-, font-change-, and remount-triggered end-to-end queue-then-focus
+flow (including the negative: a remount alone must queue nothing).
 
 ## Filesystem watch: single-source "what to watch"
 
@@ -729,27 +857,32 @@ a zoomed window is already fully covered by tier 2); a **single-pane** window
 `h < 2` (a `-y 0` restore clamps silently, so it is skipped rather than sent).
 
 **Ordering is load-bearing: `nudgePaneRows` MUST be called IMMEDIATELY AFTER
-`nudgeClientSize` in the same synchronous code path** — both current call sites
-(`refreshActiveTab` and the `subscribeReinit` reattach handler in
-`ControlTerminalPanel.tsx`) do this; do not reorder or separate them. Both defer
-to a single `requestAnimationFrame`; rAF callbacks fire in registration order,
+`nudgeClientSize` in the same synchronous code path** — all three current call
+sites in `ControlTerminalPanel.tsx` (`refreshActiveTab`, the `subscribeReinit`
+reattach handler, and the queued-refresh-on-focus effect — see "Control-mode
+background-tab refresh is lazy") do this; do not reorder or separate them. Each
+defers to a single `requestAnimationFrame`; rAF callbacks fire in registration order,
 so `nudgePaneRows`'s rAF runs after `nudgeClientSize`'s own restore push was
 SENT, and the command channel's FIFO ordering then guarantees every pane-nudge
 command EXECUTES after the client shrink+restore completes, at the window's
 true (already-restored) size. This ordering contract is what lets tier 3 use a
 plain per-leaf loop with no client/pane resize interleaving analysis.
 
-**Single-flight per project.** A module-level guard (`paneNudgeInFlight` in
-`controlSession.ts`) makes a rapid second refresh click during an in-flight
-nudge a no-op: without it, a second call could read TRANSIENT heights from the
-store (a layout-change notification from the first nudge landing mid-flight)
-and "restore" to the wrong, already-shrunken height permanently. It clears once
-every command from the run has settled (or been swallowed by its own `.catch`),
-or immediately on a pre-send bail (a zoomed/single-pane window, or the active
-project switching before the deferred rAF fires — commands route via main's
-`activeControl()`, i.e. whichever project is active AT SEND TIME, so bailing
-before the first send guarantees a shrunken pane can never be stranded on an
-inactive/switched-away project).
+**Single-flight per (project, window)** — NOT per project alone (changed by
+local_repo_explorer-lazy-refresh-on-focus-ewwk to support the queue-on-focus
+mechanism below, where different windows of the same project can legitimately
+nudge concurrently). A module-level guard (`paneNudgeInFlight` in
+`controlSession.ts`, keyed `${projectId}:${windowId}`) makes a rapid second
+refresh of the SAME window during an in-flight nudge a no-op: without it, a
+second call could read TRANSIENT heights from the store (a layout-change
+notification from the first nudge landing mid-flight) and "restore" to the
+wrong, already-shrunken height permanently. It clears once every command from
+the run has settled (or been swallowed by its own `.catch`), or immediately on
+a pre-send bail (a zoomed/single-pane window, or the active project switching
+before the deferred rAF fires — commands route via main's `activeControl()`,
+i.e. whichever project is active AT SEND TIME, so bailing before the first
+send guarantees a shrunken pane can never be stranded on an inactive/
+switched-away project).
 
 **CRITICAL — the three per-leaf commands (shrink / delay / restore) MUST NEVER
 be `;`-sequenced into one command line.** A live probe confirmed control mode

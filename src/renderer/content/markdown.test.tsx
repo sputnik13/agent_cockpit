@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
+import { defaultSchema } from 'rehype-sanitize';
 import { RenderedMarkdown } from './markdown';
 import { useNotesStore } from '../notes';
 import {
@@ -3463,5 +3464,318 @@ describe('RenderedMarkdown — integration verification (local_repo_explorer-ren
       },
       30000,
     );
+  });
+});
+
+describe('RenderedMarkdown — GitHub-style inline HTML (docs/ARCHITECTURE.md "Untrusted repository content")', () => {
+  it('renders bare inline HTML as real elements, not escaped text', async () => {
+    const src = [
+      '<details><summary>Click</summary>hidden content</details>',
+      '',
+      'H<sub>2</sub>O and E=mc<sup>2</sup>, press <kbd>Enter</kbd>.',
+    ].join('\n');
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('details')).not.toBeNull());
+    expect(container.querySelector('summary')?.textContent).toBe('Click');
+    expect(container.querySelector('details')?.textContent).toContain('hidden content');
+    expect(container.querySelector('sub')?.textContent).toBe('2');
+    expect(container.querySelector('sup')?.textContent).toBe('2');
+    expect(container.querySelector('kbd')?.textContent).toBe('Enter');
+  });
+
+  it('anchors a top-level bare-HTML block (data-start-line/data-end-line), not just Markdown-syntax blocks', async () => {
+    const src = '<details><summary>Click</summary>hidden</details>';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('details')).not.toBeNull());
+    expect(container.querySelector('details')?.getAttribute('data-start-line')).toBe('1');
+    expect(container.querySelector('details')?.getAttribute('data-end-line')).toBe('1');
+  });
+
+  it('renders a hand-authored table with rowspan/colspan', async () => {
+    const src = '<table><tr><td rowspan="2">A</td><td>B</td></tr><tr><td>C</td></tr></table>';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('table')).not.toBeNull());
+    const cell = Array.from(container.querySelectorAll('td')).find((td) => td.textContent === 'A');
+    expect(cell?.getAttribute('rowspan')).toBe('2');
+  });
+
+  it('still renders GFM task-list checkboxes (schema must not regress remark-gfm output)', async () => {
+    const { container } = setup('- [ ] todo\n- [x] done\n');
+    await waitFor(() => expect(container.querySelector('input[type="checkbox"]')).not.toBeNull());
+    const boxes = container.querySelectorAll('input[type="checkbox"]');
+    expect(boxes.length).toBe(2);
+  });
+
+  it('strips <script>, event-handler attributes, and <style>/style= while surrounding content survives', async () => {
+    const src = [
+      'before',
+      '',
+      '<script>alert(1)</script>',
+      '',
+      '<img src="https://ok.example.com/x.png" onerror="alert(1)" onload="alert(1)">',
+      '',
+      '<div style="color:red" class="evil">styled</div>',
+      '',
+      '<style>body{display:none}</style>',
+      '',
+      'after',
+    ].join('\n');
+    const { container } = setup(src);
+    await waitFor(() => expect(container.textContent).toContain('before'));
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.querySelector('style')).toBeNull();
+    const img = container.querySelector('img');
+    expect(img?.getAttribute('onerror')).toBeNull();
+    expect(img?.getAttribute('onload')).toBeNull();
+    // The app's own BlockView wrapper divs also have textContent "styled" and
+    // an inline `style` attribute of their own (unrelated chrome) — find the
+    // innermost (leaf) div, i.e. the author's own sanitized element.
+    const div = Array.from(container.querySelectorAll('div')).find(
+      (d) => d.textContent === 'styled' && d.children.length === 0,
+    );
+    expect(div?.getAttribute('style')).toBeNull();
+    expect(div?.getAttribute('class')).toBeNull();
+    expect(container.textContent).toContain('after');
+  });
+
+  it('strips <iframe>/<object>/<embed>/<form>, surrounding content survives', async () => {
+    const src = [
+      'before',
+      '',
+      '<iframe src="https://evil.example.com"></iframe>',
+      '<object data="https://evil.example.com"></object>',
+      '<embed src="https://evil.example.com">',
+      '<form action="https://evil.example.com"><input type="text"></form>',
+      '',
+      'after',
+    ].join('\n');
+    const { container } = setup(src);
+    await waitFor(() => expect(container.textContent).toContain('before'));
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(container.querySelector('object')).toBeNull();
+    expect(container.querySelector('embed')).toBeNull();
+    expect(container.querySelector('form')).toBeNull();
+    expect(container.textContent).toContain('after');
+  });
+
+  it('strips href="javascript:…"/"vbscript:…" on a raw inline anchor', async () => {
+    const src = '<a href="javascript:alert(1)">bad</a> <a href="vbscript:alert(1)">also bad</a>';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.textContent).toContain('bad'));
+    for (const a of container.querySelectorAll('a')) {
+      const href = a.getAttribute('href') ?? '';
+      expect(href.toLowerCase().startsWith('javascript:')).toBe(false);
+      expect(href.toLowerCase().startsWith('vbscript:')).toBe(false);
+    }
+  });
+
+  it('local-tool widening: a raw <a href="file://…"> survives sanitize with its href intact', async () => {
+    const src = '<a href="file:///Users/me/repo/README.md">local file</a>';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('file:///Users/me/repo/README.md');
+  });
+
+  it('local-tool widening: a raw <img src="data:image/…"> survives sanitize with its src intact', async () => {
+    const src = '<img src="data:image/png;base64,AAAA" alt="inline">';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('img')).not.toBeNull());
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,AAAA');
+  });
+
+  it('widening boundary: data: on img is scoped to image/* only — a non-image data: src is stripped', async () => {
+    const src = '<img src="data:text/html,<script>alert(1)</script>" alt="bad">';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.textContent).not.toBe(''));
+    // The img itself may survive (alt text) or be dropped, but its src must
+    // never be the disallowed data:text/html value.
+    const img = container.querySelector('img');
+    expect(img?.getAttribute('src')).not.toBe('data:text/html,<script>alert(1)</script>');
+  });
+
+  it('widening boundary: the data:image/* widening is scoped to img[src] only — a non-img element with a data: href is not affected by it', async () => {
+    const src = '<a href="data:text/html,hi">bad</a>';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.textContent).toContain('bad'));
+    const a = container.querySelector('a');
+    expect(a?.getAttribute('href') ?? '').not.toMatch(/^data:/);
+  });
+
+  it('SCHEMA ASSUMPTION GUARD: img is the only tag in defaultSchema with a bare "src" attribute entry', () => {
+    // inlineHtmlSchema's protocols.src widens the SCHEME gate to include
+    // 'data' globally (hast-util-sanitize's protocols map is keyed by
+    // property name, not by tag) — safe today ONLY because img is the sole
+    // tag exposing a bare, unconstrained 'src' entry; the MIME-pattern
+    // restriction that scopes this to data:image/* specifically lives on
+    // img's OWN attribute entry (a `['src', /pattern/]` tuple, not the bare
+    // string), not on any other tag. If a future hast-util-sanitize schema
+    // update adds a bare 'src' to another permitted tag (e.g. `source`,
+    // `track`) without an equivalent pattern restriction, that tag's src
+    // would silently accept ANY data: URI. This test fails loudly instead.
+    for (const [tag, attrs] of Object.entries(defaultSchema.attributes ?? {})) {
+      if (tag === 'img' || tag === '*') continue;
+      const hasBareSrc = attrs.some((entry) => entry === 'src');
+      expect(hasBareSrc, `tag "${tag}" unexpectedly has a bare 'src' attribute entry`).toBe(false);
+    }
+  });
+
+  it('a ```html fenced block is completely unaffected — still a plain, literal code listing', async () => {
+    const src = ['```html', '<div class="not-rendered"><b>bold</b></div>', '```'].join('\n');
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('pre')).not.toBeNull());
+    // The fence's content is literal TEXT inside <pre><code>, never a rendered
+    // <div>/<b> element — GitHub does not render html-fenced code, matching
+    // Mermaid/dot/graphviz precedent (fences opt in to their OWN renderer, not
+    // this one).
+    expect(container.querySelector('pre div, pre b')).toBeNull();
+    expect(container.querySelector('pre')?.textContent).toContain('<div class="not-rendered">');
+  });
+
+  it('rehypeSafeLinksImages ordering: a raw inline <a href="https://…"> gets the SAME hardening as a Markdown-syntax link', async () => {
+    const src = 'Raw: <a href="https://example.com">raw link</a>';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
+    const a = container.querySelector('a');
+    expect(a?.getAttribute('target')).toBe('_blank');
+    expect(a?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(a?.getAttribute('data-external')).toBe('true');
+  });
+
+  it('note-anchoring survives on a paragraph that contains inline HTML', async () => {
+    const src = 'A paragraph with <sub>inline</sub> HTML.';
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('p')).not.toBeNull());
+    const p = container.querySelector('p');
+    expect(p?.getAttribute('data-start-line')).toBe('1');
+    expect(p?.getAttribute('data-end-line')).toBe('1');
+  });
+
+  it('changed-line highlighting still works on a block containing inline HTML', async () => {
+    const src = 'A paragraph with <sub>inline</sub> HTML.';
+    const { container } = setup(src, { changedLineSet: new Set([1]) });
+    await waitFor(() => expect(container.querySelector('p')).not.toBeNull());
+    expect(container.textContent).toContain('changed');
+  });
+
+  it('mermaid/graphviz placeholder divs still carry their ids after the new sanitize step', async () => {
+    const src = ['```mermaid', 'graph TD; A-->B;', '```', '', '```dot', 'digraph { A -> B }', '```'].join(
+      '\n',
+    );
+    const { container } = setup(src);
+    // Both fences route to their own DiagramFrame (toolbar label span), not a
+    // <pre> code listing — proves data-mermaid-id/data-graphviz-id survived
+    // the new rehype-raw/rehype-sanitize pass (the placeholder div is how
+    // the render loop finds mermaidById/graphvizById in the first place).
+    await waitFor(() => {
+      const labels = Array.from(container.querySelectorAll('span')).map((s) => s.textContent);
+      expect(labels).toContain('Mermaid');
+      expect(labels).toContain('Graphviz');
+    });
+    expect(container.querySelector('pre')).toBeNull();
+  });
+
+  it('SECURITY: a forged data-start-line/data-end-line on attacker-controlled bare HTML is replaced with the TRUE, re-derived line — not merely "not the forged value"', async () => {
+    // The attacker's own paragraph is genuinely on line 3; the forged
+    // attribute claims line 999 — a real exploit would use this to suppress
+    // changed-line highlighting or misattribute a note to a decoy line.
+    // Asserting only `not.toBe('999')` would pass identically whether the
+    // re-derivation mechanism works OR has failed completely (e.g. the
+    // attribute is simply absent) — assert the POSITIVE, correct outcome so
+    // a regression that silently drops the mechanism cannot pass this test.
+    const src = ['# real heading', '', '<p data-start-line="999" data-end-line="999">forged</p>'].join(
+      '\n',
+    );
+    const { container } = setup(src);
+    await waitFor(() => expect(container.textContent).toContain('forged'));
+    const forged = Array.from(container.querySelectorAll('p')).find((p) => p.textContent === 'forged');
+    expect(forged).toBeTruthy();
+    expect(forged?.getAttribute('data-start-line')).toBe('3');
+    expect(forged?.getAttribute('data-end-line')).toBe('3');
+  });
+
+  it('SECURITY: a forged data-mermaid-id matching a real diagram\'s id never hijacks the render loop into replacing attacker content with that diagram', async () => {
+    const src = [
+      '```mermaid',
+      'graph TD; A-->B;',
+      '```',
+      '',
+      '<div data-mermaid-id="m0">attacker payload, not a real diagram</div>',
+    ].join('\n');
+    const { container } = setup(src);
+    await waitFor(() => {
+      const labels = Array.from(container.querySelectorAll('span')).map((s) => s.textContent);
+      expect(labels).toContain('Mermaid');
+    });
+    // Exactly one Mermaid diagram renders (the real fence) — the forged div
+    // must NOT resolve to a second MermaidFrame showing that same diagram's
+    // source, and the attacker's own text must not have been silently
+    // discarded in favor of it.
+    const mermaidLabels = Array.from(container.querySelectorAll('span')).filter(
+      (s) => s.textContent === 'Mermaid',
+    );
+    expect(mermaidLabels.length).toBe(1);
+    expect(container.textContent).toContain('attacker payload');
+  });
+
+  it('ROBUSTNESS: pathological inline HTML (thousands of unclosed tags) that crashes rehype-raw degrades to a visible error, not a silently-blank panel forever', async () => {
+    // rehype-raw's parse5 tree reconstruction stack-overflows on deeply
+    // nested/repeated unclosed inline HTML — a real DoS-shaped input this
+    // app must treat as untrusted (repository Markdown). Before the
+    // try/catch in RenderedMarkdown's render effect, this was an unhandled
+    // promise rejection: `doc` stayed null forever with zero user-facing
+    // signal. Reproduced directly against the real pipeline before writing
+    // this test (RangeError: Maximum call stack size exceeded at 2000+
+    // unclosed <div> tags).
+    const src = Array.from({ length: 5000 }, () => '<div>').join('\n');
+    const { container } = setup(src);
+    await waitFor(() => expect(container.textContent).toContain('Could not render'));
+  });
+
+  it('GFM footnote ids/hrefs stay consistent, not double-prefixed by rehype-sanitize on top of remark-rehype', async () => {
+    // remark-rehype prefixes footnote ids/hrefs with "user-content-" as its
+    // own anti-clobbering measure and keeps the pair consistent doing so.
+    // rehype-sanitize's OWN, separate clobber protection would otherwise
+    // re-prefix the id A SECOND TIME (but never touches the referencing
+    // href, since href isn't in its clobber list) — verified by direct probe
+    // to break every footnote's internal anchor before this fix
+    // (inlineHtmlSchema.clobberPrefix = '').
+    // Includes bare inline HTML (<sub>) so this document takes the
+    // rehype-sanitize branch -- a footnote-only document with no bare HTML
+    // takes the OTHER branch (renderDoc skips rehype-raw/rehype-sanitize
+    // entirely), which would make this test pass identically regardless of
+    // inlineHtmlSchema.clobberPrefix and pin nothing.
+    const src = [
+      'A footnote reference[^1] and <sub>inline HTML</sub>.',
+      '',
+      '[^1]: The footnote text.',
+    ].join('\n');
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('a[data-footnote-ref]')).not.toBeNull());
+    const ref = container.querySelector('a[data-footnote-ref]')!;
+    const href = ref.getAttribute('href');
+    expect(href).not.toBeNull();
+    expect(href).not.toContain('user-content-user-content-');
+    // The href's target fragment must actually resolve to a real id in the
+    // document -- the concrete, user-visible symptom the bug produced.
+    const targetId = href!.replace(/^#/, '');
+    expect(container.querySelector(`#${CSS.escape(targetId)}`)).not.toBeNull();
+  });
+
+  it('a fenced code block\'s data-start-line/data-end-line land only on <code>, never the wrapping <pre> (codeBlockStartLine\'s documented invariant)', async () => {
+    // mdast-util-to-hast patches the SAME source position onto both <pre>
+    // and its inner <code> — applyTrustedAnnotations must not let a
+    // position-keyed match set the anchor on both, or every code-block
+    // line-lookup in this file (which reads exclusively through
+    // codeBlockStartLine/codeBlockEndLine's `:scope > code` indirection)
+    // would start disagreeing with a direct `pre.getAttribute(...)` read.
+    const src = ['```js', 'const x = 1;', '```'].join('\n');
+    const { container } = setup(src);
+    await waitFor(() => expect(container.querySelector('pre')).not.toBeNull());
+    const pre = container.querySelector('pre')!;
+    expect(pre.getAttribute('data-start-line')).toBeNull();
+    expect(pre.getAttribute('data-end-line')).toBeNull();
+    const code = pre.querySelector(':scope > code');
+    expect(code?.getAttribute('data-start-line')).toBe('1');
+    expect(code?.getAttribute('data-end-line')).toBe('3');
   });
 });

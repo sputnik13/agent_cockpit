@@ -167,6 +167,15 @@ agent-cockpit -CC new-session -A -s agent-cockpit-<projectId>`) is the
   anchors open via the platform shell with `target="_blank"` + `rel="noopener
 noreferrer"`; relative/fragment/`javascript:` anchors stay inert; only
   http(s)/`data:image/` image sources render) are part of this requirement.
+  Bare/inline HTML written directly in Markdown prose also renders (a fenced
+  `` ```html `` block still renders as a plain code listing, matching GitHub):
+  it is sanitized against `hast-util-sanitize`'s `defaultSchema` (published as
+  following GitHub's own Markdown HTML sanitization rules), extended with two
+  narrow protocol widenings — `href` gains `file:`, `img[src]` gains
+  `data:image/*` — since this app, unlike GitHub, has a local-repository
+  focus, plus a `clobberPrefix` override to keep GFM footnote ids/hrefs
+  consistent (accepted trade-off; full rationale in ARCHITECTURE.md
+  "Untrusted repository content").
   A **find-in-file** affordance (Cmd/Ctrl+F) searches within the currently
   displayed file across the rendered/raw/diff modes: case-insensitive, with a
   match count, next/previous navigation, and highlighted matches that scroll into
@@ -247,7 +256,11 @@ noreferrer"`; relative/fragment/`javascript:` anchors stay inert; only
   (`contextIsolation`, no `nodeIntegration`, `sandbox: true`). The terminal,
   PTY/SSH host, provider RPC, and file/process access live in the main process
   behind a narrow, input-validated preload bridge. Repository Markdown/Mermaid
-  remain untrusted (DOMPurify + sandboxed iframe).
+  remain untrusted: Markdown (including bare inline HTML) is sanitized via
+  `hast-util-sanitize` and DOMPurify before render; Mermaid/Graphviz compile to
+  SVG via a bundled, same-origin library and that SVG output is likewise
+  DOMPurify-sanitized before insertion (no iframe — the input is a narrow DSL,
+  not arbitrary HTML).
 - **NFR-2 Write boundary.** The app writes its app-local SQLite store and — as
   the single repository-mutating exception — beads issue state through the `br`
   CLI (close/reopen/comment/create). That path preserves `br`'s audit trail,
@@ -271,8 +284,9 @@ noreferrer"`; relative/fragment/`javascript:` anchors stay inert; only
   regardless of how many background sessions exist. The live set is bounded by
   explicit kill plus remote idle aging-out (`sessionIdleTimeoutMin`).
 - **NFR-6 Untrusted content.** Repository file content is untrusted: large
-  files degrade to size/binary notices, Markdown is sanitized, and Mermaid runs
-  in a sandboxed iframe with no same-origin access to the host document.
+  files degrade to size/binary notices, Markdown (including bare inline HTML)
+  is sanitized, and Mermaid/Graphviz SVG output is sanitized before insertion
+  into the same document.
 
 ## Workflow
 
@@ -305,9 +319,10 @@ The high-level user loop:
 - **ssh2** for the remote SSH transport, SFTP upload, exec, and tmux PTY shell.
 - **simple-git**, **chokidar**, **better-sqlite3** for local git/watch/beads
   reads, and the app-local SQLite store.
-- **unified / remark / rehype / rehype-highlight** + **DOMPurify** for
-  single-pass sanitized Markdown with syntax-highlighted fenced code;
-  **mermaid** in a sandboxed iframe.
+- **unified / remark / rehype / rehype-raw / rehype-sanitize / rehype-highlight**
+  + **DOMPurify** for single-pass sanitized Markdown (including GitHub-style
+  sanitized bare inline HTML) with syntax-highlighted fenced code; **mermaid**
+  rendered inline as sanitized SVG (no iframe).
 - **jsonc-parser** + **yaml** for source-mapped structural folding of
   JSON/YAML in the content viewer's Rendered mode (both zero-runtime-dependency).
 - **Go** (`CGO_ENABLED=0` static cross-compile) for the remote helper binary.

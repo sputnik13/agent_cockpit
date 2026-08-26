@@ -39,13 +39,65 @@ The durable architectural boundaries are:
   issue state via the `br` CLI (see NFR-2).
 - **Untrusted repository content.** Repository Markdown/Mermaid and file bytes
   are untrusted: Markdown runs through one whole-document `unified`
-  (`remark-parse` → `remark-gfm` → `remark-rehype` → `rehype-highlight` →
-  local safe-link/image transform → `rehype-stringify`) pass and is sanitized
-  via DOMPurify, Mermaid renders in a sandboxed iframe with no same-origin
-  access, external anchors are routed via `setWindowOpenHandler`
-  → `shell.openExternal`, and large/binary files degrade to notices.
-  `rehype-highlight` (with the bundled base16 Solarized hljs theme) is the
-  only Markdown-pipeline dependency added beyond the `unified` stack.
+  (`remark-parse` → `remark-gfm` → `remark-rehype` → `rehype-raw` →
+  `rehype-sanitize` → `rehype-highlight` → local safe-link/image transform →
+  `rehype-stringify`) pass and is sanitized via DOMPurify; `rehype-raw` and
+  `rehype-sanitize` run only when the document contains bare inline HTML (see
+  below) — a plain document skips both stages entirely. Mermaid and
+  Graphviz (`dot`/`graphviz` fences) compile to SVG via a bundled,
+  same-origin library and that SVG output is likewise DOMPurify-sanitized
+  before being inserted into the same document — no iframe, since the input
+  is a narrow DSL rather than arbitrary HTML. Bare/inline HTML written
+  directly in Markdown prose (not fenced — a ` ```html ` fence still renders
+  as a plain code listing, matching GitHub) also renders: `remark-rehype`
+  runs with `allowDangerousHtml: true`, `rehype-raw` parses the resulting raw
+  nodes into real hast elements, and `rehype-sanitize` filters that tree
+  against `hast-util-sanitize`'s `defaultSchema` — published as following
+  GitHub's own HTML sanitization rules — before `rehype-highlight`/the
+  link-hardening transform run (both are trusted, app-controlled passes that
+  must see already-sanitized content). The schema is extended with three
+  narrow, deliberate deviations from GitHub's own schema. Two are protocol
+  widenings — `href` gains `file:`, `img[src]` gains `data:image/*` — since
+  this app, unlike GitHub, has a local-repository focus; DOMPurify's own
+  second-pass `ALLOWED_URI_REGEXP` is widened to match (DOMPurify's default
+  protocol allowlist has no `file:` either, and does not merge with a
+  provided override). The third is `clobberPrefix: ''`: `remark-rehype`
+  already prefixes GFM footnote ids/hrefs with `user-content-` as its own,
+  independent anti-clobbering measure and keeps each id/href pair consistent
+  doing so; `hast-util-sanitize`'s own clobber protection would otherwise
+  re-prefix the `id` a second time without touching the referencing `href`
+  (`href` isn't in its clobber list), breaking every footnote's internal
+  anchor — `clobberPrefix: ''` makes that second prefixing pass a no-op. This
+  is an accepted trade-off, not a free fix: it also disables sanitize's own
+  clobber-id-prefixing for any other (non-footnote) attacker-set
+  `id`/`name`/aria-* from raw inline HTML — a real, lower-confidence residual
+  DOM-clobbering surface, not exhaustively audited in this codebase. See
+  CLAUDE.md's "Inline-HTML sanitizer schema must never allowlist this app's
+  own trusted attributes by name" for the full record of the `clobberPrefix`
+  deviation and the trusted-attribute forgery fix.
+  **The schema deliberately does NOT extend to this app's own
+  `data-start-line`/`data-end-line`/`data-mermaid-id`/`data-graphviz-id`
+  anchor/placeholder attributes** — an earlier version did, and that was a
+  real, confirmed-exploitable vulnerability: `rehype-sanitize`'s schema is a
+  blanket name-based allow/deny list with no per-instance trust concept, so
+  allowlisting these names for the app's OWN elements also allowlists them
+  for attacker-controlled bare HTML carrying the same name, letting a forged
+  `data-start-line` survive with an attacker-chosen value or a forged
+  `data-mermaid-id` hijack the render loop into showing a real diagram in
+  place of attacker content. These four attributes are instead recorded
+  (from the original mdast tree, before any rehype processing) keyed by
+  source-offset range, and re-applied to the sanitized hast tree by an
+  `applyTrustedAnnotations` rehype step positioned immediately after
+  `rehype-sanitize` — an offset range is not attacker-suppliable, so this
+  closes the forgery path by construction. See CLAUDE.md's "Inline-HTML
+  sanitizer schema must never allowlist this app's own trusted attributes by
+  name" for the full incident record — do not re-add these four names to the
+  schema.
+  External anchors are routed via `setWindowOpenHandler` →
+  `shell.openExternal`, and large/binary files degrade to notices.
+  `rehype-highlight` (with the bundled base16 Solarized hljs theme) provides
+  fenced-code syntax highlighting; `rehype-raw`/`rehype-sanitize` (above) are
+  the pipeline dependencies added for bare inline HTML support.
   A repo `.html`/`.htm` file renders through the **same sandboxed-preview
   pattern** the app uses for untrusted rich content, complementing the
   DOMPurify-SVG diagram path: `HtmlPreview` builds a `blob:` document from the

@@ -1175,6 +1175,88 @@ offered once binary-ness is confirmed. Recorded run: 41/41 local PASS; remote
 pass explicitly SKIPPED (opt-in `AC_VERIFY_REMOTE_*` env vars; not exercised
 against a live host — do not assert remote parity from this harness).
 
+## Inline-HTML sanitizer schema must never allowlist this app's own trusted attributes by name
+
+**Invariant:** `src/renderer/content/markdown.tsx` renders bare/inline HTML
+written directly in Markdown prose (`remark-rehype`'s `allowDangerousHtml`
++ `rehype-raw` + `rehype-sanitize` against `hast-util-sanitize`'s
+`defaultSchema`, published as following GitHub's own sanitization rules).
+This app's OWN bookkeeping attributes — `data-start-line`/`data-end-line`
+(note-anchoring, changed-line highlighting) and `data-mermaid-id`/
+`data-graphviz-id` (the mermaid/dot/graphviz placeholder-div mechanism) —
+MUST NEVER appear in `inlineHtmlSchema`'s allowed-attribute lists, under any
+name form (dash-case or the camelCase hast-property form `rehype-raw`'s
+tree-wide parse5 round-trip normalizes them to). They are re-derived and
+re-applied to the tree by `applyTrustedAnnotations`, AFTER `rehypeSanitize`
+runs, matching each hast node's retained source-position (offset range)
+against a table built from the ORIGINAL mdast tree before any rehype
+processing.
+
+**Why:** `rehype-sanitize`'s schema is a blanket NAME-based allow/deny list
+with no per-instance trust concept — it cannot distinguish "this attribute
+was set by `renderDoc`'s own trusted code" from "an attacker's own bare
+`<div>`/`<p>` set an attribute with the same name." An earlier version of
+this feature allowlisted these four names directly (reasoning that only the
+app's own `hProperties` writes were their source) — that reasoning was
+WRONG and was independently reproduced as exploitable: a forged
+`data-start-line="999"` on attacker-controlled bare HTML survived sanitize
+with the attacker's value intact (able to suppress this code-review tool's
+own changed-line highlighting, or misattribute a note thread to a decoy
+line), and a forged `data-mermaid-id` matching a real diagram's
+auto-assigned, sequential-and-predictable id (`m0`, `m1`, …) hijacked the
+render loop into silently replacing the attacker's own element with that
+diagram's real content. Source-position offsets are the fix precisely
+because they are NOT attacker-suppliable: an offset is the physical
+location a node's content actually started/ended at when `remark-parse`
+first parsed the source — an attacker's own content occupies its OWN
+(necessarily different) offset range and cannot claim another one, verified
+by direct probe through the full `rehypeRaw`+`rehypeSanitize` pipeline
+(distinct content ⇒ distinct, non-colliding offsets; an empty mermaid/
+graphviz placeholder `<div>` that explicitly carries `position:
+node.position` from its original code-fence node keeps that exact range
+too).
+
+**A separate, deliberate deviation on the same schema: `clobberPrefix: ''`.**
+`remark-rehype` already prefixes GFM footnote ids/hrefs with `user-content-`
+(its own, independent anti-clobbering measure) and keeps every id/href PAIR
+consistent doing so. `hast-util-sanitize`'s OWN clobber protection (default
+`clobberPrefix: 'user-content-'`) re-prefixes `id` a SECOND time
+(`user-content-user-content-fn-1`) but never touches the REFERENCING `href`
+(`href` isn't in its clobber list — only `id`/`name`/aria-* are), breaking
+every GFM footnote's id/href pair (verified by direct probe). Setting
+`inlineHtmlSchema.clobberPrefix = ''` makes sanitize's own prefixing step a
+no-op, restoring byte-identical footnote output to before this feature.
+**Accepted trade-off:** this also disables sanitize's own clobber-id-prefixing
+for any OTHER (non-footnote) attacker-set `id`/`name`/aria-* from raw inline
+HTML — a real, lower-confidence residual DOM-clobbering surface (an
+attacker-chosen `id="constructor"`-style value could theoretically shadow a
+global if some other part of this app does an unguarded `window[name]`-style
+lookup; nothing observed in this codebase relies on that pattern, but it is
+not exhaustively audited). Do not remove `clobberPrefix: ''` to "restore" the
+default without re-solving the footnote id/href mismatch it exists to fix.
+
+**Do NOT** re-add `dataStartLine`/`dataEndLine`/`dataMermaidId`/
+`dataGraphvizId` (or their dash-case forms) to `inlineHtmlSchema.attributes`
+for any reason (convenience, a new feature needing one more custom
+attribute, etc.) — extend `applyTrustedAnnotations`/`TrustedAnnotation`
+instead, keeping the same "recorded pre-sanitize from a trusted source,
+applied post-sanitize by position match" shape for any new app-owned
+attribute this pipeline needs to carry through inline-HTML rendering.
+
+**Regression check:** `markdown.test.tsx`'s two `SECURITY:`-prefixed tests
+in the "GitHub-style inline HTML" describe block — a forged `data-start-line`
+on bare attacker HTML must resolve to the TRUE, re-derived line (not merely
+"not the forged value" — that weaker assertion previously passed even when
+the whole re-derivation mechanism was silently broken), and a forged
+`data-mermaid-id` matching a real diagram's id must not hijack the render
+loop. Both were confirmed to fail when the vulnerable schema entries are
+deliberately reintroduced (temporarily re-add them and re-run — both tests
+must fail before restoring the fix). A separate GFM-footnote test (source
+containing bare inline HTML, so the sanitize branch actually runs) pins the
+`clobberPrefix: ''` fix — matching id/href pairs, no double `user-content-`
+prefix; failing it back to the default `clobberPrefix` reproduces the
+mismatch.
+
 ## Native modules on Electron 42: `cpu-features` is stripped post-install
 
 **Invariant:** A `postinstall` (`scripts/strip-cpu-features.mjs`) deletes

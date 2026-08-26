@@ -110,17 +110,36 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
 - **Changes surface filter**: `isHiddenFromChanges` hides `.git/**` and
   `.beads/**` when `showAll = false`; reveals them when `showAll = true`;
   non-hidden working-tree paths pass through in both modes.
-- Rendered Markdown (single-pass unified pipeline + DOMPurify): a corpus
-  fixture exercises headings, nested/ordered/task lists, tables, blockquote,
-  hr, strikethrough, inline/fenced/indented code, autolinks, reference links,
-  footnotes, images, and inline HTML. Assertions cover construct presence,
-  cross-block reference-link resolution, top-level `data-start-line`/
-  `data-end-line` annotation, changed-block callout matching against
-  `changedLineSet`, `rehype-highlight` token emission, sanitization
+- Rendered Markdown (single-pass unified pipeline + `rehype-sanitize` +
+  DOMPurify): a corpus fixture exercises headings, nested/ordered/task lists,
+  tables, blockquote, hr, strikethrough, inline/fenced/indented code,
+  autolinks, reference links, footnotes, and images. Assertions cover
+  construct presence, cross-block reference-link resolution, top-level
+  `data-start-line`/`data-end-line` annotation, changed-block callout matching
+  against `changedLineSet`, `rehype-highlight` token emission, sanitization
   (no `script` survives; no `javascript:` href; no inline event handlers),
   and the safe-link/image transform (`target`/`rel`/`data-external` on
   absolute anchors, `data-inert` on relative/fragment, blocked image src
   collapses to alt-text span).
+- **Bare/inline HTML in Markdown prose** (GitHub-style sanitation,
+  `docs/ARCHITECTURE.md` "Untrusted repository content"): positive cases
+  (`<details>`, `<sub>`/`<sup>`/`<kbd>`, hand-authored tables) render;
+  negative cases (`script`/event-handler attributes/`iframe`/`style`/`class`/
+  disallowed protocols) are stripped; the two deliberate protocol widenings
+  (`href` gains `file:`, `img[src]` gains `data:image/*`) are scoped exactly
+  — a non-image tag or a non-image `data:` MIME type is rejected; a
+  `` ```html `` fence still renders as a plain code listing, matching GitHub;
+  `rehype-sanitize` runs before `rehype-highlight`/the safe-link/image
+  transform. SECURITY: a forged `data-start-line`/`data-mermaid-id` on
+  attacker-authored bare HTML resolves to the true re-derived value (or is
+  absent), never the forged one — the schema never allowlists these four
+  attributes by name; see CLAUDE.md's "Inline-HTML sanitizer schema must
+  never allowlist this app's own trusted attributes by name". ROBUSTNESS: a
+  document with thousands of unclosed inline-HTML tags (a `rehype-raw`
+  stack-overflow trigger) degrades to a visible "could not render" state, not
+  a silently-blank panel. A GFM footnote id and its referencing href stay
+  consistent (`clobberPrefix` override). A `<pre>`/`<code>` code-block pair
+  never both carry the anchor (only `<pre>` never does).
 
 - **Terminal & Workgraph feature batch**: the `tmuxStore` reducer records
   `isZoomed`/`visibleLayout` from a zoomed `%layout-change` and clears them on an

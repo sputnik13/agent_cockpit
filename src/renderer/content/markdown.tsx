@@ -4,6 +4,8 @@ import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
 import remarkRehype from 'remark-rehype';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeStringify from 'rehype-stringify';
 import DOMPurify from 'dompurify';
@@ -19,6 +21,7 @@ import { GraphvizFrame } from './graphviz';
 import { openLinkTarget, type LinkContext } from '../links/openLinkTarget';
 import { useProjectsStore } from '../providerClient';
 import { LineNoteThread, lineNotesByLine, useNotesStore } from '../notes';
+import { EmptyState } from '../ui';
 import {
   blockquoteChildKeyOf,
   classifyItems,
@@ -125,6 +128,131 @@ interface RenderMarkdownProps {
   oldSource?: string | null;
 }
 
+/**
+ * Sanitization schema for bare/inline HTML in Markdown prose (rehype-raw
+ * parses it into real hast nodes; this schema filters that tree before
+ * anything else touches it — see docs/proposals/_active_markdown-inline-html.md
+ * "Detailed Design"). `hast-util-sanitize`'s `defaultSchema` is imported, not
+ * reimplemented — its own docs state it "Follows GitHub style sanitation",
+ * verified directly against its published source while designing this
+ * feature. Extended with exactly:
+ *
+ * - `protocols.href` gains `'file'` (a plain scheme addition — `hast-util-
+ *   sanitize`'s `protocols` matching is scheme-prefix-only, no MIME/value
+ *   scoping possible there, verified by probe; a bare scheme addition is
+ *   fine for `file:` since ANY `file:` URL is the intended allowance).
+ * - `img`'s `src` gains `data:image/*`, scoped MORE narrowly than a bare
+ *   protocol addition would allow — see the two-part mechanism below.
+ *
+ * Both widenings exist to preserve capabilities `rehypeSafeLinksImages`
+ * (below) already provides today (`data-localpath` file:// routing;
+ * `data:image/*` inline images) for this app's local-repo-focused use case
+ * — GitHub's own schema has neither, being a pure web service with no local-
+ * filesystem concept. Not a general `data:`/`file:` allowance. See the
+ * proposal's "Deviations from GitHub's schema" for the full rationale.
+ *
+ * **Why `img[src]` needs BOTH a protocol change AND an attribute-value
+ * pattern, not just one** (verified by probe against `hast-util-sanitize`,
+ * since this was NOT obvious from its docs alone):
+ * `protocols` is a per-property-name scheme allowlist with NO value/MIME
+ * scoping — adding `'data'` there alone would allow ANY `data:` URI
+ * (`data:text/html,<script>…`), not just images. Conversely, an
+ * `attributes.img` value-pattern entry for `src` is checked ADDITIONALLY to,
+ * never instead of, the `protocols` scheme gate — so a pattern alone,
+ * without `'data'` in `protocols.src`, still gets rejected at the protocol
+ * gate before the pattern is ever consulted. The correct combination: add
+ * `'data'` to `protocols.src` (opens the scheme gate) AND replace `img`'s
+ * bare `'src'` attribute entry with a SINGLE pattern-only entry matching
+ * `/^(https?:|data:image\/)/i` (the only entry — no bare `'src'` alongside
+ * it, or the bare entry's "any value" permission silently defeats the
+ * pattern restriction). This combination was confirmed to accept
+ * `http:`/`https:`/`data:image/*` and reject `data:text/html`/
+ * `javascript:` — see `markdown.test.tsx`'s protocol-widening tests. The
+ * `i` flag makes the ATTRIBUTE-value check case-insensitive; the separate
+ * `protocols.src` SCHEME check inside `hast-util-sanitize` is an exact,
+ * case-sensitive string compare with no case-insensitive option — an
+ * uppercase `DATA:image/…` is therefore still rejected (fails the scheme
+ * gate before the pattern is ever consulted), a conservative/safe-direction
+ * gap (rejects a few more valid-but-unusually-cased URIs), not a bypass.
+ *
+ * **This schema deliberately does NOT list `dataStartLine`/`dataEndLine`/
+ * `dataMermaidId`/`dataGraphvizId` anywhere.** An earlier version of this
+ * schema allowlisted them (this app's own note-anchoring/diagram-placeholder
+ * attributes) by name, reasoning that `renderDoc`'s own trusted
+ * `hProperties` writes were the only source of them. That reasoning was
+ * wrong: `rehype-raw`'s tree-wide reparse means an ATTACKER-controlled bare
+ * HTML element can carry any schema-permitted attribute name with an
+ * attacker-chosen VALUE — `rehype-sanitize` has no per-instance trust
+ * concept, only a name-based allow/deny list, so allowlisting these names
+ * for the app's own elements ALSO allowlists them for anyone else's. Verified
+ * exploitable: a forged `data-start-line` survived sanitize with an
+ * attacker-chosen value (defeating changed-line highlighting / note
+ * anchoring), and a forged `data-mermaid-id` matching a real diagram's
+ * auto-assigned id hijacked the render loop into replacing the attacker's
+ * own content with that diagram. The fix: never schema-permit these names at
+ * all (sanitize strips them from EVERYTHING, forged or not), and re-derive +
+ * re-apply the legitimate ones AFTERWARD by source-position match, which an
+ * attacker cannot forge — see {@link applyTrustedAnnotations}.
+ */
+const inlineHtmlSchema: typeof defaultSchema = {
+  ...defaultSchema,
+  // `remark-rehype` already prefixes GFM footnote ids/hrefs with
+  // `user-content-` (its OWN, separate anti-clobbering measure, independent
+  // of rehype-sanitize) and keeps every id/href PAIR consistent doing so —
+  // e.g. `id="user-content-fn-1"` matched by `href="#user-content-fn-1"`.
+  // `hast-util-sanitize`'s OWN clobber protection (`clobber: [...,'id',...]`,
+  // default `clobberPrefix: 'user-content-'`) re-prefixes `id` A SECOND TIME
+  // (`user-content-user-content-fn-1`) but — since `href` isn't in its
+  // clobber list, only `id`/`name`/aria-* are — never touches the
+  // REFERENCING `href`, breaking the pair (verified by direct probe: the
+  // double-prefixed pipeline produces mismatched id/href for every GFM
+  // footnote). Setting `clobberPrefix: ''` here makes sanitize's OWN
+  // prefixing step a no-op, restoring byte-identical footnote output to
+  // before this feature (verified). Accepted trade-off: this also disables
+  // sanitize's OWN clobber-id-prefixing for any OTHER (non-footnote)
+  // attacker-set `id`/`name`/aria-* from raw inline HTML — a real, if
+  // lower-confidence, residual DOM-clobbering surface (an attacker-chosen
+  // `id="constructor"`-style value could theoretically shadow a global if
+  // some OTHER part of this app does an unguarded `window[name]`-style
+  // lookup; nothing observed in this codebase relies on that pattern, but it
+  // is not exhaustively audited here). See CLAUDE.md's Critical Learnings
+  // entry for this pipeline for the full trade-off record.
+  clobberPrefix: '',
+  attributes: {
+    ...defaultSchema.attributes,
+    img: [
+      ...(defaultSchema.attributes?.img ?? []).filter((entry) => entry !== 'src'),
+      ['src', /^(https?:|data:image\/)/i],
+    ],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    href: [...(defaultSchema.protocols?.href ?? []), 'file'],
+    src: [...(defaultSchema.protocols?.src ?? []), 'data'],
+  },
+};
+
+/**
+ * DOMPurify's own default `IS_ALLOWED_URI` protocol allowlist (verified
+ * against `dompurify/dist/purify.cjs.js` while implementing the `file:`
+ * href widening, DOMPurify v3.x), with `file` added to the scheme
+ * alternation. This is the SECOND-layer (string-level, DOMPurify) half of
+ * the SAME widening `inlineHtmlSchema.protocols.href` above already makes at
+ * the tree level — DOMPurify's own default does not know about that
+ * widening and would otherwise silently strip `href="file:…"` right back out
+ * on this pass, since DOMPurify's `ALLOWED_URI_REGEXP` REPLACES (does not
+ * merge with) the default when provided. `data:image/*` on `img[src]` needs
+ * no equivalent addition here — DOMPurify already has its own built-in
+ * `data:`-on-`img` allowance, independent of this regex (verified by probe).
+ * If a future DOMPurify upgrade changes its own default pattern, this copy
+ * will silently NOT pick up that change — `markdown.test.tsx`'s protocol
+ * tests assert the actual required protocols work and dangerous ones
+ * (`javascript:`/`vbscript:`) don't, which is what actually matters and
+ * stays correct independent of DOMPurify's internals.
+ */
+const ALLOWED_URI_REGEXP =
+  /^(?:(?:(?:f|ht)tps?|file|mailto|tel|callto|sms|cid|xmpp|matrix):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i;
+
 const sanitize = (html: string): string =>
   DOMPurify.sanitize(html, {
     FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form'],
@@ -140,6 +268,7 @@ const sanitize = (html: string): string =>
       'data-image-blocked',
       'target',
     ],
+    ALLOWED_URI_REGEXP,
   });
 
 interface MermaidEntry {
@@ -154,15 +283,43 @@ interface PreparedDoc {
   graphvizById: Map<string, MermaidEntry>;
 }
 
+/** One node's trusted annotation, recorded from the ORIGINAL mdast tree
+ *  before any rehype processing — see {@link applyTrustedAnnotations} for
+ *  why this indirection exists (forgery resistance). */
+interface TrustedAnnotation {
+  startLine: number;
+  endLine: number;
+  mermaidId?: string;
+  graphvizId?: string;
+}
+
+/** Key a trusted annotation by the node's exact source-offset range — offsets
+ *  are physical byte positions in the ORIGINAL source text, so two different
+ *  pieces of content (in particular: the app's own trusted mermaid/graphviz
+ *  placeholder or anchor target, vs. anything an untrusted document's author
+ *  could write) can never collide on the same key. See
+ *  {@link applyTrustedAnnotations}. */
+function positionKey(position: { start: { offset?: number }; end: { offset?: number } }): string | null {
+  const { start, end } = position;
+  if (start.offset === undefined || end.offset === undefined) return null;
+  return `${start.offset}-${end.offset}`;
+}
+
 // Single whole-document pass: parse once with GFM, replace top-level mermaid
 // code blocks with sentinel placeholders, annotate every top-level node with
-// data-start-line/data-end-line via mdast `data.hProperties` (consumed by
-// remark-rehype), then stringify + sanitize the full document once. Reference
-// definitions, footnote definitions, and reference images resolve because the
-// pass sees the whole document; per-block re-parsing would break them.
+// data-start-line/data-end-line, then stringify + sanitize the full document
+// once. Reference definitions, footnote definitions, and reference images
+// resolve because the pass sees the whole document; per-block re-parsing
+// would break them.
 /** Block-level mdast node types that should carry a source-line anchor so the
  *  rendered view can attach a note to a SPECIFIC line (e.g. one list item or
- *  table row), not just the enclosing top-level block. */
+ *  table row), not just the enclosing top-level block. `html` covers a
+ *  top-level bare-HTML block (e.g. `<details>…</details>` typed directly in
+ *  prose) that is ITSELF one clean, self-contained node — a raw-HTML block
+ *  split across multiple mdast `html` nodes (an opening tag on its own line,
+ *  closed many lines later) does not resolve to one hast element with a
+ *  matching offset range and so does not get an anchor; this degrades to "no
+ *  anchor" (same as any other unanchored content), never to a wrong one. */
 const ANCHOR_NODE_TYPES = new Set([
   'paragraph',
   'heading',
@@ -171,24 +328,121 @@ const ANCHOR_NODE_TYPES = new Set([
   'blockquote',
   'code',
   'thematicBreak',
+  'html',
 ]);
+
+/**
+ * Re-apply this app's own trusted `data-start-line`/`data-end-line`/
+ * `data-mermaid-id`/`data-graphviz-id` annotations to the SANITIZED hast
+ * tree, matching each hast node's retained `position` (offset range) against
+ * `annotations` — recorded from the ORIGINAL mdast tree, before any rehype
+ * processing ran.
+ *
+ * **Why this indirection exists, not a simpler `hProperties` write (as
+ * before this fix):** `rehype-raw` re-parses the ENTIRE tree (not just
+ * raw-HTML-derived nodes) through parse5 to merge markdown-derived and
+ * inline-HTML content into one consistent hast tree — a necessary,
+ * documented part of how it supports inline HTML at all. This means an
+ * ATTACKER-controlled bare/inline HTML element (now rendered, per this
+ * app's GitHub-style inline-HTML support) can carry ANY attribute name
+ * `inlineHtmlSchema` permits, including — if this app's own trusted
+ * annotations were schema-permitted by NAME alone, as an earlier version of
+ * this code did — `data-start-line`/`data-mermaid-id`/etc, with attacker-
+ * chosen VALUES. `rehype-sanitize`'s schema is a blanket name-based
+ * allow/deny list with no per-instance trust concept, so there is no way to
+ * schema-permit these names for the app's OWN placeholder/anchor elements
+ * without ALSO permitting them for any other element carrying the same
+ * name — closing that gap requires that these four attribute names never
+ * appear in `inlineHtmlSchema` at all (verify: `inlineHtmlSchema` above
+ * intentionally does NOT list them), so sanitize strips them from
+ * EVERYTHING, forged or legitimate alike — and that the app re-derives and
+ * re-applies its own annotations AFTERWARD, using a signal an attacker
+ * cannot forge: exactly which source-text OFFSET RANGE a node occupies.
+ * Offsets are the physical location a node's content actually started/ended
+ * at when `remark-parse` first parsed the ORIGINAL source — an attacker's
+ * own content occupies ITS OWN (different) offset range, and cannot be made
+ * to "claim" a different one. Verified by direct probe: an attacker's raw
+ * `<p>` element and a legitimate paragraph elsewhere in the same document
+ * retain DISTINCT, ACCURATE offsets through `rehypeRaw`+`rehypeSanitize`,
+ * and an empty placeholder `<div>` (mermaid/graphviz) explicitly carrying
+ * `position: node.position` from its ORIGINAL code-fence node keeps that
+ * exact offset range too.
+ *
+ * Runs as a rehype plugin positioned IMMEDIATELY AFTER `rehypeSanitize` in
+ * the processor chain (`renderDoc`, below) — sanitize has already stripped
+ * any attacker-forged instance of these four names by the time this runs,
+ * so setting them here (bypassing the schema entirely, since we are now
+ * past the one step that consults it) is safe by construction.
+ */
+function applyTrustedAnnotations(annotations: Map<string, TrustedAnnotation>) {
+  return (tree: HastRoot): void => {
+    visit(tree, 'element', (node: HastElement) => {
+      // `mdast-util-to-hast` patches the SAME source position onto BOTH a
+      // fenced code block's wrapping `<pre>` and its inner `<code>` (verified
+      // by probe) — without this exclusion, a position-keyed match would set
+      // data-start-line/data-end-line on `<pre>` too, contradicting
+      // `codeBlockStartLine`'s doc comment ("NEVER on the wrapping `<pre>`"),
+      // which every code-block line-lookup in this file relies on. Skip
+      // `<pre>`; `<code>` still gets the annotation via the same position key.
+      if (node.tagName === 'pre') return;
+      const key = node.position && positionKey(node.position);
+      const entry = key ? annotations.get(key) : undefined;
+      if (!entry) return;
+      node.properties ??= {};
+      node.properties['data-start-line'] = entry.startLine;
+      node.properties['data-end-line'] = entry.endLine;
+      if (entry.mermaidId) node.properties['data-mermaid-id'] = entry.mermaidId;
+      if (entry.graphvizId) node.properties['data-graphviz-id'] = entry.graphvizId;
+    });
+  };
+}
 
 async function renderDoc(source: string): Promise<PreparedDoc> {
   const tree = unified().use(remarkParse).use(remarkGfm).parse(source) as Root;
 
-  // Annotate every block-level node (including nested list items / table rows)
-  // with its source line range via hProperties, so the rendered DOM exposes
-  // `data-start-line` on sub-block elements for line-precise note anchoring.
+  // Record (never write to the tree) every block-level node's source line
+  // range, keyed by its offset range — see applyTrustedAnnotations for why
+  // this is recorded now but only APPLIED after sanitize runs. The SAME
+  // whole-tree walk also detects whether the document contains ANY inline
+  // HTML at all (anywhere — nested inside a list/table/blockquote too, not
+  // just top-level), so rehypeRaw/rehypeSanitize can be skipped entirely for
+  // the common case (a document with none): both are otherwise unconditional
+  // per-render costs (a full parse5 tree reparse + a full sanitize walk) for
+  // a benefit that only exists when inline HTML is actually present, and
+  // skipping them for ordinary documents also means only documents that
+  // ACTUALLY contain inline HTML ever reach rehype-raw's parse5 tree
+  // reconstruction — the stage a pathological, deeply-nested/repeated
+  // unclosed-tag input can stack-overflow (see the try/catch in
+  // RenderedMarkdown's render effect, which still handles that case for
+  // documents that DO contain inline HTML).
+  //
+  // NOTE for future edits — annotation-building is two passes, not one, and
+  // BOTH must be kept correct together: this whole-tree `visit()` covers
+  // `ANCHOR_NODE_TYPES` (nested types needing a LINE-PRECISE anchor: list
+  // items, table rows, blockquote/code children, top-level bare-HTML
+  // blocks) but deliberately excludes container types (`list`, `table`) —
+  // the `tree.children.map()` pass below is TOP-LEVEL ONLY and both replaces
+  // mermaid/dot/graphviz code nodes AND fills in every OTHER top-level block
+  // kind's anchor (`list`/`table`/paragraph/heading/etc.) via its
+  // `!annotations.has(key)` fallback, which exists specifically so it never
+  // clobbers a key THIS pass already set (in particular: a top-level `code`
+  // node is annotated by BOTH passes — this one generically, the mermaid/dot/
+  // graphviz branches below more specifically — the fallback's job is to let
+  // the more specific one win). A new top-level node type that needs
+  // anchoring must be added to whichever of the two passes actually reaches
+  // it (nested → `ANCHOR_NODE_TYPES`; a new top-level container kind →  the
+  // `tree.children.map()` fallback), not assumed to be covered by the other.
+  const annotations = new Map<string, TrustedAnnotation>();
+  let hasInlineHtml = false;
   visit(tree, (node) => {
+    if (node.type === 'html') hasInlineHtml = true;
     if (!ANCHOR_NODE_TYPES.has(node.type)) return;
-    const sl = node.position?.start.line;
-    const el = node.position?.end.line;
-    if (!sl || !el) return;
-    const withData = node as { data?: { hProperties?: Record<string, unknown> } };
-    const data = (withData.data ??= {});
-    const hProps = (data.hProperties ??= {});
-    hProps['data-start-line'] = sl;
-    hProps['data-end-line'] = el;
+    if (!node.position) return;
+    const key = positionKey(node.position);
+    const sl = node.position.start.line;
+    const el = node.position.end.line;
+    if (!key || !sl || !el) return;
+    annotations.set(key, { startLine: sl, endLine: el });
   });
 
   const mermaidById = new Map<string, MermaidEntry>();
@@ -203,18 +457,13 @@ async function renderDoc(source: string): Promise<PreparedDoc> {
     if (node.type === 'code' && (node as Code).lang === 'mermaid') {
       const id = `m${mid++}`;
       mermaidById.set(id, { source: (node as Code).value, startLine, endLine });
+      const key = node.position && positionKey(node.position);
+      if (key) annotations.set(key, { startLine, endLine, mermaidId: id });
       return {
         type: 'paragraph',
         children: [],
         position: node.position,
-        data: {
-          hName: 'div',
-          hProperties: {
-            'data-mermaid-id': id,
-            'data-start-line': startLine,
-            'data-end-line': endLine,
-          },
-        },
+        data: { hName: 'div' },
       } as RootContent;
     }
 
@@ -224,39 +473,67 @@ async function renderDoc(source: string): Promise<PreparedDoc> {
     ) {
       const id = `g${gid++}`;
       graphvizById.set(id, { source: (node as Code).value, startLine, endLine });
+      const key = node.position && positionKey(node.position);
+      if (key) annotations.set(key, { startLine, endLine, graphvizId: id });
       return {
         type: 'paragraph',
         children: [],
         position: node.position,
-        data: {
-          hName: 'div',
-          hProperties: {
-            'data-graphviz-id': id,
-            'data-start-line': startLine,
-            'data-end-line': endLine,
-          },
-        },
+        data: { hName: 'div' },
       } as RootContent;
     }
 
     if (startLine && endLine) {
-      const withData = node as RootContent & {
-        data?: { hProperties?: Record<string, unknown> };
-      };
-      const data = (withData.data ??= {});
-      const hProps = (data.hProperties ??= {});
-      hProps['data-start-line'] = startLine;
-      hProps['data-end-line'] = endLine;
+      const key = node.position && positionKey(node.position);
+      if (key && !annotations.has(key)) annotations.set(key, { startLine, endLine });
     }
     return node;
   });
   tree.children = children;
 
-  const processor = unified()
-    .use(remarkRehype)
-    .use(rehypeHighlight, { detect: false, ignoreMissing: true })
-    .use(rehypeSafeLinksImages)
-    .use(rehypeStringify);
+  // allowDangerousHtml + rehypeRaw turn bare/inline HTML in Markdown prose
+  // (mdast `html` nodes, otherwise silently dropped) into real hast nodes;
+  // rehypeSanitize (GitHub-style schema, see inlineHtmlSchema) MUST run
+  // immediately after, before rehypeHighlight/rehypeSafeLinksImages — those
+  // two are trusted, app-controlled passes that ADD attributes
+  // (hljs-* classes; target/rel/data-external/data-inert/data-localpath/
+  // data-image-blocked) to already-sanitized content. Reversing this order
+  // would either strip the app's own hardening attributes or require
+  // widening the schema to accommodate them for no reason. applyTrustedAnnotations
+  // runs immediately after rehypeSanitize for the same reason, from the other
+  // direction: it re-applies attributes sanitize would otherwise have to be
+  // trusted to let through by name (see its own doc comment for why that's
+  // unsafe with inline HTML enabled).
+  //
+  // rehypeRaw + rehypeSanitize are skipped ENTIRELY when `hasInlineHtml` is
+  // false (the common case for ordinary repository Markdown) — see the
+  // comment on `hasInlineHtml`, above, for why this is both a real perf win
+  // (no parse5 tree reparse, no whole-tree sanitize walk, for documents that
+  // have nothing for either to do) and a robustness one (only documents that
+  // actually contain inline HTML ever reach the stage that can stack-overflow
+  // on pathological input).
+  // Built as two separate full chains (rather than conditionally `.use()`-ing
+  // onto one `let` processor) because unified's fluent `.use()` narrows the
+  // Processor's generic type at each call — a plugin added only on one
+  // branch makes the two branches' resulting types genuinely different, so
+  // TypeScript correctly rejects assigning either back into one shared
+  // variable. The shared tail (applyTrustedAnnotations..rehypeStringify) is
+  // duplicated rather than factored out for the same reason.
+  const processor = hasInlineHtml
+    ? unified()
+        .use(remarkRehype, { allowDangerousHtml: true })
+        .use(rehypeRaw)
+        .use(rehypeSanitize, inlineHtmlSchema)
+        .use(applyTrustedAnnotations, annotations)
+        .use(rehypeHighlight, { detect: false, ignoreMissing: true })
+        .use(rehypeSafeLinksImages)
+        .use(rehypeStringify)
+    : unified()
+        .use(remarkRehype, { allowDangerousHtml: true })
+        .use(applyTrustedAnnotations, annotations)
+        .use(rehypeHighlight, { detect: false, ignoreMissing: true })
+        .use(rehypeSafeLinksImages)
+        .use(rehypeStringify);
   const hast = await processor.run(tree);
   const html = processor.stringify(hast) as string;
   return { html: sanitize(html), mermaidById, graphvizById };
@@ -380,6 +657,7 @@ function codeBlockEndLine(pre: HTMLElement): number {
 
 export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
   const [doc, setDoc] = useState<PreparedDoc | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
 
   // Line notes (only when a filePath is supplied — i.e. the Content panel, not
   // TaskDetail/compact uses). A note anchors to a block's source start line;
@@ -403,8 +681,25 @@ export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const next = await renderDoc(props.source);
-      if (!cancelled) setDoc(next);
+      try {
+        const next = await renderDoc(props.source);
+        if (!cancelled) {
+          setDoc(next);
+          setRenderError(null);
+        }
+      } catch (err) {
+        // renderDoc can throw — e.g. rehype-raw's parse5 tree reconstruction
+        // stack-overflows on pathological input (thousands of unclosed
+        // inline-HTML tags in one document, a real DoS-shaped input this app
+        // must treat as untrusted). Surface it instead of leaving the panel
+        // silently blank forever (an uncaught rejection here previously left
+        // `doc` null with no user-facing signal at all).
+        console.error('[markdown] renderDoc failed:', err);
+        if (!cancelled) {
+          setDoc(null);
+          setRenderError(err instanceof Error ? err.message : String(err));
+        }
+      }
     })();
     return () => {
       cancelled = true;
@@ -955,6 +1250,9 @@ export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
   );
 
   const compact = props.compact ?? false;
+  if (renderError) {
+    return <EmptyState title="Could not render this document" hint={renderError} />;
+  }
   return (
     <div
       className="agent-cockpit-markdown"

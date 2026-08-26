@@ -654,15 +654,35 @@ resize|capture-pane` request channels and forwards parsed notifications on
   source-mapped structural folding — see "JSON/YAML source-mapped structural folding" below),
   `ImageCompare`/`ImageView`
   (bytes via the capped `readFileBytes` primitive), and the shared `BinaryPlaceholder`. The Markdown renderer runs one whole-document
-  unified pass (`remark-parse` → `remark-gfm` → `remark-rehype` →
-  `rehype-highlight` → a local safe-link/image transform → `rehype-stringify`)
-  so reference link definitions, footnotes, and reference images resolve
-  across blocks. Top-level mdast nodes attach `data.hProperties` with
-  `data-start-line`/`data-end-line`, which the renderer reads off the parsed
-  DOM to drive `hunkMap` changed-block callouts. Mermaid (` ```mermaid `) and
-  Graphviz (` ```dot `/` ```graphviz `) `code` nodes are swapped pre-rehype for
-  sentinel `<div data-mermaid-id="…">` / `<div data-graphviz-id="…">`
-  placeholders, then substituted with `MermaidFrame` / `GraphvizFrame` React
+  unified pass — `remark-parse` → `remark-gfm` → `remark-rehype`
+  (`allowDangerousHtml: true`) → [`rehype-raw` → `rehype-sanitize`
+  (`hast-util-sanitize`'s `defaultSchema`, extended with three narrow
+  deviations — see ARCHITECTURE.md "Untrusted repository content"), run only
+  when the document contains bare inline HTML; a plain document skips both
+  stages] → `applyTrustedAnnotations` →
+  `rehype-highlight` → a local safe-link/image transform → `rehype-stringify`
+  — so reference link definitions, footnotes, and reference images resolve
+  across blocks, and bare/inline HTML written directly in Markdown prose
+  renders (GitHub-style sanitized; a fenced `` ```html `` block still renders
+  as a plain code listing, matching GitHub). Top-level mdast nodes and the
+  Mermaid/Graphviz placeholder nodes below are recorded, by source-offset
+  range, into an `annotations` map built from the **original mdast tree**
+  (never as `hProperties` on the hast tree); `applyTrustedAnnotations` — a
+  rehype step positioned immediately after `rehype-sanitize` — re-applies
+  each entry's `data-start-line`/`data-end-line`/`data-mermaid-id`/
+  `data-graphviz-id` onto the matching **sanitized** hast node by matching its
+  own source-position range. `rehype-sanitize`'s schema deliberately never
+  allowlists these four attribute names: source-offset ranges are not
+  attacker-suppliable, so recording and re-applying them post-sanitize (rather
+  than schema-permitting the names) closes the forgery path a schema-based
+  allowlist cannot — see CLAUDE.md's "Inline-HTML sanitizer schema must never
+  allowlist this app's own trusted attributes by name" for the concrete
+  exploit this replaced. The renderer reads `data-start-line`/`data-end-line`
+  off the parsed DOM to drive `hunkMap` changed-block callouts. Mermaid
+  (` ```mermaid `) and Graphviz (` ```dot `/` ```graphviz `) `code` nodes are
+  swapped pre-rehype for placeholder `<div>` nodes (their `data-mermaid-id`/
+  `data-graphviz-id` likewise carried via the `annotations` map, not
+  `hProperties`), then substituted with `MermaidFrame` / `GraphvizFrame` React
   components at render time. Both render to SVG (mermaid in `securityLevel:
 'strict'`, using the **ELK** layout engine by default — `@mermaid-js/layout-elk`,
   dynamically imported with mermaid — for cleaner, crossing-minimized routing on

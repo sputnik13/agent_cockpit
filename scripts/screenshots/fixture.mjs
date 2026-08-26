@@ -356,6 +356,12 @@ export function generateFixture() {
     // doc comment. Committed once, never modified, same rationale as
     // 'oversized.json' above.
     'oversized-huge.json': makeOversizedJson(WAY_OVERSIZED_JSON_TARGET_MB * 1024 * 1024),
+    // Deliberately short (one paragraph + two small fences) — screenshot fixture
+    // for the Review preset: opened from Changes so its one-word intro edit
+    // (see the uncommitted-changes stage below) triggers intraline diff
+    // highlighting, while both diagram fence languages render underneath in the
+    // same view without scrolling.
+    'guide.md': `# Review Demo\n\nA short guide covering the create and search flows.\n\n\`\`\`mermaid\ngraph LR\n  Create --> Tag --> Save\n\`\`\`\n\n\`\`\`dot\ndigraph { Search -> Filter -> Results }\n\`\`\`\n`,
   });
 
   run('git', ['init', '-q', '-b', 'main']);
@@ -406,6 +412,11 @@ export function generateFixture() {
     // src/search.ts above — no baseline needed for their assertions.
     'multi-doc.yaml': YAML_MULTI_DOC,
     'anchors.yaml': YAML_ANCHORS,
+    // guide.md's working-tree edit: "flows" -> "workflows" is the ONLY change
+    // (a single-word intro-sentence reword, same shape as the README.md edit
+    // above) — both diagram fences stay byte-identical, so only the intro
+    // paragraph gets intraline diff decoration in the Rendered view.
+    'guide.md': `# Review Demo\n\nA short guide covering the create and search workflows.\n\n\`\`\`mermaid\ngraph LR\n  Create --> Tag --> Save\n\`\`\`\n\n\`\`\`dot\ndigraph { Search -> Filter -> Results }\n\`\`\`\n`,
   });
 
   // --- beads issue graph (varied states for the workgraph) ----------------

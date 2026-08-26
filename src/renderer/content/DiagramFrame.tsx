@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 /**
  * Shared chrome for inline diagram renderers (mermaid, graphviz). It owns the
@@ -28,19 +28,33 @@ const MIN_SCALE = 0.25;
 const MAX_SCALE = 8;
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n));
 
-// Diagram viewport height is user-resizable and persisted (applies to every
-// diagram and across sessions), since some graphs need more vertical room.
+// By default the viewport auto-sizes to the diagram's own natural rendered
+// height (clamped to AUTO_MAX_HEIGHT) — small diagrams (a 3-node flowchart)
+// no longer pay for a fixed-size box they don't need, matching how GitHub
+// renders inline diagrams at their natural size. Large diagrams still need a
+// bound (an unbounded viewport could blow out the panel), so auto-sizing caps
+// at AUTO_MAX_HEIGHT; the drag handle still lets a user manually resize past
+// that cap (up to MAX_HEIGHT) for a diagram that genuinely needs more room.
+// A manual resize is persisted (applies to every diagram and across
+// sessions, since "I want more room" is usually a lasting preference) and,
+// once set, takes precedence over auto-sizing until the value is cleared
+// from localStorage.
 const DIAGRAM_HEIGHT_KEY = 'ac:diagramHeight';
 const MIN_HEIGHT = 160;
 const MAX_HEIGHT = 2000;
 const DEFAULT_HEIGHT = 360;
+const AUTO_MAX_HEIGHT = 600;
 
-function readDiagramHeight(): number {
+/** A persisted MANUAL override, or `null` if the user has never resized (i.e.
+ *  this diagram should auto-size to its own content). */
+function readHeightOverride(): number | null {
   try {
-    const n = Number(localStorage.getItem(DIAGRAM_HEIGHT_KEY));
-    return Number.isFinite(n) && n >= MIN_HEIGHT && n <= MAX_HEIGHT ? n : DEFAULT_HEIGHT;
+    const raw = localStorage.getItem(DIAGRAM_HEIGHT_KEY);
+    if (raw === null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= MIN_HEIGHT && n <= MAX_HEIGHT ? n : null;
   } catch {
-    return DEFAULT_HEIGHT;
+    return null;
   }
 }
 
@@ -48,8 +62,14 @@ export function DiagramFrame({ label, source, render, renderKey }: DiagramFrameP
   const [state, setState] = useState<RenderState>({ kind: 'loading' });
   const [showSource, setShowSource] = useState(false);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
-  const [height, setHeight] = useState<number>(() => readDiagramHeight());
+  // Read once per mount: a manual override (if any) is the fixed starting
+  // height; otherwise start at DEFAULT_HEIGHT as a placeholder until the
+  // layout effect below measures the diagram's own natural height and
+  // corrects it (before paint, so there's no visible flash).
+  const heightOverrideRef = useRef<number | null>(readHeightOverride());
+  const [height, setHeight] = useState<number>(() => heightOverrideRef.current ?? DEFAULT_HEIGHT);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ sx: number; sy: number; x: number; y: number } | null>(null);
   const resizeRef = useRef<{ sy: number; h: number } | null>(null);
   // Hold the latest render closure in a ref so the effect depends only on
@@ -103,14 +123,22 @@ export function DiagramFrame({ label, source, render, renderKey }: DiagramFrameP
       return { scale: next, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
     });
 
-  // Persist the user's chosen viewport height so it applies to every diagram.
-  useEffect(() => {
-    try {
-      localStorage.setItem(DIAGRAM_HEIGHT_KEY, String(height));
-    } catch {
-      /* no localStorage in this environment */
+  // Auto-size to the diagram's own natural rendered height, unless a manual
+  // override is already in effect. Runs as a layout effect (synchronously
+  // before paint) so the DEFAULT_HEIGHT placeholder never actually flashes.
+  // `contentRef` is the absolutely-positioned SVG wrapper, so its own layout
+  // size is unaffected by the ancestor viewport's (possibly still-stale)
+  // height — measuring it here is accurate regardless of the height in
+  // effect at the moment of measurement. Re-runs on every successful render
+  // (e.g. a source/theme change), so auto-sized diagrams keep tracking their
+  // own content.
+  useLayoutEffect(() => {
+    if (state.kind !== 'ok' || heightOverrideRef.current !== null) return;
+    const natural = contentRef.current?.getBoundingClientRect().height;
+    if (natural && natural > 0) {
+      setHeight(Math.round(clamp(natural, MIN_HEIGHT, AUTO_MAX_HEIGHT)));
     }
-  }, [height]);
+  }, [state]);
 
   const onResizeDown = (e: React.PointerEvent): void => {
     e.preventDefault();
@@ -120,7 +148,18 @@ export function DiagramFrame({ label, source, render, renderKey }: DiagramFrameP
   const onResizeMove = (e: React.PointerEvent): void => {
     const r = resizeRef.current;
     if (!r) return;
-    setHeight(Math.round(clamp(r.h + (e.clientY - r.sy), MIN_HEIGHT, MAX_HEIGHT)));
+    const next = Math.round(clamp(r.h + (e.clientY - r.sy), MIN_HEIGHT, MAX_HEIGHT));
+    // A manual drag establishes (or updates) the persisted override, which
+    // takes over from auto-sizing — for this diagram immediately, and for
+    // every OTHER diagram on its next mount (matching the pre-existing
+    // "applies across every diagram and across sessions" persistence model).
+    heightOverrideRef.current = next;
+    setHeight(next);
+    try {
+      localStorage.setItem(DIAGRAM_HEIGHT_KEY, String(next));
+    } catch {
+      /* no localStorage in this environment */
+    }
   };
   const endResize = (): void => {
     resizeRef.current = null;
@@ -189,6 +228,7 @@ export function DiagramFrame({ label, source, render, renderKey }: DiagramFrameP
             onPointerLeave={endDrag}
           >
             <div
+              ref={contentRef}
               className="absolute left-0 top-0 origin-top-left p-2 [&_svg]:max-w-none"
               style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
               // SVG is renderer-generated and DOMPurify-sanitized by the caller's `render`.

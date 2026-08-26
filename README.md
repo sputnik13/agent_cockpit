@@ -47,6 +47,12 @@ The content viewer rendering a unified diff of a changed file:
 
 ![Content viewer diff](docs/images/content-diff.png)
 
+The Review layout, content viewer centered — a rendered Markdown file with
+intraline (word-level) diff highlighting on the edited sentence, and both a
+Mermaid and a Graphviz diagram rendered inline:
+
+![Review layout with intraline diff and diagram rendering](docs/images/review-diagrams.png)
+
 Task detail — beads issue state with inline lifecycle actions (the one app-side
 write surface; everything else is read-only):
 

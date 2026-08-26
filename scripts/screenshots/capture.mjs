@@ -101,6 +101,30 @@ async function main() {
     console.warn('  (skipped task-detail shot:', e.message, ')');
   }
 
+  // Switch to the Review preset (Content viewer centered) and open guide.md
+  // from Changes — its one-word intro edit shows intraline diff highlighting
+  // while both a Mermaid and a Graphviz (dot) diagram render underneath, all
+  // in one short, unscrolled view.
+  try {
+    const isMac = process.platform === 'darwin';
+    await win.keyboard.press(isMac ? 'Meta+r' : 'Control+r');
+    await sleep(600);
+    await win.locator('.dv-tab', { hasText: 'Changes' }).first().click();
+    await sleep(600);
+    await win.getByText('guide.md', { exact: false }).first().click({ timeout: 5000 });
+    await sleep(1200);
+    // Taller than the standard 1480x920 so both stacked diagrams clear the
+    // fold — this is the last shot, so the size change doesn't affect the
+    // composition of any earlier screenshot.
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.setContentSize(1480, 1200);
+    });
+    await sleep(400);
+    await shot(win, 'review-diagrams');
+  } catch (e) {
+    console.warn('  (skipped review-diagrams shot:', e.message, ')');
+  }
+
   // app.close() can hang on tmux control-mode teardown; don't block on it.
   await Promise.race([app.close().catch(() => {}), sleep(3000)]);
   killShotSessions();

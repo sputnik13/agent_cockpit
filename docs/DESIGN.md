@@ -689,8 +689,15 @@ resize|capture-pane` request channels and forwards parsed notifications on
   flowcharts/state diagrams, overridable per-diagram via frontmatter
   `config.layout`; graphviz via the bundled, inlined `@hpcc-js/wasm-graphviz`),
   which is DOMPurify-sanitized before insertion and shown in a shared
-  zoom/pan/source `DiagramFrame` whose viewport height is user-resizable (drag
-  handle, persisted); no CDN or network is used (the inlined WASM loads same-origin
+  zoom/pan/source `DiagramFrame` whose viewport height defaults to the
+  diagram's own natural rendered height (measured post-render, capped at
+  `AUTO_MAX_HEIGHT` = 600px so one large diagram can't dominate the panel) —
+  small diagrams render compactly instead of always paying for a fixed-size
+  box, matching how GitHub renders inline diagrams at their natural size. A
+  drag handle still lets a diagram be resized past that cap (up to 2000px);
+  once a user resizes, that height is persisted and takes over from
+  auto-sizing for every diagram, across sessions, until cleared; no CDN or
+  network is used (the inlined WASM loads same-origin
   under the strict `script-src 'self' 'wasm-unsafe-eval'` CSP). External anchors get `target="_blank"` +
   `rel="noopener noreferrer"` and a delegated click handler routes them
   through `window.open` (Electron's `setWindowOpenHandler` funnels that to

@@ -3,12 +3,7 @@ import { agentCockpit, useProjectsStore } from '../providerClient';
 import { useSettingsStore } from '../settings';
 import { useTmuxStore } from '../tmux/tmuxStore';
 import * as controlPaneRegistry from '../tmux/controlPaneRegistry';
-import {
-  acquireControlSession,
-  controlBridgeReady,
-  releaseControlSession,
-  resetControlSession,
-} from '../tmux/controlSession';
+import { acquireControlSession, controlBridgeReady, teardownControlSession } from '../tmux/controlSession';
 import { useTerminalsStore } from './terminalsStore';
 import * as registry from './terminalRegistry';
 
@@ -59,15 +54,12 @@ export async function switchTerminalRenderer(next: TerminalRenderer): Promise<vo
   const projectId = useProjectsStore.getState().activeId;
   if (!projectId) return;
 
-  // Teardown (mirrors the panel's disconnect branch): dispose this project's pane
-  // terminals, release + reset the control session, and clear its tmux view.
-  controlPaneRegistry.disposeProject(projectId);
-  releaseControlSession();
-  // Per-project reset: keeps this project's channelEpoch so the re-acquire below
-  // re-inits even though a backend switch leaves tmux open (no fresh attach), and
-  // never touches other projects' state.
-  resetControlSession(projectId);
-  useTmuxStore.getState().resetProject(projectId);
+  // Teardown (shared with panelDataSync's disconnect-driven teardown): dispose
+  // this project's pane terminals, reset the control session, and clear its
+  // tmux view. Per-project reset keeps this project's channelEpoch so the
+  // re-acquire below re-inits even though a backend switch leaves tmux open
+  // (no fresh attach), and never touches other projects' state.
+  teardownControlSession(projectId);
 
   // Re-acquire (mirrors the panel's reconnect branch) so tmux replays and panes
   // rebuild on the new adapter. Guard on the preload bridge like the panel does.

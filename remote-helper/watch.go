@@ -69,14 +69,52 @@ func relPosix(root, abs string) (string, bool) {
 	return filepath.ToSlash(rel), true
 }
 
+// gitWorktreesSignal is GIT_STATE_SIGNALS' ".git/worktrees" entry
+// (src/shared/watch/policy.ts). Unlike ".git/refs" -- an intentionally
+// UNBOUNDED-depth signal, since every nested ref path is real signal -- a
+// worktree being added or removed only ever changes ".git/worktrees" itself
+// or its immediate "<name>" child. Anything nested deeper
+// (".git/worktrees/<name>/HEAD", "/index", "/logs/HEAD", ...) is per-commit
+// churn made INSIDE that worktree's own metadata dir, not a worktree-set
+// change, and must stay noise -- see GIT_STATE_SIGNALS's doc comment in
+// policy.ts for the full rationale.
+const gitWorktreesSignal = ".git/worktrees"
+
+// gitWorktreesMaxSegments bounds how many "/"-separated segments a path may
+// have and still count as the gitWorktreesSignal: the signal itself
+// (".git/worktrees", 2 segments) or exactly one child ("<name>", 3
+// segments) -- mirrors policy.ts's classifyWatchPath segment-count gate
+// (`segments[1] === 'worktrees' && segments.length <= 3`).
+const gitWorktreesMaxSegments = 3
+
 // matchesSignal reports whether rel is one of the signal paths, treating each
 // signal as an exact path OR a directory prefix (so ".git/refs" matches
-// ".git/refs/heads/main").
+// ".git/refs/heads/main"). gitWorktreesSignal is the one exception: it is
+// depth-BOUNDED (see gitWorktreesMaxSegments) rather than an unbounded
+// prefix, matching policy.ts's classifyWatchPath segment-count gate.
+//
+// This bound is Go-side defense-in-depth, independent of
+// addWatchesWithSpec's directory-walk `filepath.SkipDir` at ".git/worktrees"
+// (which is what actually prevents fsnotify from ever watching deep enough
+// to produce these paths in production today). Without this guard, this
+// function alone would incorrectly treat a deep per-worktree-metadata path
+// as a git-state signal -- currently unreachable dead-code-in-practice, but
+// a future unrelated change to the directory walk (e.g. removing that
+// SkipDir to watch worktree subdirs for some other feature) could silently
+// reintroduce the per-commit noise bug remote-only, with nothing to catch it
+// (local_repo_explorer-wkxb).
 func matchesSignal(rel string, signals []string) bool {
 	for _, sig := range signals {
-		if rel == sig || strings.HasPrefix(rel, sig+"/") {
+		if rel == sig {
 			return true
 		}
+		if !strings.HasPrefix(rel, sig+"/") {
+			continue
+		}
+		if sig == gitWorktreesSignal && len(strings.Split(rel, "/")) > gitWorktreesMaxSegments {
+			continue // per-worktree metadata churn -- noise, not a signal
+		}
+		return true
 	}
 	return false
 }

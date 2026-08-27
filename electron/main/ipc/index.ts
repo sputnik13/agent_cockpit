@@ -193,6 +193,9 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       tmuxControl.get(projectId)!.close();
       tmuxControl.delete(projectId);
     }
+    // Drop the remote wired-instance marker so a reconnect's fresh manager
+    // instance is never compared against a now-defunct one.
+    remoteControlWired.delete(projectId);
     // Dispose and remove all terminal data/exit subscriptions for this project.
     for (const [key, disposers] of [...termDisposers.entries()]) {
       if (key.startsWith(`${projectId} `)) {
@@ -562,6 +565,18 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   // projects use RemoteTmuxControlManager (via RemoteProvider.tmuxControl()).
   const tmuxControl = new Map<string, LocalTmuxControlManager>();
   const tmuxDisposers = new Map<string, () => void>();
+  /** Tracks, per pid, the exact remote manager INSTANCE last wired in
+   *  activeControl() below — remote's analogue of `tmuxControl` above serving
+   *  as local's "already created for this pid" signal. RemoteProvider owns and
+   *  caches its own RemoteTmuxControlManager instance (`provider.tmuxControl()`
+   *  returns the SAME instance across calls until a reconnect rebuilds the
+   *  provider), so comparing against the instance actually returned — not just
+   *  disposer-map presence — is what lets activeControl() wire onNotification
+   *  once per instance instead of on every IPC call. */
+  const remoteControlWired = new Map<
+    string,
+    import('../providers/remote/tmuxControl').RemoteTmuxControlManager
+  >();
 
   /** Unified control-mode accessor. Returns a manager that exposes at least
    *  command/input/capturePane/resizeClient/close methods plus onNotification. */
@@ -608,25 +623,41 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
 
     if (provider instanceof RemoteProvider) {
       const remoteCtrl = provider.tmuxControl();
-      // Always unwire-old then wire-new for remote: the prior has(pid) guard
-      // was the root cause of D2. After reconnect, a new RemoteTmuxControlManager
-      // instance is built inside the new provider; if the stale disposer from the
-      // evicted provider were still present, onEviction will have cleared it, but
-      // we unconditionally rewire here for safety (idempotent: dispose nothing if
-      // no prior entry, then set the fresh one).
-      const priorOff = tmuxDisposers.get(pid);
-      if (priorOff) priorOff();
-      // Background %output counts as session activity (idle aging-out).
-      remoteCtrl.onOutputActivity = () => sessionManager.touch(pid);
-      remoteCtrl.onUnresponsive = (info) =>
-        logger.error(
-          `tmux control unresponsive for ${pid}: oldest command ${Math.round(info.oldestAgeMs)}ms, ${info.pendingCount} pending`,
-          'tmux-control',
+      // Wire onNotification once per manager INSTANCE (mirrors local's `if
+      // (!mgr)` pattern above), not on every activeControl() call — this used
+      // to unconditionally unwire+rewire on every single tmux IPC call
+      // (open/command/input/resize/capturePane/...).
+      //
+      // History: an EARLIER version gated this on a bare `!tmuxDisposers.has(pid)`
+      // check, which was the root cause of D2 — after a reconnect built a new
+      // RemoteTmuxControlManager instance, a stale disposer entry that had
+      // somehow survived incorrectly suppressed rewiring the new instance, so
+      // its notifications never reached the renderer. That was fixed by making
+      // eviction (SessionManager.onEviction, wired above) reliably clear
+      // tmuxDisposers/tmuxControl/remoteControlWired BEFORE `reconnect()`
+      // constructs the replacement provider (and thus its new manager
+      // instance) — verified via sessionManager.ts's `reconnect()`/`close()`/
+      // failed-`open()` all calling `notifyEviction()` ahead of any new
+      // instance ever existing. Comparing the actual instance here (rather
+      // than re-adding that same has(pid) shape) keeps this correct by
+      // construction — independent of that eviction-ordering guarantee —
+      // instead of silently depending on it again.
+      if (remoteControlWired.get(pid) !== remoteCtrl) {
+        const priorOff = tmuxDisposers.get(pid);
+        if (priorOff) priorOff();
+        // Background %output counts as session activity (idle aging-out).
+        remoteCtrl.onOutputActivity = () => sessionManager.touch(pid);
+        remoteCtrl.onUnresponsive = (info) =>
+          logger.error(
+            `tmux control unresponsive for ${pid}: oldest command ${Math.round(info.oldestAgeMs)}ms, ${info.pendingCount} pending`,
+            'tmux-control',
+          );
+        const off = remoteCtrl.onNotification((notification) =>
+          send(Channels.evtTmux, { projectId: pid, notification: toWireNotification(notification) }),
         );
-      const off = remoteCtrl.onNotification((notification) =>
-        send(Channels.evtTmux, { projectId: pid, notification: toWireNotification(notification) }),
-      );
-      tmuxDisposers.set(pid, off);
+        tmuxDisposers.set(pid, off);
+        remoteControlWired.set(pid, remoteCtrl);
+      }
       return { mgr: remoteCtrl, sessionName: provider.tmuxControlSessionName(), projectId: pid };
     }
 

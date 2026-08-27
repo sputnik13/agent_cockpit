@@ -27,6 +27,17 @@ import {
  * interface that preserves the CLAUDE.md raw-byte invariant. push() converts
  * the ASCII/latin1 text to a Buffer so the manager's ingest() feeds the parser
  * as Uint8Array — same as the live SSH transport path.
+ *
+ * By default (`simulateInitialBlock: true`), the fake also reproduces tmux's
+ * real quirk of emitting exactly one unsolicited `%begin`/`%end` block on
+ * every attach, before any client command — the manager's `sawInitialBlock`
+ * guard must swallow it. That push happens before any `onData` listener is
+ * registered, so it is buffered and flushed the moment one attaches
+ * (mirroring a real channel where the manager wires its listener right after
+ * the channel resolves). This lets every ordinary test exercise the guard
+ * exactly as production does without needing to know about the quirk. Pass
+ * `{ simulateInitialBlock: false }` to drive the exact timing manually (see
+ * the dedicated regression test below).
  */
 class FakeChannel implements ControlChannel {
   private dataHandlers: Array<(c: Buffer) => void> = [];
@@ -38,6 +49,20 @@ class FakeChannel implements ControlChannel {
   replyError = false;
   /** When true, swallow commands (no reply) to simulate a wedged link. */
   noReply = false;
+  /** Pushes made before any onData handler is registered, flushed to it once
+   *  it registers (mirrors data arriving before the manager wires its
+   *  listener). */
+  private queuedBeforeListen: string[] = [];
+
+  constructor(opts?: { simulateInitialBlock?: boolean }) {
+    if (opts?.simulateInitialBlock ?? true) this.simulateAttachBlock();
+  }
+
+  /** Push tmux's own unsolicited initial %begin/%end block, exactly as a real
+   *  `-CC new-session -A` attach emits before any client command. */
+  private simulateAttachBlock(): void {
+    this.push('%begin 1699999999 1 1\r\n%end 1699999999 1 1\r\n');
+  }
 
   write(data: string): void {
     this.written.push(data);
@@ -51,6 +76,10 @@ class FakeChannel implements ControlChannel {
   }
   onData(handler: (c: Buffer) => void): void {
     this.dataHandlers.push(handler);
+    if (this.queuedBeforeListen.length) {
+      const queued = this.queuedBeforeListen.splice(0);
+      for (const text of queued) handler(Buffer.from(text, 'latin1'));
+    }
   }
   onClose(handler: () => void): void {
     this.closeHandlers.push(handler);
@@ -64,9 +93,14 @@ class FakeChannel implements ControlChannel {
    * Inject raw control-stream text as a latin1-encoded Buffer. This matches
    * how the real SSH channel delivers bytes: no UTF-8 decode in transit, so
    * the manager's ingest() receives Uint8Array bytes, preserving the raw-byte
-   * invariant required by CLAUDE.md.
+   * invariant required by CLAUDE.md. Pushed before any listener is
+   * registered, text is buffered and flushed on the next onData() call.
    */
   push(text: string): void {
+    if (this.dataHandlers.length === 0) {
+      this.queuedBeforeListen.push(text);
+      return;
+    }
     const buf = Buffer.from(text, 'latin1');
     for (const h of this.dataHandlers) h(buf);
   }
@@ -115,6 +149,45 @@ describe('RemoteTmuxControlManager (fake channel, no live SSH)', () => {
     expect(reply.error).toBe(false);
     expect(reply.lines).toEqual(['@1']);
     expect(ch.written.at(-1)).toContain("list-windows");
+  });
+
+  it("swallows tmux's unsolicited initial reply block so a real command's reply is not misassigned", async () => {
+    // Regression for the FIFO-desync hazard LocalTmuxControlManager already
+    // guards against (sawInitialBlock): every `-CC new-session -A` attach
+    // makes tmux emit ONE unsolicited %begin/%end block that is not a reply
+    // to any client command. If a real command races it into flight (exactly
+    // what happens with no IPC round-trip in-process), the phantom block must
+    // not be shifted off the pending FIFO in its place. Opts out of the fake's
+    // normal auto-simulated initial block so the exact race (command already
+    // pending WHEN the phantom arrives) can be driven manually — the default
+    // auto-simulation flushes synchronously during attach(), before any
+    // command could be in flight, so it cannot exercise this ordering itself.
+    const ch = new FakeChannel({ simulateInitialBlock: false });
+    // Suppress the default auto-reply so the test controls exactly when each
+    // reply block arrives (mirrors the "fails in-flight commands" pattern).
+    ch.write = (data: string): void => {
+      ch.written.push(data);
+    };
+    const mgr = new RemoteTmuxControlManager(async () => ch);
+    await mgr.open();
+
+    // A real command goes in flight (pending non-empty)...
+    const pending = mgr.command("list-windows -F '#{window_id}'");
+
+    // ...but tmux's own unsolicited initial block from the attach itself
+    // (not a reply to any client command) arrives first, exactly as it does
+    // on a live channel racing a command issued right after open().
+    ch.push('%begin 1700000000 1 1\r\n%end 1700000000 1 1\r\n');
+
+    // The REAL reply for the in-flight list-windows command arrives next.
+    ch.push('%begin 1700000001 2 1\r\n@1\r\n%end 1700000001 2 1\r\n');
+
+    const reply = await pending;
+    // Without the guard, the phantom block above would have been shifted off
+    // the FIFO and resolved `pending` with an empty/wrong reply; with the
+    // guard, the phantom is swallowed and the real reply lands correctly.
+    expect(reply.error).toBe(false);
+    expect(reply.lines).toEqual(['@1']);
   });
 
   it('surfaces a tmux %error reply as error=true (generic command(), tolerant)', async () => {

@@ -33,12 +33,32 @@ describe('DiffBundleCache', () => {
     expect(c.get('p1', '/wt', 'src/b.ts', 'HEAD')).toBeUndefined();
   });
 
-  it('isGitStateSignal matches HEAD / packed-refs / refs/* only', () => {
+  it('isGitStateSignal matches HEAD / packed-refs / refs/* / worktrees add-remove', () => {
     expect(isGitStateSignal('.git/HEAD')).toBe(true);
     expect(isGitStateSignal('.git/packed-refs')).toBe(true);
     expect(isGitStateSignal('.git/refs/heads/main')).toBe(true);
     expect(isGitStateSignal('src/a.ts')).toBe(false);
     expect(isGitStateSignal('.git/index')).toBe(false);
+    // A linked worktree being added/removed (canonical GIT_STATE_SIGNALS entry
+    // that diffCache's old hand-copied literal was missing).
+    expect(isGitStateSignal('.git/worktrees')).toBe(true);
+    expect(isGitStateSignal('.git/worktrees/feature-x')).toBe(true);
+    // Routine churn INSIDE an already-known worktree's own metadata dir is
+    // noise, not a worktree add/remove — must stay depth-gated exactly like
+    // the canonical classifier, not a naive `.git/worktrees` prefix match.
+    expect(isGitStateSignal('.git/worktrees/feature-x/HEAD')).toBe(false);
+  });
+
+  it('clears the whole project on a .git/worktrees (linked worktree add/remove) change', () => {
+    // Regression: diffCache's isGitStateSignal used to hand-copy the
+    // git-state list and was missing `.git/worktrees`, so this batch used to
+    // fall through to the per-path branch and leave every entry cached.
+    const c = new DiffBundleCache();
+    c.set('p1', '/wt', 'src/a.ts', 'HEAD', bundle('A'));
+    c.set('p1', '/wt', 'src/b.ts', 'HEAD', bundle('B'));
+    c.onWatch('p1', ['.git/worktrees/feature-x']);
+    expect(c.get('p1', '/wt', 'src/a.ts', 'HEAD')).toBeUndefined();
+    expect(c.get('p1', '/wt', 'src/b.ts', 'HEAD')).toBeUndefined();
   });
 
   it('evictProject and a watch on another project do not cross-invalidate', () => {

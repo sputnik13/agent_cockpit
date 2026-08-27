@@ -1,7 +1,8 @@
 /**
  * panelDataSync — the single orchestration module that keeps every live
- * session's per-project panel slices (Changes + Workgraph) current, driven by
- * per-session connection status + watch events (NOT panel focus or `activeId`).
+ * session's per-project panel slices (Changes + Workgraph) AND control-mode
+ * terminal session state current, driven by per-session connection status +
+ * watch events (NOT panel focus or `activeId`).
  *
  * It is initialized exactly once (AppShell), replacing the scattered triggers
  * that previously lived on the `activeId`/connection effects in CockpitWorkspace
@@ -10,8 +11,19 @@
  * Responsibilities:
  *  - On a project → `connected` (initial connect or reconnect): (re)load that
  *    project's Changes + Beads slices fresh. On → `disconnected`/`failed`: clear
- *    them to an explicit disconnected state. Driven by status, not focus (FR1,
- *    FR4) — a backgrounded project stays current.
+ *    them to an explicit disconnected state AND tear down its control-mode
+ *    terminal session (dispose pane registry entries, reset control-session
+ *    lifecycle state). Driven by status, not focus (FR1, FR4) — a backgrounded
+ *    project's teardown fires immediately on its own disconnect rather than
+ *    being deferred until it's reselected (local_repo_explorer-j4p3): without
+ *    this, a project reaped by the idle-timeout session reaper while
+ *    backgrounded never observes its own disconnected transition (`activeId`
+ *    only updates AFTER `projectsStore.activate()`'s reconnect already
+ *    succeeded), so a component-local, `activeId`-gated teardown effect can
+ *    never run for it. Re-ACQUIRING a project's control session on reconnect
+ *    stays owned by `ControlTerminalPanel` (gated on `activeId`, since only the
+ *    active project's panes are ever rendered/need a live UI binding) — this
+ *    module owns only the teardown half, which must not wait for that gate.
  *  - On a watch event tagged with `projectId`: refresh that project's addressed
  *    slice by category (git-state → re-list worktrees; working-tree → changeset
  *    refresh; beads → graph reload), targeting reads with that `projectId`.
@@ -32,6 +44,7 @@ import { useBeadsStore } from '@renderer/beads';
 import { useWorktreeStore } from '@renderer/worktree/worktreeStore';
 import { agentCockpit, useSessionStore, useProjectsStore } from '@renderer/providerClient';
 import { subscribeWatch } from '@renderer/watch/hub';
+import { teardownControlSession } from '@renderer/tmux/controlSession';
 import type { ConnectionState } from '@shared/providers/types';
 
 /** (Re)list a project's worktrees. The resulting `activeWorktree` change is
@@ -47,11 +60,16 @@ function loadProject(projectId: string): void {
   void useBeadsStore.getState().load(projectId);
 }
 
-/** Clear a project's slices to the disconnected state (status terminal). */
+/** Clear a project's slices to the disconnected state (status terminal), and
+ *  tear down its control-mode terminal session to a clean slate so a later
+ *  reconnect (whenever the project is next activated) rebuilds fresh rather
+ *  than re-acquiring stale cached pane/session state. Idempotent/safe to call
+ *  for a project whose control session was never opened. */
 function clearProject(projectId: string): void {
   useWorktreeStore.getState().clearForDisconnect(projectId);
   useChangesStore.getState().clearForDisconnect(projectId);
   useBeadsStore.getState().clearForDisconnect(projectId);
+  teardownControlSession(projectId);
 }
 
 /** Evict a project's slices entirely (the project was removed). */

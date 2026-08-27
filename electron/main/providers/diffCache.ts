@@ -6,7 +6,8 @@
  *
  * Invalidation is precise and driven by the existing filesystem watch:
  * - a watch batch touching a file path drops only that path's entries;
- * - a batch touching a git-state signal (HEAD / packed-refs / refs/*) means the
+ * - a batch touching a git-state signal (HEAD / packed-refs / refs/* / a
+ *   linked worktree add-remove under .git/worktrees) means the
  *   branch/baseline may have changed, so the whole project's cache is cleared
  *   (every file's diff is relative to that baseline).
  *
@@ -15,6 +16,7 @@
  * Per-project entries are bounded (insertion-order eviction) so memory can't grow
  * without bound on a long session.
  */
+import { classifyWatchPath } from '@shared/watch/policy';
 import type { DiffBundle } from '@shared/providers/types';
 
 /** Max cached bundles per project (oldest evicted first). */
@@ -34,9 +36,15 @@ interface Entry {
 }
 
 /** True when a watched path is a git-state signal (branch switch / commit / ref
- *  update) — i.e. a baseline change that invalidates every file's diff. */
+ *  update, or a linked worktree being added/removed) — i.e. a baseline change
+ *  that invalidates every file's diff. Delegates to the canonical classifier
+ *  (`src/shared/watch/policy.ts`) instead of hand-copying its signal list, so
+ *  this can never drift from — and exactly matches the depth-gating of — the
+ *  single source of "what counts as git-state" (e.g. `.git/worktrees` itself
+ *  or a `<name>` entry counts, but churn nested inside a worktree's own
+ *  metadata dir does not). */
 export function isGitStateSignal(rel: string): boolean {
-  return rel === '.git/HEAD' || rel === '.git/packed-refs' || rel.startsWith('.git/refs');
+  return classifyWatchPath(rel) === 'git-state';
 }
 
 export class DiffBundleCache {

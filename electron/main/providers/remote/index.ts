@@ -51,6 +51,7 @@ import { createRemoteTransport } from './transportFactory';
 import type { RemoteTransport } from './transportTypes';
 import { writeStreamToDest } from '../exportWrite';
 import { FILE_BYTES_CAP } from '@shared/providers/fileBytesCap';
+import { GRAPH_READ_MAX_BYTES } from '@shared/providers/graphReadCap';
 import { RemoteHelperLauncher, type LaunchedHelper } from './helper';
 import type {
   GitDiffBundleResult,
@@ -121,11 +122,6 @@ export function assembleChangeset(
     generatedAt: new Date().toISOString(),
   };
 }
-
-// Read cap for a remote .beads/issues.jsonl fetch (see getTaskGraph). Well
-// under the helper's maxReadFileCapBytes (12 MiB) ceiling, generous relative
-// to the helper's 2 MiB default text-read cap.
-const GRAPH_READ_MAX_BYTES = 10 << 20; // 10 MiB
 
 /** Parse a remote `.beads/issues.jsonl` body into a BeadsTaskGraph. */
 function parseBeadsJsonl(path: string, text: string): BeadsTaskGraph {

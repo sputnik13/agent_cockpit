@@ -1,5 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import type { BeadsDep, BeadsIssue, BeadsTaskGraph } from '@shared/ipc/channels';
+import { GRAPH_READ_MAX_BYTES } from '@shared/providers/graphReadCap';
 import { openBeadsDb } from './sqlite';
 import type { BeadsSource } from './source';
 
@@ -120,6 +121,22 @@ function loadFromSqliteOnce(source: BeadsSource): BeadsTaskGraph {
 }
 
 function loadFromJsonl(source: BeadsSource): BeadsTaskGraph {
+  // Refuse (never silently truncate) an oversized read — mirrors the remote
+  // transport exactly (RemoteProvider.getTaskGraph / toTaskGraph in
+  // electron/main/providers/remote/index.ts), which throws the same message
+  // above the same shared GRAPH_READ_MAX_BYTES cap. Before this, local read
+  // the whole file unbounded via readFileSync while remote hard-refused past
+  // 10 MiB — the exact same project's workgraph loaded fine locally and
+  // hard-failed remotely, with no local repro. A truncated JSONL parse would
+  // otherwise silently render as an empty-but-valid "no tasks" graph with no
+  // indication anything is wrong.
+  const { size } = statSync(source.path);
+  if (size > GRAPH_READ_MAX_BYTES) {
+    throw new Error(
+      `.beads/issues.jsonl is too large to read (over ${String(GRAPH_READ_MAX_BYTES / (1 << 20))} MiB); ` +
+        'the workgraph cannot be loaded until it is pruned (e.g. tombstone compaction via br).',
+    );
+  }
   const text = readFileSync(source.path, 'utf8');
   const issues: BeadsIssue[] = [];
   const deps: BeadsDep[] = [];

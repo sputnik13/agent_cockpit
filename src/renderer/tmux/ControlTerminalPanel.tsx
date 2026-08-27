@@ -23,7 +23,6 @@ import {
   queueRefreshForOtherVisibleTabs,
   queueRefreshForOtherWindows,
   releaseControlSession,
-  resetControlSession,
   subscribeReinit,
   syncFromTmux,
   takePendingWindowRefresh,
@@ -76,35 +75,17 @@ export function ControlTerminalPanel(): JSX.Element {
   /** Pending rAF id for the focus-on-(re)open effect; cancelled on cleanup. */
   const focusRafRef = useRef(0);
 
-  // Acquire or release the control session based on provider connection status.
-  // - On project switch: invalidate cell-size cache; acquire if provider is connected.
-  // - On providerDisconnected: release the control session + reset its state.
-  // - On providerConnected (re-acquire after reconnect): acquire fresh.
-  // This is the renderer's FR4 implementation: disconnect tears down; reconnect
-  // rebuilds. The dependency on providerConnected/providerDisconnected ensures
-  // the terminal reacts to connection state, not just project switch.
+  // Acquire the control session for the active project once it's connected.
+  // Teardown on disconnect is owned by panelDataSync (session-scoped: it fires
+  // for ANY project's connected->disconnected/failed transition, not just the
+  // active one — see teardownControlSession in controlSession.ts and
+  // local_repo_explorer-j4p3). This effect only ever ACQUIRES; it must not
+  // duplicate that teardown, since a component-local effect keyed on
+  // `activeId` cannot observe a BACKGROUNDED project's disconnect (activeId
+  // only changes to a project after `projectsStore.activate()`'s reconnect has
+  // already fully succeeded).
   useEffect(() => {
-    if (!activeId) return;
-    if (providerDisconnected) {
-      // Provider disconnected: tear down the terminal control session.
-      // Dispose the persistent xterm pane instances for this project too. This
-      // is load-bearing: resetProject() drops the tmuxStore output sinks, but
-      // paneRegistry.acquire() only (re)binds a pane's sink when it CREATES the
-      // entry. Without disposing here, a reconnect re-acquires the cached entry,
-      // skips bindPaneSink, and the rebuilt session has no sink wired — live
-      // %output is dropped (terminal shows nothing) even though input still
-      // reaches tmux. Disposing forces acquire() to rebuild + rebind on reconnect.
-      paneRegistry.disposeProject(activeId);
-      releaseControlSession();
-      resetControlSession(activeId); // per-project: never clobber other live projects
-      useTmuxStore.getState().resetProject(activeId);
-      return;
-    }
-    if (!providerConnected) {
-      // Provider is connecting/reconnecting: do not acquire yet.
-      return;
-    }
-    // Provider is connected: acquire/re-acquire the control session.
+    if (!activeId || !providerConnected) return;
     // Invalidate cell-size cache on each project switch so pushClientSize
     // re-measures from the newly active project's panes.
     paneRegistry.invalidateCellSize();
@@ -114,7 +95,7 @@ export function ControlTerminalPanel(): JSX.Element {
     }
     acquireControlSession(activeId);
     return () => releaseControlSession();
-  }, [activeId, providerConnected, providerDisconnected]);
+  }, [activeId, providerConnected]);
 
   // Pause-mode (gated): when tmux flow control pauses the active/visible pane,
   // resume it so the foreground pane never stays stalled; background panes stay

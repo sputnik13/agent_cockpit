@@ -112,6 +112,13 @@ export class RemoteTmuxControlManager {
    *  ConnectionMachine status transition — a silent reattach never produces one.
    *  See CLAUDE.md "control-mode reconnect". */
   private epoch = 0;
+  /** tmux emits one unsolicited `%begin/%end` block on each attach (its own
+   *  output, not a reply to a client command); it must not consume a pending
+   *  slot or it permanently desyncs FIFO reply correlation for the channel's
+   *  life. Reset on every attach (first open AND each reattach) in attach(),
+   *  since a new attach means a new unsolicited initial block will arrive.
+   *  Mirrors LocalTmuxControlManager's sawInitialBlock. */
+  private sawInitialBlock = false;
   /** In-flight attach, cached so concurrent open() calls (and a pending reattach)
    *  share one channel instead of each racing through the pre-assignment await
    *  gap and opening a duplicate `tmux -CC` client. */
@@ -229,6 +236,7 @@ export class RemoteTmuxControlManager {
     this.openedAt = Date.now();
     this.lastExitReason = null;
     this.firstChunk = '';
+    this.sawInitialBlock = false;
     // Do NOT reset the backoff here: a channel that opens then immediately drops
     // would otherwise loop tight at the first delay forever. Reset only once the
     // channel proves stable (survives STABILITY_RESET_MS).
@@ -423,6 +431,13 @@ export class RemoteTmuxControlManager {
   private ingest(chunk: Uint8Array): void {
     for (const n of this.parser.feed(chunk)) {
       if (n.type === 'reply') {
+        // Skip tmux's initial unsolicited attach block so command replies stay
+        // FIFO-correlated with the commands the client actually sent (mirrors
+        // LocalTmuxControlManager.ingest()).
+        if (!this.sawInitialBlock) {
+          this.sawInitialBlock = true;
+          continue;
+        }
         const cmd = this.pending.shift();
         if (cmd) settleCommand(cmd, { num: n.num, error: n.error, lines: n.lines });
         continue;

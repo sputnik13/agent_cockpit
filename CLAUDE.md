@@ -262,7 +262,22 @@ keystrokes must still send as one `send-keys` call.
 transitions. It is the single source of `ConnectionStatus`, forwarded to the
 renderer via one `evt:status`. The status indicator, terminal control session,
 and Changes/Explorer/Workgraph panels are **pure derivations** of that status
-(`sessionStore` + `isConnected`/`isDisconnected` selectors).
+(`sessionStore` + `isConnected`/`isDisconnected` selectors) — **the derivation
+must be keyed on each project's OWN status, never on `activeId`.** A
+component-local effect that only reacts while its project happens to be
+`activeId` cannot observe a BACKGROUNDED project's own status transition, since
+`projectsStore.activate()` awaits the full reconnect before updating `activeId`
+— a background disconnect-then-reconnect collapses into a single atomic jump
+the effect never sees (local_repo_explorer-j4p3, fixed: `ControlTerminalPanel`
+used to tear down its control session this way). The renderer-side control-
+session teardown (`teardownControlSession` in `controlSession.ts`: dispose
+`controlPaneRegistry` entries, reset control-session lifecycle state, clear the
+project's `tmuxStore` slice) is now invoked by `panelDataSync` itself, from the
+SAME per-project status-diff subscription that clears Changes/Beads/Worktree —
+so it fires for any project's `connected → disconnected/failed` edge regardless
+of which project is active. `ControlTerminalPanel`'s own effect only ever
+ACQUIRES a session (gated on `activeId` — correct, since only the active
+project's panes are rendered); it must never re-add its own teardown branch.
 
 **Every live session stays fully active — there is NO warm/hot distinction.**
 `suspend()`/`resume()` (and `isSuspended()`/`LocalWatchManager.setPaused`) are
@@ -313,7 +328,10 @@ projects short-circuit to `connected` (already "ready").
   wires a manager's notifications for a *fresh* subscription. If teardown is
   asymmetric, a reconnect re-acquires a cached pane/manager with no sink/no
   forwarder — input reaches tmux but no live `%output` renders (blank terminal),
-  or the terminal never recovers at all.
+  or the terminal never recovers at all. On the renderer side this teardown
+  (`teardownControlSession`) is triggered by `panelDataSync`'s status-diff
+  subscription for THAT project, not by a component effect gated on `activeId`
+  — see above.
 - **Per-session watch teardown is symmetric.** The session-owned watch (one per
   live session, started on `connected`) MUST be torn down on the provider's
   **status → disconnected/failed** transition AND on `onEviction`. A plain
@@ -327,7 +345,12 @@ logged in the diagnostics window), reconnect → the terminal must re-acquire,
 re-focus, and show live output without an app restart; panels reload. With
 projects A and B both connected and A active, mutate B (commit / file write / `br`
 mutation) → switching to B shows B's current data with no spinner and no manual
-refresh; A→B→A never shows the other project's data at any frame.
+refresh; A→B→A never shows the other project's data at any frame. With A active
+and B backgrounded, let B disconnect (idle-timeout aging-out, or any other
+background disconnect) then reselect B → its control-mode terminal must acquire
+a fresh session with no stale cached panes/output (not a re-acquire of the
+pre-disconnect cached state) — covered by
+`src/renderer/workspace/panelDataSync.test.ts`.
 
 ## Control-mode reconnect is epoch-driven, NOT status-driven
 

@@ -1,0 +1,148 @@
+[
+  {
+    "id": "simple-match",
+    "description": "simple pattern: *.log ignores a matching file",
+    "patterns": ["*.log"],
+    "path": "debug.log",
+    "isDir": false,
+    "expected": true
+  },
+  {
+    "id": "simple-no-match",
+    "description": "simple pattern: *.log does not ignore a non-matching file (control)",
+    "patterns": ["*.log"],
+    "path": "keep.txt",
+    "isDir": false,
+    "expected": false
+  },
+  {
+    "id": "negation-reincludes",
+    "description": "negation: !important.log re-includes a path a broader pattern ignored",
+    "patterns": ["*.log", "!important.log"],
+    "path": "important.log",
+    "isDir": false,
+    "expected": false
+  },
+  {
+    "id": "negation-other-still-ignored",
+    "description": "negation: an unrelated path matching the broader pattern stays ignored (control)",
+    "patterns": ["*.log", "!important.log"],
+    "path": "other.log",
+    "isDir": false,
+    "expected": true
+  },
+  {
+    "id": "recursive-doublestar-root",
+    "description": "recursive **/build matches at the root",
+    "patterns": ["**/build"],
+    "path": "build",
+    "isDir": false,
+    "expected": true
+  },
+  {
+    "id": "recursive-doublestar-nested",
+    "description": "recursive **/build matches arbitrarily deep",
+    "patterns": ["**/build"],
+    "path": "src/nested/build",
+    "isDir": false,
+    "expected": true
+  },
+  {
+    "id": "recursive-doublestar-no-match",
+    "description": "recursive **/build does not match a differently-named path (control)",
+    "patterns": ["**/build"],
+    "path": "src/nested/other",
+    "isDir": false,
+    "expected": false
+  },
+  {
+    "id": "recursive-doublestar-mid-zero-dirs",
+    "description": "mid-pattern a/**/b matches with zero directories between a and b",
+    "patterns": ["a/**/b"],
+    "path": "a/b",
+    "isDir": true,
+    "expected": true
+  },
+  {
+    "id": "anchor-root-match",
+    "description": "leading-/ anchored pattern matches only at the repo root",
+    "patterns": ["/config.json"],
+    "path": "config.json",
+    "isDir": false,
+    "expected": true
+  },
+  {
+    "id": "anchor-nested-no-match",
+    "description": "leading-/ anchored pattern does not match the same basename nested deeper",
+    "patterns": ["/config.json"],
+    "path": "nested/config.json",
+    "isDir": false,
+    "expected": false
+  },
+  {
+    "id": "dir-only-matches-dir",
+    "description": "trailing-/ directory-only pattern matches a real directory",
+    "patterns": ["logs/"],
+    "path": "logs",
+    "isDir": true,
+    "expected": true
+  },
+  {
+    "id": "dir-only-does-not-match-file",
+    "description": "trailing-/ directory-only pattern does not match a file with the same name",
+    "patterns": ["logs/"],
+    "path": "logs",
+    "isDir": false,
+    "expected": false
+  },
+  {
+    "id": "dir-only-covers-contents",
+    "description": "trailing-/ directory-only pattern also ignores files inside the directory",
+    "patterns": ["logs/"],
+    "path": "logs/app.log",
+    "isDir": false,
+    "expected": true
+  },
+  {
+    "id": "charclass-match",
+    "description": "character-class pattern file[0-9].txt matches a digit",
+    "patterns": ["file[0-9].txt"],
+    "path": "file1.txt",
+    "isDir": false,
+    "expected": true
+  },
+  {
+    "id": "charclass-no-match",
+    "description": "character-class pattern file[0-9].txt does not match a letter (control)",
+    "patterns": ["file[0-9].txt"],
+    "path": "fileA.txt",
+    "isDir": false,
+    "expected": false
+  },
+  {
+    "id": "negation-inside-excluded-dir-KNOWN-DIVERGENCE",
+    "description": "git cannot re-include a file whose parent directory is already excluded, even with an explicit negation pattern for that exact file. Verified against real `git check-ignore` (git says IGNORED). The TS `ignore` package implements this rule correctly. The Go `github.com/sabhiram/go-gitignore` engine does NOT: it evaluates each pattern line as an independent regex against the full path with no hierarchical/ancestor-exclusion tracking, so the file-specific negation wrongly wins. See local_repo_explorer-wkxb for the discovery.",
+    "patterns": ["build/", "!build/keep.txt"],
+    "path": "build/keep.txt",
+    "isDir": false,
+    "expected": true,
+    "knownDivergence": {
+      "engine": "go",
+      "actual": false,
+      "reason": "go-gitignore has no concept of an already-excluded ancestor directory blocking a per-file negation; it matches each line independently against the full path."
+    }
+  },
+  {
+    "id": "midslash-implicit-anchor-KNOWN-DIVERGENCE",
+    "description": "a pattern containing a '/' anywhere but at the very end is implicitly anchored to the directory the .gitignore lives in, even without a leading '/' (git docs: a separator at the beginning or middle anchors the pattern). Verified against real `git check-ignore`: src/foo matches at the root but NOT at nested/src/foo. The TS `ignore` package implements this correctly. The Go `github.com/sabhiram/go-gitignore` engine does NOT: getPatternFromLine always prepends an unanchored '^(|.*/)' prefix unless the pattern has an EXPLICIT leading '/', so an internal-slash-only pattern wrongly matches at any depth. See local_repo_explorer-wkxb for the discovery.",
+    "patterns": ["src/foo"],
+    "path": "nested/src/foo",
+    "isDir": false,
+    "expected": false,
+    "knownDivergence": {
+      "engine": "go",
+      "actual": true,
+      "reason": "go-gitignore does not implicitly anchor a pattern that contains a non-trailing '/' without an explicit leading '/'; it always allows arbitrary leading path segments unless the pattern starts with '/'."
+    }
+  }
+]

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	gitignore "github.com/sabhiram/go-gitignore"
 )
 
 // eventCollector captures emitted events for assertions.
@@ -127,16 +129,18 @@ func TestShouldEmit(t *testing.T) {
 		"/home/u/proj/.beads/beads.db":      true,
 		"/home/u/proj/.beads/issues.jsonl":  true,
 		// Emitted: a linked worktree being added/removed (local_repo_explorer-rc9n).
-		// NOTE: shouldEmit's own signal matching is depth-UNBOUNDED (matchesSignal
-		// is a prefix match), same as .git/refs — the depth bound that keeps
-		// per-commit churn INSIDE an existing worktree's metadata dir (e.g.
-		// .git/worktrees/<name>/HEAD) from ever reaching shouldEmit at all is
-		// enforced upstream, by addWatchesWithSpec's SkipDir at ".git/worktrees"
-		// (see TestWatchExcludesWorktreeInternalChurn) — fsnotify never adds a
-		// watch that deep, so shouldEmit is never actually called with such a
-		// path in the real pipeline.
 		"/home/u/proj/.git/worktrees":         true,
 		"/home/u/proj/.git/worktrees/feature": true,
+		// Dropped: per-commit churn INSIDE an already-known worktree's own
+		// metadata dir (local_repo_explorer-wkxb). In production this path
+		// never reaches shouldEmit at all -- addWatchesWithSpec's SkipDir at
+		// ".git/worktrees" (see TestWatchExcludesWorktreeInternalChurn) means
+		// fsnotify never watches that deep -- but matchesSignal's own
+		// gitWorktreesMaxSegments guard now rejects it directly too, so
+		// shouldEmit is independently correct even if that walk-level SkipDir
+		// is ever removed for an unrelated reason.
+		"/home/u/proj/.git/worktrees/feature/HEAD":      false,
+		"/home/u/proj/.git/worktrees/feature/logs/HEAD": false,
 	}
 	for p, want := range cases {
 		if got := w.shouldEmit(p); got != want {
@@ -393,6 +397,93 @@ func TestIsGitignored(t *testing.T) {
 		if got := isGitignored(gi, dir, tc.abs); got != tc.want {
 			t.Errorf("isGitignored(%q)=%v want %v", tc.abs, got, tc.want)
 		}
+	}
+}
+
+// gitignoreParityCase mirrors one entry of the shared TS/Go gitignore-matching
+// parity fixture, testdata/gitignore-parity.json (local_repo_explorer-wkxb).
+// `Expected` is the correct-per-git-semantics result, verified against real
+// `git check-ignore` -- see the fixture's own per-case Description.
+// `KnownDivergence`, when present, documents a real, already-discovered
+// mismatch between this Go `go-gitignore` engine and the TS `ignore` engine
+// for that exact case; see TestGitignoreParityFixture for how it is handled.
+type gitignoreParityCase struct {
+	ID              string   `json:"id"`
+	Description     string   `json:"description"`
+	Patterns        []string `json:"patterns"`
+	Path            string   `json:"path"`
+	IsDir           bool     `json:"isDir"`
+	Expected        bool     `json:"expected"`
+	KnownDivergence *struct {
+		Engine string `json:"engine"`
+		Actual bool   `json:"actual"`
+		Reason string `json:"reason"`
+	} `json:"knownDivergence,omitempty"`
+}
+
+// TestGitignoreParityFixture runs the fixture SHARED with
+// electron/main/git/gitignoreFilter.test.ts through this Go engine
+// (github.com/sabhiram/go-gitignore, via CompileIgnoreLines -- the same
+// engine loadGitignore/isGitignored use in production) so a future
+// edge-case divergence between the TS `ignore` package and this one is
+// caught here instead of discovered silently in the field
+// (local_repo_explorer-wkxb).
+//
+// Two cases are pinned KNOWN DIVERGENCES, confirmed against real
+// `git check-ignore` during the audit that added this fixture:
+//   - go-gitignore has no concept of an already-excluded ancestor directory
+//     blocking a per-file negation (git: a file cannot be re-included if a
+//     parent directory is excluded); it matches each pattern line
+//     independently against the full path.
+//   - go-gitignore does not implicitly anchor a pattern containing a
+//     non-trailing "/" without an EXPLICIT leading "/"; git anchors such a
+//     pattern to the .gitignore's own directory, but go-gitignore's
+//     getPatternFromLine always allows arbitrary leading path segments
+//     unless the pattern starts with "/".
+//
+// These are pre-existing library limitations, not something this package
+// introduces or fixes (out of scope: rewriting the gitignore engine). The
+// pin asserts the CURRENT actual behavior so this test stays green today
+// while remaining a trip-wire: if a future go-gitignore upgrade changes
+// either result, this test fails and points back at this comment + the
+// fixture's own `knownDivergence` field for re-evaluation.
+func TestGitignoreParityFixture(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "gitignore-parity.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var cases []gitignoreParityCase
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if len(cases) == 0 {
+		t.Fatal("fixture is empty")
+	}
+
+	for _, c := range cases {
+		t.Run(c.ID, func(t *testing.T) {
+			gi := gitignore.CompileIgnoreLines(c.Patterns...)
+			q := c.Path
+			if c.IsDir {
+				q += "/"
+			}
+			got := gi.MatchesPath(q)
+
+			if c.KnownDivergence != nil && c.KnownDivergence.Engine == "go" {
+				if got != c.KnownDivergence.Actual {
+					t.Errorf(
+						"%s: known-divergence pin changed -- go-gitignore now returns %v for %q (pinned %v); re-verify against `git check-ignore` and update testdata/gitignore-parity.json + local_repo_explorer-wkxb",
+						c.ID, got, q, c.KnownDivergence.Actual,
+					)
+				}
+				t.Logf("KNOWN DIVERGENCE %s: go-gitignore=%v git/TS-correct=%v -- %s", c.ID, got, c.Expected, c.KnownDivergence.Reason)
+				return
+			}
+
+			if got != c.Expected {
+				t.Errorf("%s: MatchesPath(%q) = %v, want %v (patterns=%v) -- %s", c.ID, q, got, c.Expected, c.Patterns, c.Description)
+			}
+		})
 	}
 }
 

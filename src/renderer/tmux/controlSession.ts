@@ -964,3 +964,22 @@ export function resetControlSession(projectId?: string): void {
   ready.clear();
   pendingWindowRefresh.clear();
 }
+
+/**
+ * Full per-project control-session teardown to a clean slate: dispose the
+ * project's persistent xterm pane instances, then reset control-session
+ * lifecycle state and its tmux view. The one shared implementation for every
+ * caller that needs this — `panelDataSync` (on that project's connection
+ * status going disconnected/failed, regardless of which project is active)
+ * and `switchTerminalRenderer` (a renderer backend switch on the active
+ * project). Disposing panes before resetting is load-bearing: `paneRegistry.
+ * acquire()` only (re)binds a pane's output sink when it CREATES the entry,
+ * so a later re-acquire of a cached, un-disposed entry would skip that
+ * binding and the rebuilt session would show no live output.
+ */
+export function teardownControlSession(projectId: string): void {
+  paneRegistry.disposeProject(projectId);
+  releaseControlSession();
+  resetControlSession(projectId);
+  useTmuxStore.getState().resetProject(projectId);
+}

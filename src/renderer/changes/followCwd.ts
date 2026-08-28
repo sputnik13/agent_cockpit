@@ -101,7 +101,7 @@ export function useFollowTerminalCwd(): void {
 
       void useTmuxStore
         .getState()
-        .command(`display-message -p -t ${paneId} '#{pane_current_path}'`)
+        .command(`display-message -p -t ${paneId} '#{pane_current_path}'`, pid)
         .then((r) => {
           const cwd = r.lines[0]?.trim() ?? '';
           if (!cwd) return;

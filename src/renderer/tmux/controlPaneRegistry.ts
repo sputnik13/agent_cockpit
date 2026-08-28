@@ -116,7 +116,7 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
     mouseFlagInFlight = true;
     void useTmuxStore
       .getState()
-      .command(`display-message -p -t ${paneId} '#{mouse_any_flag} #{mouse_sgr_flag}'`)
+      .command(`display-message -p -t ${paneId} '#{mouse_any_flag} #{mouse_sgr_flag}'`, projectId)
       .then((r) => {
         const [any, sgr] = (r.lines[0]?.trim() ?? '').split(/\s+/);
         paneHasMouse = any === '1';
@@ -168,7 +168,7 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
   // pane there is nothing to backfill anyway. Gating on whenReady() also avoids
   // hitting a not-yet-open session after a dev main restart.
   void whenReady(projectId)
-    .then(() => agentCockpit.tmuxControl.capturePane(paneId, TERMINAL_SCROLLBACK))
+    .then(() => agentCockpit.tmuxControl.capturePane(paneId, TERMINAL_SCROLLBACK, projectId))
     .then((lines) => {
       if (disposed || sinkWroteAny || lines.length === 0) return;
       // Skip when the captured pane is all blank — that's a freshly-created
@@ -196,9 +196,9 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
     void whenReady(projectId)
       .then(() => {
         if (disposed) return;
-        void useTmuxStore.getState().command(mouseSubscribeCmd(paneId)).catch(() => {});
+        void useTmuxStore.getState().command(mouseSubscribeCmd(paneId), projectId).catch(() => {});
         const winId = useTmuxStore.getState().byProject[projectId]?.panes[paneId]?.windowId;
-        if (winId) void useTmuxStore.getState().command(titleSubscribeCmd(winId)).catch(() => {});
+        if (winId) void useTmuxStore.getState().command(titleSubscribeCmd(winId), projectId).catch(() => {});
       })
       .catch(() => {});
   }
@@ -217,7 +217,7 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
       // Drop this pane's mouse subscription (title sub is per-window; left for
       // window-close to reap — a stale sub for a gone pane just stops pushing).
       if (s.tmuxFormatSubscriptions) {
-        void useTmuxStore.getState().command(mouseUnsubscribeCmd(paneId)).catch(() => {});
+        void useTmuxStore.getState().command(mouseUnsubscribeCmd(paneId), projectId).catch(() => {});
       }
       // The renderer disposes its terminal (incl. any GPU renderer) and removes
       // its container.
@@ -489,7 +489,11 @@ const CLEAR_BEFORE_SEED = new Uint8Array([
  * This is the deep-desync path that otherwise needs a full renderer reload.
  */
 export async function reseedPane(entry: PaneEntry): Promise<void> {
-  const lines = await agentCockpit.tmuxControl.capturePane(entry.paneId, TERMINAL_SCROLLBACK);
+  const lines = await agentCockpit.tmuxControl.capturePane(
+    entry.paneId,
+    TERMINAL_SCROLLBACK,
+    entry.projectId,
+  );
   entry.renderer.write(CLEAR_BEFORE_SEED);
   if (lines.length > 0 && lines.some((line) => line.trim().length > 0)) {
     entry.renderer.write(seedBytesFromCapture(lines));
@@ -554,7 +558,7 @@ export async function hardRecoverTab(projectId: string, windowId: string | null)
 
     let altById = new Map<string, boolean>();
     try {
-      const reply = await useTmuxStore.getState().command(listPanesAltScreen(windowId));
+      const reply = await useTmuxStore.getState().command(listPanesAltScreen(windowId), projectId);
       if (!reply.error) altById = parseAltScreenReply(reply.lines);
     } catch {
       /* query failed; every pane falls back to the safe repaint below */

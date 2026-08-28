@@ -82,6 +82,15 @@ export interface TmuxViewState {
    */
   openError: string | null;
   sessionName: string | null;
+  /**
+   * This project's own tmux session id (`$N`), learned from `%session-changed`
+   * at attach. `null` until then. Used to reject notifications that name a
+   * DIFFERENT session's id (`%session-window-changed`) — see the reduce()
+   * case below and CLAUDE.md "tmux control-mode notifications are broadcast
+   * to every client on the server, not just the session they concern"
+   * (local_repo_explorer-0255).
+   */
+  sessionId: string | null;
   /** Ordered window ids (tab order = arrival order). */
   windowOrder: string[];
   windows: Record<string, WindowState>;
@@ -97,6 +106,7 @@ export function emptyView(): TmuxViewState {
     isOpen: false,
     openError: null,
     sessionName: null,
+    sessionId: null,
     windowOrder: [],
     windows: {},
     panes: {},
@@ -119,8 +129,18 @@ export function collectPaneIds(node: LayoutNode | null): string[] {
  */
 export function reduce(state: TmuxViewState, n: TmuxNotification): TmuxViewState {
   switch (n.type) {
-    case 'window-add':
     case 'unlinked-window-add': {
+      // tmux control mode broadcasts to EVERY client on the shared server, not
+      // just the one attached to the concerned session — %unlinked-window-add
+      // means "a window exists that is NOT linked to any session this client
+      // is attached to" (i.e. it belongs to a DIFFERENT project's session on
+      // the same tmux server). Folding it in as if it were our own %window-add
+      // (the pre-fix behavior) added another project's real window into this
+      // project's tab strip on every window create/select in that OTHER
+      // project (local_repo_explorer-0255) — always a no-op, never adopted.
+      return state;
+    }
+    case 'window-add': {
       if (state.windows[n.windowId]) return state; // idempotent
       return {
         ...state,
@@ -190,6 +210,19 @@ export function reduce(state: TmuxViewState, n: TmuxNotification): TmuxViewState
       // (split-window, select-pane, mouse click into pane). For pure
       // window switches (new-window, select-window) tmux emits
       // %session-window-changed instead — see that case below.
+      //
+      // LIVE-PROBE-CONFIRMED (local_repo_explorer-0255): this notification is
+      // broadcast to EVERY control client on the shared tmux server, not just
+      // the one attached to the session the window/pane actually belongs to —
+      // and unlike %session-window-changed, its wire payload carries no
+      // session id to filter on at all. A `select-pane`/split/click in a
+      // DIFFERENT project's window (on the same local server, or the same
+      // remote host) reaches this project's channel too. Window/pane ids are
+      // unique per tmux SERVER (never reused across sessions while both are
+      // open — verified live), so requiring the windowId to already be a
+      // window WE track is a complete, not-just-best-effort guard: a foreign
+      // window can never coincidentally collide with one of ours.
+      if (!state.windows[n.windowId]) return state;
       return { ...state, activeWindowId: n.windowId, activePaneId: n.paneId };
     }
     case 'session-window-changed': {
@@ -200,10 +233,23 @@ export function reduce(state: TmuxViewState, n: TmuxNotification): TmuxViewState
       // cleared so the renderer's layout effect picks the first pane of
       // the new window (which may not have its layout yet at this
       // moment — that's why we don't try to derive the pane here).
+      //
+      // LIVE-PROBE-CONFIRMED (local_repo_explorer-0255): broadcast to EVERY
+      // control client on the shared tmux server — a `new-window`/
+      // `select-window`/`kill-window` in a DIFFERENT project's session fires
+      // this on OUR channel too, with THAT session's id, not ours. Unlike
+      // %window-pane-changed this payload DOES carry the session id, so
+      // reject it outright when we know our own session id and it doesn't
+      // match — this is what actually corrupted activeWindowId/activePaneId
+      // on every window create/switch in an unrelated project. `state.
+      // sessionId == null` (not yet learned from our own %session-changed,
+      // which always arrives first on attach) falls through to apply
+      // optimistically rather than risk dropping a legitimate early event.
+      if (state.sessionId != null && n.sessionId !== state.sessionId) return state;
       return { ...state, activeWindowId: n.windowId, activePaneId: null };
     }
     case 'session-changed': {
-      return { ...state, sessionName: n.name };
+      return { ...state, sessionName: n.name, sessionId: n.sessionId };
     }
     case 'exit': {
       return { ...emptyView() };
@@ -284,18 +330,31 @@ export interface TmuxStore {
    */
   setOpenError: (projectId: string, error: string | null) => void;
 
-  // Actions (IPC behind them). Commands/input/resize target the active provider
-  // on the main side, which always matches the active project.
+  // Actions (IPC behind them). Every one of these accepts an optional
+  // trailing `projectId` that EXPLICITLY addresses a specific live session on
+  // main, instead of implicitly targeting whichever project main considers
+  // active right now (local_repo_explorer-0255). Required for any call tied
+  // to one particular project — including CapturePane/Input/Resize, which
+  // paint captured bytes/keystrokes/geometry into a specific pane or client
+  // and can otherwise cross-wire content between DIFFERENT tmux servers
+  // (pane ids are only unique per-server). Omit only when "whatever's active
+  // right now" is the genuinely intended target (a direct user keystroke/
+  // click while looking at the active project).
   open: (projectId: string, opts?: { cols?: number; rows?: number }) => Promise<void>;
-  close: (kill?: boolean) => Promise<void>;
-  command: (args: string) => Promise<{ num: number; error: boolean; lines: string[] }>;
-  /** Send literal input bytes to a pane (encoded to hex pairs). */
+  close: (kill?: boolean, projectId?: string) => Promise<void>;
+  command: (
+    args: string,
+    projectId?: string,
+  ) => Promise<{ num: number; error: boolean; lines: string[]; projectId?: string }>;
+  /** Send literal input bytes to a pane (encoded to hex pairs). `projectId` is
+   *  the pane's OWN project — required so keystrokes can't cross-wire into a
+   *  different project's real pane across different tmux servers. */
   sendInput: (projectId: string, paneId: string, data: string | Uint8Array) => Promise<void>;
   /** Resume a pause-mode-paused pane: send `refresh-client -A %p:continue` and
    *  optimistically clear the paused flag (tmux also emits `%continue`). No-op if
    *  the pane is not paused. Gated feature; only fires when pause-mode is on. */
   resumePane: (projectId: string, paneId: string) => void;
-  resize: (cols: number, rows: number) => Promise<void>;
+  resize: (cols: number, rows: number, projectId?: string) => Promise<void>;
   /** Drop a single project's slice + its sinks. */
   resetProject: (projectId: string) => void;
   /** Clear every project (backend switch / teardown). */
@@ -399,7 +458,7 @@ export const useTmuxStore = create<TmuxStore>((set, get) => {
           },
         };
       });
-      const sessionName = await agentCockpit.tmuxControl.open(opts);
+      const sessionName = await agentCockpit.tmuxControl.open(opts, projectId);
       set((st) => {
         const prev = st.byProject[projectId] ?? emptyView();
         return {
@@ -410,21 +469,24 @@ export const useTmuxStore = create<TmuxStore>((set, get) => {
         };
       });
     },
-    close: async (kill) => {
-      await agentCockpit.tmuxControl.close(kill);
+    close: async (kill, projectId) => {
+      await agentCockpit.tmuxControl.close(kill, projectId);
     },
-    command: (args) => agentCockpit.tmuxControl.command(args),
-    sendInput: async (_projectId, paneId, data) => {
+    command: (args, projectId) => agentCockpit.tmuxControl.command(args, projectId),
+    sendInput: async (projectId, paneId, data) => {
       // The main-process manager `input()` does the encoding-aware chunking
       // (printable ASCII via send-keys -l, the rest via -H; split so a large
       // paste can't exceed tmux's control-command line limit). The renderer just
-      // hands over the raw bytes as hex.
-      await agentCockpit.tmuxControl.input(paneId, toHex(data));
+      // hands over the raw bytes as hex. `projectId` explicitly addresses the
+      // pane's own project (local_repo_explorer-0255) — previously discarded,
+      // which let keystrokes cross-wire into another project's real pane
+      // across different tmux servers.
+      await agentCockpit.tmuxControl.input(paneId, toHex(data), projectId);
     },
     resumePane: (projectId, paneId) => {
       const view = get().byProject[projectId];
       if (!view?.panes[paneId]?.paused) return;
-      void agentCockpit.tmuxControl.command(refreshClientContinue(paneId)).catch(() => {});
+      void agentCockpit.tmuxControl.command(refreshClientContinue(paneId), projectId).catch(() => {});
       set((st) => {
         const slice = st.byProject[projectId];
         const p = slice?.panes[paneId];
@@ -437,8 +499,8 @@ export const useTmuxStore = create<TmuxStore>((set, get) => {
         };
       });
     },
-    resize: async (cols, rows) => {
-      await agentCockpit.tmuxControl.resize(cols, rows);
+    resize: async (cols, rows, projectId) => {
+      await agentCockpit.tmuxControl.resize(cols, rows, projectId);
     },
     resetProject: (projectId) => {
       for (const k of [...sinks.keys()]) if (k.startsWith(`${projectId}${SEP}`)) sinks.delete(k);

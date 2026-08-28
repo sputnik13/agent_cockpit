@@ -134,7 +134,7 @@ describe('controlPaneRegistry.reseedPane (destructive — normal-screen only)', 
 
     await reseedPane(entry);
 
-    expect(h.capturePane).toHaveBeenCalledWith('%0', expect.any(Number));
+    expect(h.capturePane).toHaveBeenCalledWith('%0', expect.any(Number), entry.projectId);
     expect(writeSpy).toHaveBeenCalledTimes(2);
     expect(decode(writeSpy.mock.calls[0]![0] as Uint8Array)).toBe('\x1b[3J\x1b[2J\x1b[H');
     expect(decode(writeSpy.mock.calls[1]![0] as Uint8Array)).toBe('line one\r\nline two\r\n');
@@ -317,5 +317,71 @@ describe('recoverTab / hardRecoverTab (multi-pane iteration — local_repo_explo
     h.capturePane.mockResolvedValue(['line two']);
     await hardRecoverTab(PROJ, WIN);
     expect(h.capturePane).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Regression coverage for local_repo_explorer-0255's second, deeper gap: the
+// command-routing fix (explicit projectId on tmuxControl.command) left
+// capturePane entirely unaddressed. capturePane is the channel that paints a
+// pane's ACTUAL VISIBLE CONTENT (acquire()'s ambient backfill, hardRecoverTab's
+// re-seed) — an ambient resolution here doesn't just misfire a command, it
+// writes another project's real terminal bytes into this pane, invisibly (a
+// misrouted `-t %N` succeeds against a DIFFERENT tmux server's identically-
+// numbered pane rather than erroring). These tests assert the explicit
+// projectId is actually threaded through, not just that the call happens.
+describe('explicit projectId addressing (local_repo_explorer-0255)', () => {
+  const PROJ = 'p-addr';
+  const WIN = '@0';
+
+  beforeEach(() => {
+    useTmuxStore.getState().reset();
+    h.command.mockReset();
+    h.command.mockResolvedValue({ num: 1, error: false, lines: [] });
+    h.capturePane.mockReset();
+    h.capturePane.mockResolvedValue([]);
+  });
+  afterEach(() => {
+    disposeAll();
+    stopReaper();
+  });
+
+  it("acquire()'s ambient capture-pane backfill addresses the pane's own projectId", async () => {
+    acquire(PROJ, '%0');
+    await vi.waitFor(() => expect(h.capturePane).toHaveBeenCalledTimes(1));
+    expect(h.capturePane).toHaveBeenCalledWith('%0', expect.any(Number), PROJ);
+  });
+
+  it("hardRecoverTab's list-panes query addresses its own projectId", async () => {
+    useTmuxStore.setState((st) => ({
+      byProject: {
+        ...st.byProject,
+        [PROJ]: {
+          ...emptyView(),
+          windows: {
+            [WIN]: {
+              windowId: WIN,
+              name: WIN,
+              isZoomed: false,
+              layout: { type: 'leaf', paneId: '%0', w: 80, h: 24, x: 0, y: 0 },
+              visibleLayout: { type: 'leaf', paneId: '%0', w: 80, h: 24, x: 0, y: 0 },
+            },
+          },
+        },
+      },
+    }));
+    acquire(PROJ, '%0');
+    await vi.waitFor(() => expect(h.capturePane).toHaveBeenCalledTimes(1));
+    h.capturePane.mockReset();
+    h.capturePane.mockResolvedValue(['a line']);
+    // %0 on the normal screen -> hardRecoverTab re-seeds it (calls capturePane).
+    h.command.mockImplementation(async (args: string) =>
+      args.startsWith('list-panes') ? { num: 1, error: false, lines: ['%0 0'] } : { num: 1, error: false, lines: [] },
+    );
+
+    await hardRecoverTab(PROJ, WIN);
+
+    const listPanesCall = h.command.mock.calls.find((c) => (c[0] as string).startsWith('list-panes'));
+    expect(listPanesCall?.[1]).toBe(PROJ);
+    expect(h.capturePane).toHaveBeenCalledWith('%0', expect.any(Number), PROJ);
   });
 });

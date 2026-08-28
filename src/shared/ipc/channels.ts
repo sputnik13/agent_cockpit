@@ -296,11 +296,29 @@ export interface TmuxEvent {
   projectId: string;
   notification: TmuxWireNotification;
 }
-/** Result of a reply-correlated tmux control command. */
+/** Result of a reply-correlated tmux control command.
+ *
+ * `projectId` (optional, additive) echoes back which project's control
+ * session main actually ran this command against — i.e. the request's own
+ * explicit `projectId` when the caller supplied one (see the
+ * `tmuxControlCommand` request type's doc comment), or, when omitted,
+ * whichever project was active on main at execution time. This field is a
+ * diagnostic/defense-in-depth convenience, NOT the fix for
+ * local_repo_explorer-0255: detecting a wrong-project reply after the command
+ * already ran cannot undo a destructive command (`kill-window`) that already
+ * executed against the wrong tmux session. The actual fix is that a caller
+ * running a multi-step sequence for a specific project
+ * (`ensureWindows`/`syncFromTmux`/`restoreActiveWindow` in controlSession.ts)
+ * passes that project's id explicitly on every command in the request, so
+ * main resolves and executes it against THAT session regardless of what's
+ * ambiently active by the time it runs — the command can never reach the
+ * wrong session in the first place. Optional so existing test mocks/consumers
+ * that construct a bare `{num, error, lines}` stay valid. */
 export interface TmuxCommandReply {
   num: number;
   error: boolean;
   lines: string[];
+  projectId?: string;
 }
 export interface StatusEvent {
   projectId: string;
@@ -432,19 +450,58 @@ export interface IpcContract {
   [Channels.terminalList]: { request: void; response: { keys: string[] } };
 
   // tmux control-mode (-CC): additive channels for the active project's control session.
+  // `projectId` (optional, additive) EXPLICITLY addresses this open at a
+  // specific project's control session — see tmuxControlCommand's doc below
+  // (local_repo_explorer-0255). This fires on EVERY acquireControlSession
+  // (every project switch, not just first-visit), so it needs the same
+  // explicit addressing as command: without it, a project switch racing
+  // main's own activeId update can open/attach the WRONG project's control
+  // manager under the guise of "opening" the intended one.
   [Channels.tmuxControlOpen]: {
-    request: { cols?: number; rows?: number };
+    request: { cols?: number; rows?: number; projectId?: string };
     response: { sessionName: string };
   };
-  [Channels.tmuxControlClose]: { request: { kill?: boolean }; response: { ok: true } };
-  [Channels.tmuxControlCommand]: { request: { args: string }; response: { reply: TmuxCommandReply } };
+  // `projectId` (optional, additive) EXPLICITLY addresses this at a specific
+  // project's control session instead of implicitly "whichever project is
+  // active on main right now" — main resolves it via sessionManager.get(
+  // projectId) (any LIVE session, active or backgrounded), erroring if that
+  // session no longer exists, rather than silently falling through to the
+  // active provider. Applies to EVERY tmuxControl* channel below, not just
+  // Command: a project-scoped caller (controlSession.ts's ensureWindows/
+  // syncFromTmux/restoreActiveWindow/acquireControlSession, and
+  // controlPaneRegistry.ts's acquire/reseedPane/hardRecoverTab, which paint
+  // captured pane BYTES into a specific pane's terminal) MUST pass its own
+  // projectId on every one of these calls it issues — without it, a project
+  // switch mid-sequence silently redirects the call to whatever project IS
+  // active, which for Command can misroute a mutation (kill-window/
+  // rename-window) into the wrong tmux session, and for CapturePane/Input/
+  // Resize can write ANOTHER project's real pane content/keystrokes/geometry
+  // into this project's own pane or client (local_repo_explorer-0255) — a
+  // content-correctness bug that is NOT caught by the same command it fixed
+  // for Command, since these are separate IPC channels with independent
+  // ambient resolution. This is especially visible across DIFFERENT tmux
+  // servers (local+remote, or two different remote hosts): each server
+  // numbers panes/windows independently (`%0`, `%1`, …), so a misrouted
+  // `-t %N` targeted call doesn't fail — it silently succeeds against the
+  // WRONG server's identically-numbered pane. Omitted, this preserves the
+  // original "active project" behavior for callers that genuinely mean
+  // "whatever's on screen right now" (e.g. a user-driven keystroke/click
+  // while looking at the active project).
+  [Channels.tmuxControlClose]: { request: { kill?: boolean; projectId?: string }; response: { ok: true } };
+  [Channels.tmuxControlCommand]: {
+    request: { args: string; projectId?: string };
+    response: { reply: TmuxCommandReply };
+  };
   [Channels.tmuxControlInput]: {
-    request: { paneId: string; hex: string };
+    request: { paneId: string; hex: string; projectId?: string };
     response: { ok: true };
   };
-  [Channels.tmuxControlResize]: { request: { cols: number; rows: number }; response: { ok: true } };
+  [Channels.tmuxControlResize]: {
+    request: { cols: number; rows: number; projectId?: string };
+    response: { ok: true };
+  };
   [Channels.tmuxControlCapturePane]: {
-    request: { paneId: string; startLine?: number };
+    request: { paneId: string; startLine?: number; projectId?: string };
     response: { lines: string[] };
   };
   [Channels.evtTmux]: { request: void; response: TmuxEvent };

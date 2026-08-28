@@ -157,9 +157,35 @@ export function reconcile(
 
 const store = () => useTmuxStore.getState();
 
-/** `list-windows` rows split on the first space (id + the rest of the format). */
-async function listWindows(format: string): Promise<{ id: string; rest: string }[]> {
-  const reply = await store().command(`list-windows -F "${format}"`);
+/**
+ * Cheap early-bail check: true when `projectId` still matches the RENDERER's
+ * own belief of which project is active. This is a fast pre-check only — it
+ * cannot see main's independently-tracked `SessionManager.activeId`, so a
+ * cross-process desync between the two is invisible to it. The AUTHORITATIVE
+ * fix is explicit addressing: every command in a project-scoped async
+ * sequence (`ensureWindows`, `syncFromTmux`, `restoreActiveWindow`) now passes
+ * its own `projectId` through to `store().command(args, projectId)`, so main
+ * resolves and executes it against THAT specific live session
+ * (`providerFor(projectId)`) regardless of whichever project is ambiently
+ * active by the time the command actually runs. Without explicit addressing,
+ * a project switch that lands while one of these sequences is still in
+ * flight could silently redirect its LATER commands to the NEW active
+ * project's tmux session while the results were still written into the
+ * ORIGINAL project's store slice (or, for the reconcile mutations, issued as
+ * kill/rename/create commands against the wrong session entirely) — a
+ * cross-project data-corruption bug, not just a stale read
+ * (local_repo_explorer-0255). This helper stays as a cheap, redundant-but-
+ * harmless skip for the common case; it is not what prevents the bug anymore.
+ */
+function isActiveProject(projectId: string): boolean {
+  return store().activeProjectId === projectId;
+}
+
+/** `list-windows` rows split on the first space (id + the rest of the format).
+ *  `projectId` explicitly addresses the command at that project's live
+ *  session (local_repo_explorer-0255) — see {@link isActiveProject}'s doc. */
+async function listWindows(format: string, projectId: string): Promise<{ id: string; rest: string }[]> {
+  const reply = await store().command(`list-windows -F "${format}"`, projectId);
   return reply.lines
     .map((l) => {
       const sp = l.indexOf(' ');
@@ -171,11 +197,15 @@ async function listWindows(format: string): Promise<{ id: string; rest: string }
 /** Create a hidden, fixed-name window (automatic-rename off so the name — used
  *  for filtering — never drifts to the running command). Exported so the Run
  *  panel can create `run-1` on demand when opened while the setting is off and
- *  no `run-1` exists yet (reconcile then keeps that single survivor). */
-export async function createReservedWindow(name: string): Promise<void> {
-  const reply = await store().command(`new-window -dP -n ${name} -F "#{window_id}"`);
+ *  no `run-1` exists yet (reconcile then keeps that single survivor).
+ *  `projectId` is omitted for direct user-triggered creation (targets
+ *  whichever project is active now, the correct semantic there) and passed
+ *  explicitly when called from a project-scoped sequence like
+ *  {@link ensureWindows} (local_repo_explorer-0255). */
+export async function createReservedWindow(name: string, projectId?: string): Promise<void> {
+  const reply = await store().command(`new-window -dP -n ${name} -F "#{window_id}"`, projectId);
   const id = reply.lines[0]?.trim();
-  if (id) await store().command(`set-window-option -t ${id} automatic-rename off`);
+  if (id) await store().command(`set-window-option -t ${id} automatic-rename off`, projectId);
 }
 
 /**
@@ -191,12 +221,15 @@ export async function createReservedWindow(name: string): Promise<void> {
  *
  * The single creation seam for real terminal tabs — used by `ensureWindows`
  * (first tab) and every renderer new-window affordance (+, ⌘T, last-tab respawn)
- * so the naming rule lives in exactly one place.
+ * so the naming rule lives in exactly one place. `projectId` is omitted by the
+ * direct user affordances (targets whichever project is active now, the
+ * correct semantic there) and passed explicitly by {@link ensureWindows}
+ * (local_repo_explorer-0255).
  */
-export async function createTerminalWindow(): Promise<string | null> {
-  const reply = await store().command('new-window -P -F "#{window_id}"');
+export async function createTerminalWindow(projectId?: string): Promise<string | null> {
+  const reply = await store().command('new-window -P -F "#{window_id}"', projectId);
   const id = reply.lines[0]?.trim() ?? null;
-  if (id) await store().command(`rename-window -t ${id} '#{b:pane_current_path}'`);
+  if (id) await store().command(`rename-window -t ${id} '#{b:pane_current_path}'`, projectId);
   return id;
 }
 
@@ -212,7 +245,12 @@ export async function syncFromTmux(projectId: string): Promise<boolean> {
   try {
     const apply = (wire: Parameters<ReturnType<typeof store>['applyNotification']>[1]): void =>
       store().applyNotification(projectId, wire);
-    const nameRows = await listWindows('#{window_id} #{window_name}');
+    const nameRows = await listWindows('#{window_id} #{window_name}', projectId);
+    // listWindows() now explicitly addresses projectId's own session
+    // (local_repo_explorer-0255), so this reply can never belong to a
+    // different project. The cheap pre-check stays as a fast bail for the
+    // common "already moved on" case.
+    if (!isActiveProject(projectId)) return false;
     // A live tmux session ALWAYS has >=1 window, so an empty read is an
     // attach-race / not-ready signal (the -CC channel just attached but the
     // session isn't queryable yet), never a real state. Report it as "not
@@ -235,7 +273,9 @@ export async function syncFromTmux(projectId: string): Promise<boolean> {
       apply({ type: 'window-add', windowId: w.id });
       apply({ type: 'window-renamed', windowId: w.id, name: w.rest });
     }
-    for (const w of await listWindows('#{window_id} #{window_layout}')) {
+    const layoutRows = await listWindows('#{window_id} #{window_layout}', projectId);
+    if (!isActiveProject(projectId)) return false;
+    for (const w of layoutRows) {
       const wl = tryParseLayout(w.rest);
       if (wl) apply({ type: 'layout-change', windowId: w.id, layout: wl, visibleLayout: wl, flags: null });
     }
@@ -248,10 +288,22 @@ export async function syncFromTmux(projectId: string): Promise<boolean> {
 /**
  * Adopt tmux's active window for `projectId` on re-init so a reconnect focuses
  * the window the user was last working in, not the first tab. tmux preserves the
- * session's current window across a detach; `display-message -p '#{window_id}'`
- * returns it for the attached `-CC` client. Applied as a synthetic
- * `session-window-changed` (the same reducer path a real window switch uses), so
- * the panel selects it and its existing focus effect restores keyboard focus.
+ * session's current window across a detach; `display-message -p '#{session_id}
+ * #{window_id}'` returns both for the attached `-CC` client. Applied as
+ * synthetic `session-changed` + `session-window-changed` notifications (the
+ * same reducer paths a real attach/window-switch use), so the panel selects
+ * the window and its existing focus effect restores keyboard focus.
+ *
+ * The `session-changed` half also (re-)learns `state.sessionId`
+ * (local_repo_explorer-0255) for re-init paths that run WITHOUT a fresh `-CC`
+ * attach — e.g. `switchTerminalRenderer`'s `teardownControlSession` clears the
+ * slice (including `sessionId`) and forces a re-init via `resetControlSession`,
+ * but main's control manager stays open the whole time, so no real
+ * `%session-changed` ever replays. Without re-deriving it here, the
+ * cross-session `session-window-changed` guard would stay disarmed for that
+ * project until its next genuine reattach — a live relapse window for the
+ * exact symptom this bead exists to fix. A silent reattach where the session
+ * id hasn't changed is a no-op for the reducer's existing idempotent handling.
  *
  * Only called from the re-init path — NOT from the general {@link syncFromTmux}
  * that `afterStructural` runs, so it never fights live `%window-pane-changed`
@@ -261,8 +313,20 @@ export async function syncFromTmux(projectId: string): Promise<boolean> {
  */
 export async function restoreActiveWindow(projectId: string): Promise<void> {
   try {
-    const reply = await store().command(`display-message -p '#{window_id}'`);
-    const id = reply.lines[0]?.trim();
+    const reply = await store().command(`display-message -p '#{session_id} #{window_id}'`, projectId);
+    // Explicitly addressed at projectId's own session (local_repo_explorer-0255),
+    // so this reply can't belong to a different project's tmux session. The
+    // cheap pre-check stays as a fast bail for the common "already moved on"
+    // case, matching this function's existing best-effort contract.
+    if (!isActiveProject(projectId)) return;
+    const [sessionId, id] = (reply.lines[0]?.trim() ?? '').split(' ');
+    if (sessionId) {
+      // Preserve the existing sessionName (this query doesn't ask for it) so
+      // this synthetic event only ever ADDS the sessionId, never clobbers a
+      // name already learned from a real %session-changed.
+      const existingName = store().byProject[projectId]?.sessionName ?? '';
+      store().applyNotification(projectId, { type: 'session-changed', sessionId, name: existingName });
+    }
     // Only adopt a real, non-reserved window (never steal focus to persistent/
     // run-1). Reserved windows are hidden from the tab strip, so selecting one
     // would render an empty body.
@@ -270,9 +334,11 @@ export async function restoreActiveWindow(projectId: string): Promise<void> {
     const view = store().byProject[projectId];
     const name = view?.windows[id]?.name;
     if (isHiddenWindow(name)) return;
-    // sessionId is unused by the reducer (only windowId is read — see tmuxStore
-    // `session-window-changed` case); '' matches the parser's own fallback.
-    store().applyNotification(projectId, { type: 'session-window-changed', sessionId: '', windowId: id });
+    store().applyNotification(projectId, {
+      type: 'session-window-changed',
+      sessionId: sessionId ?? '',
+      windowId: id,
+    });
   } catch {
     /* best effort — leave the current selection */
   }
@@ -302,7 +368,13 @@ export async function restoreActiveWindow(projectId: string): Promise<void> {
  */
 export async function ensureWindows(projectId: string): Promise<{ bailed: boolean; synced: boolean }> {
   try {
-    const wins = await listWindows('#{window_id} #{window_name}');
+    const wins = await listWindows('#{window_id} #{window_name}', projectId);
+    // listWindows() now explicitly addresses projectId's own session
+    // (local_repo_explorer-0255), so `wins` and every mutation issued below
+    // (all passed the same explicit projectId) can never land on a
+    // different project's tmux session. The cheap pre-check stays as a fast
+    // bail for the common "already moved on" case.
+    if (!isActiveProject(projectId)) return { bailed: true, synced: false };
     const createRun = useSettingsStore.getState().settings.showRunPanel;
     const plan = reconcile(wins.map((w) => ({ id: w.id, name: w.rest })), { createRun });
     if (plan.bail) {
@@ -310,10 +382,10 @@ export async function ensureWindows(projectId: string): Promise<{ bailed: boolea
       // not mark the project initialized — a later acquire/sync retries.
       return { bailed: true, synced: false };
     }
-    for (const id of plan.toKill) await store().command(`kill-window -t ${id}`);
-    for (const r of plan.toRename) await store().command(`rename-window -t ${r.id} ${r.to}`);
-    for (const name of plan.toCreate) await createReservedWindow(name);
-    if (plan.createFirstTerminal) await createTerminalWindow(); // first terminal tab (dir-named)
+    for (const id of plan.toKill) await store().command(`kill-window -t ${id}`, projectId);
+    for (const r of plan.toRename) await store().command(`rename-window -t ${r.id} ${r.to}`, projectId);
+    for (const name of plan.toCreate) await createReservedWindow(name, projectId);
+    if (plan.createFirstTerminal) await createTerminalWindow(projectId); // first terminal tab (dir-named)
     if (plan.toKill.length > 0 || plan.toCreate.length > 0 || plan.toRename.length > 0) {
       console.info(
         `[control-session] reap pass for ${projectId}: killed ${plan.toKill.length} ` +
@@ -403,11 +475,15 @@ function clientCellsFromLayout(
   };
 }
 
-/** Report the panel's size so tmux recomputes pane geometry for splits. */
+/** Report the panel's size so tmux recomputes pane geometry for splits.
+ *  Addresses the resize at the project active RIGHT NOW (captured
+ *  synchronously, before the IPC round-trip) rather than leaving main to
+ *  resolve it ambiently at execution time (local_repo_explorer-0255). */
 export function pushClientSize(host: HTMLElement | null): void {
   if (!host) return;
   const { cols, rows } = clientCells(host);
-  if (cols > 0 && rows > 0) void store().resize(cols, rows);
+  const projectId = useTmuxStore.getState().activeProjectId ?? undefined;
+  if (cols > 0 && rows > 0) void store().resize(cols, rows, projectId);
 }
 
 /**
@@ -461,10 +537,12 @@ export function nudgeClientSize(host: HTMLElement | null, windowId?: string | nu
   const { cols, rows } = root ? { cols: root.w, rows: root.h } : clientCells(host);
   if (cols <= 0 || rows <= 0) return;
   const projectId = st.activeProjectId;
-  void store().resize(cols, Math.max(1, rows - 1));
+  void store().resize(cols, Math.max(1, rows - 1), projectId ?? undefined);
   requestAnimationFrame(() => {
     if (useTmuxStore.getState().activeProjectId !== projectId) return;
-    void store().resize(cols, rows); // identity restore of the CAPTURED size — never a recompute
+    // identity restore of the CAPTURED size — never a recompute; addressed at
+    // the SAME projectId captured above, not re-read (local_repo_explorer-0255).
+    void store().resize(cols, rows, projectId ?? undefined);
   });
 }
 
@@ -542,11 +620,11 @@ export function nudgePaneRows(projectId: string, windowId: string): void {
 
   requestAnimationFrame(() => {
     if (useTmuxStore.getState().activeProjectId !== projectId) {
-      // Commands route via main's activeControl(), which resolves to whichever
-      // project is active AT SEND TIME — bailing before the first send (rather
-      // than sending anyway) guarantees a shrunken pane can never be stranded on
-      // an inactive/switched-away project. Mirrors nudgeClientSize's own guarded
-      // restore.
+      // Every command below is EXPLICITLY addressed at `projectId`
+      // (local_repo_explorer-0255), so it can no longer land on the wrong
+      // project's tmux session — but this function's own contract is to
+      // touch only the project the user is currently looking at, so still
+      // bail rather than resize a backgrounded project's panes.
       paneNudgeInFlight.delete(guardKey);
       return;
     }
@@ -560,18 +638,18 @@ export function nudgePaneRows(projectId: string, windowId: string): void {
       // sub-command of a sequence, which would desync the manager's
       // pending-reply FIFO correlation (each command() call expects exactly one
       // reply block).
-      sent.push(store().command(`resize-pane -t ${paneId} -y ${h - 1}`).catch(() => {}));
+      sent.push(store().command(`resize-pane -t ${paneId} -y ${h - 1}`, projectId).catch(() => {}));
       // Server-side pure delay (no shell command) so the pane app OBSERVES the
       // shrunken size before the restore arrives — guards against SIGWINCH
       // coalescing / an app like ncurses not redrawing on a same-size no-op. On
       // tmux < 3.2 (the `-d` flag was added in 3.2) this %errors harmlessly: the
       // shrink and restore are separate command lines and both still execute,
       // degrading to at-worst today's (first-pane-only) behavior, never worse.
-      sent.push(store().command('run-shell -d 0.05').catch(() => {}));
+      sent.push(store().command('run-shell -d 0.05', projectId).catch(() => {}));
       // Absolute-height restore: the exact original height read from tmux's own
       // layout, written back verbatim. No pixel/FitAddon math is involved, so
       // this cannot introduce a new rounding-mismatch bug class.
-      sent.push(store().command(`resize-pane -t ${paneId} -y ${h}`).catch(() => {}));
+      sent.push(store().command(`resize-pane -t ${paneId} -y ${h}`, projectId).catch(() => {}));
     }
     // Clear the single-flight guard once every reply (or its swallowed
     // rejection) has landed.

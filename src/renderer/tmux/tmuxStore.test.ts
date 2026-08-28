@@ -196,6 +196,83 @@ describe('tmuxStore reducer (pure)', () => {
     const v1 = reduce(v0, { type: 'subscription-changed', name: 'other', value: 'x' });
     expect(v1).toBe(v0);
   });
+
+  it('records the own session id on session-changed', () => {
+    const v = reduce(emptyView(), { type: 'session-changed', sessionId: '$1', name: 'sess' });
+    expect(v.sessionId).toBe('$1');
+  });
+});
+
+// Regression coverage for local_repo_explorer-0255's actual root cause,
+// found via a live probe against the real tmux binary (see CLAUDE.md "tmux
+// control-mode notifications are broadcast to every client on the server,
+// not just the session they concern"): every project on a shared tmux server
+// (all local projects, or same-host remote projects) receives EVERY OTHER
+// project's session-scoped structural notifications on its own control
+// channel — not just the notifications for its own session. Three landed
+// rounds of explicit COMMAND addressing (renderer -> main -> tmux) never
+// touched this, because it's the opposite direction: tmux -> main -> renderer,
+// and main forwards every notification it receives on a channel tagged with
+// that channel's OWN projectId, which is correct tagging of WHERE the event
+// arrived but wrong about WHOSE session it actually concerns.
+describe('cross-session broadcast rejection (local_repo_explorer-0255)', () => {
+  it('ignores %unlinked-window-add entirely — never adopts another session\'s window', () => {
+    const v0 = fold(emptyView(), [singleLayout('@1', '%1')]);
+    const v1 = reduce(v0, { type: 'unlinked-window-add', windowId: '@99' });
+    expect(v1).toBe(v0);
+    expect(v1.windows['@99']).toBeUndefined();
+    expect(v1.windowOrder).toEqual(['@1']);
+  });
+
+  it('rejects a session-window-changed for a DIFFERENT session once our own session id is known', () => {
+    let v = reduce(emptyView(), { type: 'session-changed', sessionId: '$1', name: 'projB' });
+    v = fold(v, [singleLayout('@1', '%1')]);
+    v = reduce(v, { type: 'window-pane-changed', windowId: '@1', paneId: '%1' });
+    expect(v.activeWindowId).toBe('@1');
+    expect(v.activePaneId).toBe('%1');
+
+    // A DIFFERENT project's window-create/select on the shared server —
+    // live-probe-confirmed wire shape: %session-window-changed $0 @2.
+    const foreign = reduce(v, { type: 'session-window-changed', sessionId: '$0', windowId: '@2' });
+    expect(foreign).toBe(v); // untouched — activeWindowId/activePaneId survive
+  });
+
+  it('accepts a session-window-changed for OUR OWN session id', () => {
+    let v = reduce(emptyView(), { type: 'session-changed', sessionId: '$1', name: 'projB' });
+    v = fold(v, [singleLayout('@1', '%1'), singleLayout('@2', '%2')]);
+    v = reduce(v, { type: 'session-window-changed', sessionId: '$1', windowId: '@2' });
+    expect(v.activeWindowId).toBe('@2');
+    expect(v.activePaneId).toBeNull(); // intentionally cleared, per the existing contract
+  });
+
+  it('applies session-window-changed optimistically before our own session id is known (bootstrap)', () => {
+    // %session-changed always arrives first in practice, but the reducer must
+    // not strand a genuinely-own event if it somehow doesn't — matches the
+    // synthetic sessionId:'' restoreActiveWindow issues before it knows one.
+    const v = fold(emptyView(), [singleLayout('@1', '%1')]);
+    const v1 = reduce(v, { type: 'session-window-changed', sessionId: '', windowId: '@1' });
+    expect(v1.activeWindowId).toBe('@1');
+  });
+
+  it('ignores window-pane-changed for a window we do not track — a DIFFERENT session broadcasting its own pane focus change', () => {
+    // Live-probe-confirmed: %window-pane-changed carries NO session id at all
+    // and is broadcast to every client regardless of session, so the only
+    // available guard is "do we even know this window" (window ids are
+    // unique per tmux SERVER, never reused across sessions while both are
+    // open, so this is a complete guard, not a best-effort one).
+    const v0 = fold(emptyView(), [singleLayout('@1', '%1')]);
+    const v1 = reduce(v0, { type: 'window-pane-changed', windowId: '@2', paneId: '%3' });
+    expect(v1).toBe(v0);
+    expect(v1.activeWindowId).toBeNull();
+    expect(v1.activePaneId).toBeNull();
+  });
+
+  it('still applies window-pane-changed for a window we DO track (the legitimate own-session case)', () => {
+    const v0 = fold(emptyView(), [singleLayout('@1', '%1'), singleLayout('@2', '%2')]);
+    const v1 = reduce(v0, { type: 'window-pane-changed', windowId: '@2', paneId: '%2' });
+    expect(v1.activeWindowId).toBe('@2');
+    expect(v1.activePaneId).toBe('%2');
+  });
 });
 
 describe('tmuxStore output routing + input (per-project)', () => {
@@ -271,12 +348,12 @@ describe('tmuxStore output routing + input (per-project)', () => {
   it('sendInput encodes data to space-separated hex pairs', async () => {
     await useTmuxStore.getState().sendInput(P, '%3', 'echo');
     // 'echo' -> 65 63 68 6f
-    expect(api.tmuxControl.input).toHaveBeenCalledWith('%3', '65 63 68 6f');
+    expect(api.tmuxControl.input).toHaveBeenCalledWith('%3', '65 63 68 6f', P);
   });
 
   it('sendInput encodes control bytes (Enter = 0d)', async () => {
     await useTmuxStore.getState().sendInput(P, '%3', '\r');
-    expect(api.tmuxControl.input).toHaveBeenCalledWith('%3', '0d');
+    expect(api.tmuxControl.input).toHaveBeenCalledWith('%3', '0d', P);
   });
 
   it('sendInput hands the full input to the manager in one call (main does the chunking)', async () => {
@@ -293,7 +370,7 @@ describe('tmuxStore output routing + input (per-project)', () => {
 
   it('open records the session name and open flag on the project slice', async () => {
     await useTmuxStore.getState().open(P, { cols: 80, rows: 24 });
-    expect(api.tmuxControl.open).toHaveBeenCalledWith({ cols: 80, rows: 24 });
+    expect(api.tmuxControl.open).toHaveBeenCalledWith({ cols: 80, rows: 24 }, P);
     const slice = useTmuxStore.getState().byProject[P];
     expect(slice?.isOpen).toBe(true);
     expect(slice?.sessionName).toBe('agent-cockpit-proj');

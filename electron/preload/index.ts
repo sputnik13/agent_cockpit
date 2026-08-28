@@ -124,17 +124,20 @@ const api: RendererApi = {
   },
 
   tmuxControl: {
-    open: (opts) =>
-      invoke<{ sessionName: string }>(Channels.tmuxControlOpen, opts ?? {}).then((r) => r.sessionName),
-    close: (kill) => invoke<{ ok: true }>(Channels.tmuxControlClose, { kill }).then(() => undefined),
-    command: (args) =>
-      invoke<{ reply: never }>(Channels.tmuxControlCommand, { args }).then((r) => r.reply),
-    input: (paneId, hex) =>
-      invoke<{ ok: true }>(Channels.tmuxControlInput, { paneId, hex }).then(() => undefined),
-    resize: (cols, rows) =>
-      invoke<{ ok: true }>(Channels.tmuxControlResize, { cols, rows }).then(() => undefined),
-    capturePane: (paneId, startLine) =>
-      invoke<{ lines: string[] }>(Channels.tmuxControlCapturePane, { paneId, startLine }).then(
+    open: (opts, projectId) =>
+      invoke<{ sessionName: string }>(Channels.tmuxControlOpen, { ...(opts ?? {}), projectId }).then(
+        (r) => r.sessionName,
+      ),
+    close: (kill, projectId) =>
+      invoke<{ ok: true }>(Channels.tmuxControlClose, { kill, projectId }).then(() => undefined),
+    command: (args, projectId) =>
+      invoke<{ reply: never }>(Channels.tmuxControlCommand, { args, projectId }).then((r) => r.reply),
+    input: (paneId, hex, projectId) =>
+      invoke<{ ok: true }>(Channels.tmuxControlInput, { paneId, hex, projectId }).then(() => undefined),
+    resize: (cols, rows, projectId) =>
+      invoke<{ ok: true }>(Channels.tmuxControlResize, { cols, rows, projectId }).then(() => undefined),
+    capturePane: (paneId, startLine, projectId) =>
+      invoke<{ lines: string[] }>(Channels.tmuxControlCapturePane, { paneId, startLine, projectId }).then(
         (r) => r.lines,
       ),
   },

@@ -149,12 +149,38 @@ export interface RendererApi {
    * `input` sends pane keystrokes as space-separated hex pairs.
    */
   tmuxControl: {
-    open(opts?: { cols?: number; rows?: number }): Promise<string>;
-    close(kill?: boolean): Promise<void>;
-    command(args: string): Promise<TmuxCommandReply>;
-    input(paneId: string, hex: string): Promise<void>;
-    resize(cols: number, rows: number): Promise<void>;
-    capturePane(paneId: string, startLine?: number): Promise<string[]>;
+    /** `projectId`, when given, EXPLICITLY addresses this open at that
+     *  specific project's control session — see `command`'s doc comment
+     *  (local_repo_explorer-0255). Called on every `acquireControlSession`
+     *  (every project switch, not just first-visit), so it needs the same
+     *  explicit addressing: without it, a switch racing main's own active-
+     *  project update can open/attach the WRONG project's control manager. */
+    open(opts?: { cols?: number; rows?: number }, projectId?: string): Promise<string>;
+    /** `projectId`, when given, EXPLICITLY addresses this close at that
+     *  specific project's control session (local_repo_explorer-0255). */
+    close(kill?: boolean, projectId?: string): Promise<void>;
+    /** `projectId`, when given, EXPLICITLY addresses this command at that
+     *  live session instead of implicitly targeting whichever project main
+     *  currently considers active — see TmuxCommandReply's doc comment
+     *  (local_repo_explorer-0255). Required for any multi-step sequence tied
+     *  to a specific project; omit only when "whatever's active right now" is
+     *  the genuinely intended target (e.g. a direct user keystroke/click). */
+    command(args: string, projectId?: string): Promise<TmuxCommandReply>;
+    /** `projectId`, when given, EXPLICITLY addresses these keystrokes at that
+     *  specific pane's own project — without it, this can send input into the
+     *  wrong project's real pane across different tmux servers, since pane
+     *  ids are only unique per-server (local_repo_explorer-0255). */
+    input(paneId: string, hex: string, projectId?: string): Promise<void>;
+    /** `projectId`, when given, EXPLICITLY addresses this client-size push at
+     *  that specific project's control client (local_repo_explorer-0255). */
+    resize(cols: number, rows: number, projectId?: string): Promise<void>;
+    /** `projectId`, when given, EXPLICITLY addresses this capture at that
+     *  specific pane's own project. This is the channel that seeds/re-seeds a
+     *  pane's VISIBLE CONTENT from `capture-pane` — omitting it let another
+     *  project's real terminal content get painted into this project's pane
+     *  across different tmux servers, since pane ids are only unique
+     *  per-server (local_repo_explorer-0255). */
+    capturePane(paneId: string, startLine?: number, projectId?: string): Promise<string[]>;
   };
 
   notes: {

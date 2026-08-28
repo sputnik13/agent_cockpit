@@ -255,6 +255,304 @@ local and remote — all of it must arrive. In an app with bracketed paste on
 (`zsh`, `vim`) a paste must NOT show a literal `00~`/`200~`, and small
 keystrokes must still send as one `send-keys` call.
 
+## tmux control commands must be explicitly addressed, never ambiently inferred (local_repo_explorer-0255)
+
+**Invariant:** Every tmux control-mode command crosses the IPC boundary via
+`tmuxControl.command(args, projectId?)` (`src/renderer/tmux/tmuxStore.ts` →
+`Channels.tmuxControlCommand` → `electron/main/ipc/index.ts`'s
+`activeControl(targetProjectId?)`). When a caller supplies `projectId`, main
+resolves it via `providerFor(projectId)` — that EXACT live session, throwing
+`SessionGoneError` if it no longer exists. Only when `projectId` is omitted
+does main fall back to `activeProvider()` (whichever project is ambiently
+active on main right now). Any multi-step async sequence tied to one
+specific project — `ensureWindows`/`syncFromTmux`/`restoreActiveWindow` in
+`src/renderer/tmux/controlSession.ts` — MUST pass its own `projectId`
+explicitly on every command in the sequence. Direct, single-shot
+user-triggered actions (the `+` tab button, ⌘T, a keystroke) correctly omit
+it — "whatever's on screen right now" is the intended target there.
+
+**Why this matters:** `activeProvider()` targets whichever project is active
+on main **at the moment each command executes**, not whichever project a
+caller believes it's operating on. A project-scoped sequence issues several
+sequential `command()` calls across separate IPC round-trips; if the
+ambient-active project changes on main between two of those calls (a genuine
+possibility any time a sequence spans more than one await — including
+ordinary project switching, since each switch itself kicks off exactly this
+kind of sequence), a LATER command in the sequence silently executes against
+the NEW active project's real tmux session while its result is still applied
+to the ORIGINAL project's store slice. This was live-confirmed as the actual
+cause of "switching projects doesn't restore the last-active tab" and, more
+seriously, can misroute the reconcile loop's `kill-window`/`rename-window`
+into an unrelated project's real session. A first attempted fix
+(`isActiveProject(projectId)`, checking the RENDERER's own
+`tmuxStore.activeProjectId`) was insufficient and shipped-then-reverted: it
+can only see the renderer's own belief, not main's independently-tracked
+`SessionManager.activeId`, so a cross-process desync between the two was
+invisible to it.
+
+**Do NOT** "fix" a future instance of this bug class by adding another
+after-the-fact detection/discard check (e.g. echoing the resolved
+`projectId` on the reply and comparing). Detection cannot undo a destructive
+command that already executed against the wrong session — `TmuxCommandReply.
+projectId` exists only as a diagnostic echo, not a correctness mechanism. The
+only real fix is the caller stating its target explicitly, so main can never
+resolve to the wrong session in the first place. `isActiveProject()` remains
+as a cheap early-bail pre-check (avoids wasted work on the common case) but
+is not load-bearing.
+
+**`tmuxControl.open` needs the SAME explicit addressing as `command` — it is
+NOT covered by fixing `command` alone.** `acquireControlSession` (in
+`controlSession.ts`) calls `tmuxStore.open(projectId, ...)` on **every**
+acquire — i.e. every project switch, not just a project's first visit — and
+the first pass of this fix threaded `projectId` through `command()` but
+missed `open()`, which kept resolving via ambient `activeControl()`/
+`activeProvider()` on main (`electron/main/ipc/index.ts`'s
+`tmuxControlOpen` handler). A project switch racing main's own `activeId`
+update could still open/attach the WRONG project's control manager under the
+guise of "opening" the intended one — reproducing the exact same symptom
+(a pure project switch, no tmux interaction needed) even after the
+command-routing fix had landed. `open` now threads `projectId` the same way:
+`tmuxStore.open` → `tmuxControl.open(opts, projectId)` IPC →
+`activeControl(req.projectId)` / `providerFor(req.projectId)` (both
+resolved from the SAME explicit target, not two separate ambient calls).
+When adding any FUTURE tmux IPC call that a project-scoped sequence issues,
+check whether it's project-scoped and give it the same explicit `projectId`
+parameter from the start — do not assume the `command()` channel is the only
+one that needs it.
+
+**The full tmux IPC surface needed the same treatment, not just `command`/
+`open` — `capturePane`, `input`, `resize`, and `close` were the same gap,
+found by independent review after two rounds of "fixed" had both been
+reported still-broken.** `capturePane` in particular is NOT just a read: it
+is the channel that paints a pane's ACTUAL VISIBLE CONTENT
+(`controlPaneRegistry.ts`'s `acquire()` capture-pane backfill, and
+`hardRecoverTab`'s `reseedPane` hard-refresh re-seed). Left ambient, a
+project switch mid-flight doesn't just misroute a command — it silently
+writes a DIFFERENT project's real terminal bytes into this project's pane,
+and does so **invisibly**: a misrouted `-t %N`/`-t <paneId>` call doesn't
+error, it succeeds against whatever project is ambiently active, and pane/
+window ids (`%N`/`@N`) are only unique **per tmux server** — so this is most
+visible (but not exclusively reachable) across DIFFERENT servers (local +
+remote, or two different remote hosts), where each server independently
+numbers panes `%0, %1, …` and a misrouted call returns the wrong server's
+identically-numbered pane's real content, not an error. `input` (keystrokes),
+`resize` (client geometry — `pushClientSize`/`nudgeClientSize`/
+`nudgePaneRows`), `resumePane`, and the mouse/title format-subscription
+commands in `controlPaneRegistry.ts`'s `acquire()` all had the same gap;
+`tmuxStore.ts`'s `sendInput` was the most direct instance — it took a
+`_projectId` parameter and **discarded it**, never passing it anywhere.
+
+**When adding ANY future tmux IPC channel or call site, default to explicit
+`projectId` addressing from the start** — do not assume `command`/`open`
+were the only channels that needed it, and do not assume a channel is safe
+just because it "only reads." A read channel that paints its result
+somewhere (a pane, a store slice, a UI label) is exactly as dangerous as a
+write, because the danger is WHERE the read result gets applied, not whether
+tmux's own state changes. The one legitimate categorical exemption remains
+direct, single-shot, user-triggered actions on the visibly-active project
+(the `+` tab button, ⌘T, a drag-resize, a click) — everything else, especially
+anything reachable from `acquireControlSession`/`ensureWindows`/
+`syncFromTmux`/`restoreActiveWindow`/`hardRecoverTab`/`acquire()`, needs it.
+
+**Regression check:** `controlSession.test.ts`'s and
+`controlPaneRegistry.test.ts`'s "explicit projectId addressing" describe
+blocks assert every command/capture-pane/open call issued by
+`syncFromTmux`/`restoreActiveWindow`/`ensureWindows`/`acquireControlSession`/
+`acquire()`/`hardRecoverTab` (including the kill-window/rename-window/
+new-window reconcile mutations, and the capture-pane backfill/re-seed calls
+that paint pane content) carries the correct `projectId`, including under
+the same mid-flight active-project-switch race exercised by the adjacent
+"cross-project race guard" block — reverting any of these fixes individually
+reproduces a failing test (verified for both the `open()` fix and the
+`capturePane`/`acquire()` fix by temporarily reverting each and confirming
+the corresponding test fails). In the app: with 2+ projects — ideally
+spanning local **and** remote, or two different remote hosts, since that's
+where a content-level (not just window-selection) leak is most visible —
+each having 2+ tabs, rapidly switch between them (and/or create a new window
+in one right before switching away) — the restored tab must always match
+that project's own last-active window and content, never another project's.
+
+**Known residual, NOT covered by this invariant (tracked separately,
+`local_repo_explorer-tesz`):** `ControlTerminalPanel.tsx` passes `PaneTree`
+the project id from `useProjectsStore`'s `activeId`, while the
+`windowOrder`/`windows`/`panes` it renders alongside come from
+`selectActiveView`, keyed on a **separate** field — `tmuxStore`'s own
+`activeProjectId`, updated later, inside `acquireControlSession`'s effect.
+At least one committed render per switch can therefore pair the NEW
+project's identity with the OLD project's layout tree. This is a rendering-
+selection concern, not an IPC-addressing one — explicit addressing (this
+invariant) still guarantees any content fetched during that frame is sourced
+from the correct project, so the confirmed residual risk is a transient
+layout mismatch, not wrong content, unless `providerConnected` is somehow
+stale when `activeId` flips (unconfirmed). Do not assume this invariant's
+fix resolves that separate concern; do not conflate the two when
+investigating a future report in this area.
+
+## tmux control-mode NOTIFICATIONS are broadcast to every client on the server, not just the session they concern (local_repo_explorer-0255, actual root cause)
+
+**This is a DIFFERENT mechanism from the explicit-addressing invariant above
+— read both, do not conflate them.** The explicit-addressing invariant fixes
+the COMMAND direction: renderer → main → tmux, i.e. which session a command
+you send actually executes against. This invariant fixes the opposite,
+NOTIFICATION direction: tmux → main → renderer, i.e. whether an event tmux
+emits actually concerns the project whose channel it arrived on. Three full
+rounds of explicit-addressing fixes (all correct, all independently
+reviewed) did NOT fix the user-reported "wrong window/tab shown after
+switching projects" symptom, because the actual leak was here the whole
+time. Found only by a ground-up review that live-probed a real tmux binary
+(`node-pty` + an isolated throwaway `-L` socket) instead of re-reading code.
+
+**Invariant:** tmux's control-mode protocol broadcasts session-scoped
+structural notifications (window create/select/close, active-pane change) to
+**every `-CC` client attached to the server**, not just the client(s)
+attached to the session the event concerns. Every local project's control
+session lives on ONE shared server (`-L agent-cockpit`); same-host remote
+projects share one per-host socket the same way (see "Dev-environment memory
+cap" above — same server-sharing fact, different consequence). So a
+`new-window`/`select-window`/`kill-window`/`select-pane` in ANY project's
+session fires on the control channel of EVERY OTHER project sharing that
+server too. `src/renderer/tmux/tmuxStore.ts`'s `reduce()` must reject a
+notification that doesn't concern this project's own session rather than
+assume "arrived on my channel" means "is about my session" — main's own
+notification forwarding (`electron/main/ipc/index.ts`) correctly tags every
+notification with the CHANNEL's `projectId`, but that tags WHERE it arrived,
+not WHOSE session it's actually reporting on — those are different facts,
+and only the reducer sees both.
+
+**Live-probe-confirmed vulnerable notifications and their fixes (all in
+`reduce()`):**
+- **`%unlinked-window-add`** — tmux's own naming says it: a window NOT
+  linked to any session this client is attached to, i.e. always another
+  project's window. The pre-fix reducer folded it into the SAME case as
+  `%window-add`, adopting a foreign project's real window into this
+  project's tab strip on every window create in that OTHER project. Fixed:
+  unconditional no-op, split into its own `case`, never merged with
+  `window-add` again.
+- **`%session-window-changed $sessionId $windowId`** — applied
+  unconditionally regardless of which session it named. This is the
+  notification that directly sets `activeWindowId`/`activePaneId`, so this
+  was THE mechanism behind "switching projects doesn't restore the last-used
+  tab": a window-create/select/kill in ANY other project on the shared
+  server silently overwrote it. Fixed: reject when `state.sessionId` is
+  known and doesn't match `n.sessionId`. `state.sessionId` is learned from
+  `%session-changed` (whose `sessionId` field was already parsed but
+  previously discarded — only `name` was kept).
+- **`%window-pane-changed`** (fires on `select-pane`, a pane click, a
+  split) — broadcast the same way, but its wire payload carries **no
+  session id at all**, so it can't be filtered by id. Fixed: reject unless
+  `n.windowId` already exists in `state.windows`. This is a COMPLETE guard,
+  not best-effort: window/pane ids are unique per tmux **server**, live-
+  probe-confirmed never reused across two simultaneously-open sessions, so a
+  foreign window id can never coincidentally collide with one of ours.
+- **Checked and found NOT vulnerable (leave as-is, do not "fix" these):**
+  `%layout-change` (a live probe showed a `split-window`/`resize-pane` in a
+  different session produces NO notification on another session's channel
+  at all — so its existing "synthesize a window if we haven't seen an
+  explicit add yet" tolerance stays safe); `%output`/`%pause`/`%continue`
+  (strictly own-session); `%subscription-changed` (per-client — a
+  cross-session-targeted `refresh-client -B` registers without error but
+  never fires on the other client, live-probe-confirmed, even with
+  colliding subscription names). `%unlinked-window-close` stays folded into
+  `window-close` (parser-level) — its existing `!state.windows[n.windowId]`
+  existence guard is already a complete guard once `unlinked-window-add`
+  stops adding foreign windows (same never-reused-id argument as
+  `window-pane-changed`). `%unlinked-window-renamed`,
+  `%client-session-changed`, `%sessions-changed` are all cross-session too
+  but the parser doesn't model them (fall through to `{type:'unknown'}`,
+  which the reducer already no-ops on) and nothing else consumes them — if a
+  future feature ever DOES start consuming one of these, it needs the same
+  session-id-or-existence guard from the start, not an assumption that "it's
+  a read" makes it safe.
+
+**The re-init path must (re-)learn `sessionId` WITHOUT requiring a fresh
+attach, or the guard above goes permanently dark for a project.**
+`switchTerminalRenderer`'s `teardownControlSession` clears a project's
+`sessionId` (via `resetProject`) and forces a re-init via
+`resetControlSession`, but main's control manager stays open the whole
+time — no real `-CC` attach happens, so no real `%session-changed` ever
+replays to re-learn it. `restoreActiveWindow`'s existing re-init query
+(`display-message`) now asks for `'#{session_id} #{window_id}'` instead of
+just `'#{window_id}'`, and folds a synthetic `session-changed` to re-learn
+`sessionId` on every re-init regardless of whether a real attach occurred —
+preserving the project's existing `sessionName` (this query doesn't ask for
+it) so the synthetic event only ever ADDS the id, never clobbers a name
+already learned from a real event.
+
+**Do NOT** assume a notification type is safe just because it "only reads"
+state rather than mutating tmux. The danger here is not write-vs-read, it's
+WHOSE session the event actually concerns versus WHOSE channel it arrived
+on — a read that gets folded into the wrong project's slice is exactly as
+corrupting as a misrouted write. When adding a new notification type to the
+parser/reducer, live-probe whether it's broadcast cross-session (a real
+tmux binary + `node-pty` + an isolated throwaway `-L` socket, per the
+scratch scripts referenced in this bead's `br show local_repo_explorer-0255`
+comments) before assuming a plain "does this pane/window exist in my state"
+check is unnecessary.
+
+**Regression check:** `tmuxStore.test.ts`'s "cross-session broadcast
+rejection" describe block — reverting any of the three guards individually
+(un-splitting `unlinked-window-add`, removing the `session-window-changed`
+sessionId check, removing the `window-pane-changed` existence check)
+reproduces exactly the corresponding failing test (mutation-verified, not
+just written-and-assumed-correct). `controlSession.test.ts`'s
+`restoreActiveWindow` sessionId re-learn tests pin the teardown/re-init
+relapse fix specifically (also mutation-verified) and that it never clobbers
+`sessionName`. In the app: with 2+ **local** projects (this reproduces
+without any remote host at all, unlike the explicit-addressing bugs above,
+since it doesn't require a content-level cross-server id collision — the
+shared LOCAL server is the whole mechanism), create a new window in one
+project, then immediately switch to another project and back — the switched-
+to project's last-active tab must be unaffected by the other project's
+window creation.
+
+## ControlTerminalPanel's project-switch corrections run in `useLayoutEffect`, not `useEffect` (local_repo_explorer-tesz)
+
+**Invariant:** `ControlTerminalPanel.tsx` renders `PaneTree` with the project
+id from `useProjectsStore`'s `activeId`, but the `windowOrder`/`windows`/
+`panes` it renders alongside come from `selectActiveView`, keyed on a
+**separate** field — `tmuxStore`'s own `activeProjectId` — and the local
+`selectedWindow`/`activePaneId` state is not namespaced per project at all.
+Both are corrected by effects (the acquire effect's `setActiveProject` call,
+and the window/pane selection mirror effect) that run on the SAME render
+`activeId` changed on. Both of those correcting effects MUST be
+`useLayoutEffect`, not `useEffect`.
+
+**Why this matters:** a plain `useEffect` runs AFTER the browser paints. On
+every project switch there is at least one committed render pairing the NEW
+project's identity with the OLD project's tab bar and layout tree (`tabWindows`,
+`currentWindow`, `layout`, `renderLayout` are all derived from the stale
+data) — with a plain `useEffect`, that mismatched frame is genuinely painted
+to the screen before the correction lands one macrotask later, producing a
+user-visible flicker on every switch. This was live-confirmed: fixing the
+cross-session notification bug (the section above) resolved the more severe
+wrong-window-**selection** symptom, and the user then reported the flicker
+as a separate, lower-severity residual — confirming the "plausible but
+unconfirmed" diagnosis this section's fix was originally filed against.
+`useLayoutEffect` runs synchronously in the commit phase, before paint, so
+both corrections settle before the browser ever draws the mismatch — same
+state, same triggers, only WHEN they flush relative to paint.
+
+**Do NOT** "fix" this by trying to make `tmuxStore.activeProjectId` update
+synchronously with `useProjectsStore.activeId` via a cross-store subscription
+(e.g. a module-level `useProjectsStore.subscribe(...)` calling
+`setActiveProject`) — the relative ordering of independent Zustand store
+subscriber callbacks is not a contract either store makes, and depending on
+it would be fragile in a way `useLayoutEffect` (a React-guaranteed pre-paint
+synchronization point) is not. Do not revert either effect back to
+`useEffect` for stylistic consistency with the OTHER effects in this file —
+those don't affect what's rendered on the SAME pass `activeId` changes (they
+do imperative DOM/focus work, or don't gate on `activeId` at all), so they
+have no equivalent flicker risk and are correctly left as regular effects.
+
+**Regression check:** this is NOT mechanically testable via this repo's RTL/
+jsdom harness — `act()` flushes both layout effects and passive effects
+synchronously in tests (no real "yield to the browser for paint" step
+exists in jsdom), so a `useEffect`-vs-`useLayoutEffect` regression here is
+invisible to an automated test and must be confirmed live. In the app: with
+2+ projects each having different tab counts/layouts, switch rapidly between
+them and watch closely for a flash of the wrong tab bar or terminal content
+before it settles — there should be none.
+
 ## Connection state has ONE authoritative owner (main); sessions are background-live
 
 **Invariant:** Per-project connection state is owned by the main-process

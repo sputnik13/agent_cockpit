@@ -372,7 +372,7 @@ describe('restoreActiveWindow (reconnect focuses the last-worked window)', () =>
     // tmux reports @3 as the session's active window (the last one focused).
     api.tmuxControl.command.mockImplementation(async (args: string) =>
       args.startsWith('display-message')
-        ? { num: 1, error: false, lines: ['@3'] }
+        ? { num: 1, error: false, lines: ['$1 @3'] }
         : { num: 1, error: false, lines: [] },
     );
     await restoreActiveWindow(PROJ);
@@ -390,12 +390,271 @@ describe('restoreActiveWindow (reconnect focuses the last-worked window)', () =>
     // tmux's active window is the reserved persistent holder — must be ignored.
     api.tmuxControl.command.mockImplementation(async (args: string) =>
       args.startsWith('display-message')
-        ? { num: 1, error: false, lines: ['@1'] }
+        ? { num: 1, error: false, lines: ['$1 @1'] }
         : { num: 1, error: false, lines: [] },
     );
     await restoreActiveWindow(PROJ);
 
     expect(useTmuxStore.getState().byProject[PROJ]?.activeWindowId).toBe('@2');
+  });
+
+  // Regression coverage for local_repo_explorer-0255's renderer-switch relapse
+  // window: teardownControlSession clears a project's sessionId (via
+  // resetProject) and forces a re-init WITHOUT a fresh -CC attach (main's
+  // control manager stays open), so no real %session-changed ever replays.
+  // restoreActiveWindow's own display-message query must (re-)learn sessionId
+  // itself, or the cross-session session-window-changed guard in tmuxStore.ts
+  // stays permanently disarmed for that project after a renderer switch.
+  it('re-learns sessionId from its own query, arming the cross-session guard even without a fresh attach', async () => {
+    const store = useTmuxStore.getState();
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@1' });
+    expect(useTmuxStore.getState().byProject[PROJ]?.sessionId).toBeNull(); // no attach happened
+
+    api.tmuxControl.command.mockImplementation(async (args: string) =>
+      args.startsWith('display-message')
+        ? { num: 1, error: false, lines: ['$1 @1'] }
+        : { num: 1, error: false, lines: [] },
+    );
+    await restoreActiveWindow(PROJ);
+
+    expect(useTmuxStore.getState().byProject[PROJ]?.sessionId).toBe('$1');
+    // The guard is now armed: a DIFFERENT session's broadcast is rejected.
+    store.applyNotification(PROJ, { type: 'session-window-changed', sessionId: '$0', windowId: '@9' });
+    expect(useTmuxStore.getState().byProject[PROJ]?.activeWindowId).toBe('@1');
+  });
+
+  it('re-learning sessionId never clobbers an already-known sessionName', async () => {
+    const store = useTmuxStore.getState();
+    store.applyNotification(PROJ, { type: 'session-changed', sessionId: '$1', name: 'real-name' });
+    store.applyNotification(PROJ, { type: 'window-add', windowId: '@1' });
+
+    api.tmuxControl.command.mockImplementation(async (args: string) =>
+      args.startsWith('display-message')
+        ? { num: 1, error: false, lines: ['$1 @1'] }
+        : { num: 1, error: false, lines: [] },
+    );
+    await restoreActiveWindow(PROJ);
+
+    expect(useTmuxStore.getState().byProject[PROJ]?.sessionName).toBe('real-name');
+  });
+});
+
+// Regression coverage for local_repo_explorer-0255: every command issued by
+// ensureWindows/syncFromTmux/restoreActiveWindow targets whichever project is
+// active on main AT EXECUTION TIME, not the `projectId` parameter passed in.
+// If the active project changes while one of these functions is still
+// awaiting a command's reply, it must detect the change and bail rather than
+// apply the (now-foreign) result to `projectId`'s own store slice.
+describe('cross-project race guard (local_repo_explorer-0255)', () => {
+  const OTHER = 'proj-other';
+
+  beforeEach(() => {
+    useTmuxStore.getState().reset();
+    useTmuxStore.getState().setActiveProject(PROJ);
+    api.tmuxControl.command.mockReset();
+  });
+  afterEach(() => resetControlSession());
+
+  it('syncFromTmux does not write into PROJ when the active project changes mid-flight', async () => {
+    let resolveListWindows!: (v: unknown) => void;
+    const pending = new Promise((resolve) => {
+      resolveListWindows = resolve;
+    });
+    api.tmuxControl.command.mockImplementation(async (args: string) => {
+      if (args.startsWith('list-windows -F "#{window_id} #{window_name}"')) {
+        await pending; // block until the test flips the active project
+        return lw([['@9', 'sneaky']]); // OTHER's real window, arriving late
+      }
+      return { num: 1, error: false, lines: [] };
+    });
+
+    const p = syncFromTmux(PROJ);
+    useTmuxStore.getState().setActiveProject(OTHER); // user switched before the reply landed
+    resolveListWindows(undefined);
+    const synced = await p;
+
+    expect(synced).toBe(false);
+    expect(useTmuxStore.getState().byProject[PROJ]?.windowOrder ?? []).toEqual([]);
+  });
+
+  it('restoreActiveWindow does not adopt a foreign window into PROJ when the active project changes mid-flight', async () => {
+    let resolveDisplay!: (v: unknown) => void;
+    const pending = new Promise((resolve) => {
+      resolveDisplay = resolve;
+    });
+    api.tmuxControl.command.mockImplementation(async (args: string) => {
+      if (args.startsWith('display-message')) {
+        await pending;
+        return { num: 1, error: false, lines: ['@9'] }; // OTHER's real active window
+      }
+      return { num: 1, error: false, lines: [] };
+    });
+
+    const p = restoreActiveWindow(PROJ);
+    useTmuxStore.getState().setActiveProject(OTHER);
+    resolveDisplay(undefined);
+    await p;
+
+    expect(useTmuxStore.getState().byProject[PROJ]?.activeWindowId ?? null).toBeNull();
+  });
+
+  it('ensureWindows issues no mutating commands when the active project changes mid-flight', async () => {
+    let resolveListWindows!: (v: unknown) => void;
+    const pending = new Promise((resolve) => {
+      resolveListWindows = resolve;
+    });
+    useSettingsStore.setState({ settings: DEFAULT_SETTINGS });
+    api.tmuxControl.command.mockImplementation(async (args: string) => {
+      if (args.startsWith('list-windows -F "#{window_id} #{window_name}"')) {
+        await pending;
+        // A plan computed from this would normally kill a duplicate persistent
+        // window and rename the run survivor — none of that may fire.
+        return lw([
+          ['@1', 'persistent'],
+          ['@2', 'persistent'],
+          ['@3', 'zsh'],
+        ]);
+      }
+      return { num: 1, error: false, lines: [] };
+    });
+
+    const p = ensureWindows(PROJ);
+    useTmuxStore.getState().setActiveProject(OTHER);
+    resolveListWindows(undefined);
+    const res = await p;
+
+    expect(res).toEqual({ bailed: true, synced: false });
+    const issued = api.tmuxControl.command.mock.calls.map((c) => c[0] as string);
+    expect(issued.some((a) => a.startsWith('kill-window'))).toBe(false);
+    expect(issued.some((a) => a.startsWith('rename-window'))).toBe(false);
+    expect(issued.some((a) => a.startsWith('new-window'))).toBe(false);
+  });
+});
+
+// Regression coverage for local_repo_explorer-0255's actual fix: every
+// command issued by ensureWindows/syncFromTmux/restoreActiveWindow carries
+// its own `projectId` explicitly, so main resolves and executes it against
+// THAT project's live session (`providerFor(projectId)`) regardless of
+// whichever project is ambiently active by the time the command runs. The
+// mid-flight-bail tests above cover the RENDERER-side symptom (a foreign
+// reply must not be applied); these cover the actual wire contract that
+// prevents the command from reaching the wrong tmux session in the first
+// place.
+describe('explicit projectId addressing (local_repo_explorer-0255)', () => {
+  const OTHER = 'proj-other';
+
+  beforeEach(() => {
+    useTmuxStore.getState().reset();
+    useTmuxStore.getState().setActiveProject(PROJ);
+    api.tmuxControl.command.mockReset();
+    api.tmuxControl.command.mockResolvedValue({ num: 1, error: false, lines: [] });
+  });
+  afterEach(() => resetControlSession());
+
+  it('syncFromTmux addresses both list-windows reads at its own projectId', async () => {
+    withWindows([['@1', 'zsh']]); // non-empty first read so the second read is reached
+    await syncFromTmux(PROJ);
+
+    const listWindowsCalls = api.tmuxControl.command.mock.calls.filter((c) =>
+      (c[0] as string).startsWith('list-windows'),
+    );
+    expect(listWindowsCalls).toHaveLength(2);
+    for (const call of listWindowsCalls) expect(call[1]).toBe(PROJ);
+  });
+
+  it('restoreActiveWindow addresses its display-message read at its own projectId', async () => {
+    await restoreActiveWindow(PROJ);
+
+    const displayCalls = api.tmuxControl.command.mock.calls.filter((c) =>
+      (c[0] as string).startsWith('display-message'),
+    );
+    expect(displayCalls).toHaveLength(1);
+    expect(displayCalls[0]?.[1]).toBe(PROJ);
+  });
+
+  it('ensureWindows addresses its list-windows read AND every reconcile mutation at its own projectId', async () => {
+    useSettingsStore.setState({ settings: DEFAULT_SETTINGS });
+    api.tmuxControl.command.mockImplementation(async (args: string) => {
+      if (args.startsWith('list-windows -F "#{window_id} #{window_name}"')) {
+        // Two persistent windows -> reconcile plans a kill + a rename.
+        return lw([
+          ['@1', 'persistent'],
+          ['@2', 'persistent'],
+          ['@3', 'zsh'],
+        ]);
+      }
+      if (args.startsWith('new-window')) return { num: 1, error: false, lines: ['@9'] };
+      return { num: 1, error: false, lines: [] };
+    });
+
+    await ensureWindows(PROJ);
+
+    const calls = api.tmuxControl.command.mock.calls;
+    const mutating = calls.filter(
+      (c) =>
+        (c[0] as string).startsWith('kill-window') ||
+        (c[0] as string).startsWith('rename-window') ||
+        (c[0] as string).startsWith('new-window') ||
+        (c[0] as string).startsWith('set-window-option') ||
+        (c[0] as string).startsWith('list-windows'),
+    );
+    expect(mutating.length).toBeGreaterThan(0);
+    for (const call of mutating) expect(call[1]).toBe(PROJ);
+  });
+
+  it('ensureWindows sends its reconcile mutations with the explicit projectId even though the active project changes mid-flight', async () => {
+    useSettingsStore.setState({ settings: DEFAULT_SETTINGS });
+    let resolveKill!: (v: unknown) => void;
+    const pending = new Promise((resolve) => {
+      resolveKill = resolve;
+    });
+    api.tmuxControl.command.mockImplementation(async (args: string) => {
+      if (args.startsWith('list-windows -F "#{window_id} #{window_name}"')) {
+        return lw([
+          ['@1', 'persistent'],
+          ['@2', 'persistent'],
+          ['@3', 'zsh'],
+        ]);
+      }
+      if (args.startsWith('kill-window')) {
+        await pending; // block the mutation reply until after the active project moves on
+        return { num: 1, error: false, lines: [] };
+      }
+      return { num: 1, error: false, lines: [] };
+    });
+
+    const p = ensureWindows(PROJ);
+    await vi.waitFor(() =>
+      expect(api.tmuxControl.command.mock.calls.some((c) => (c[0] as string).startsWith('kill-window'))).toBe(
+        true,
+      ),
+    );
+    useTmuxStore.getState().setActiveProject(OTHER); // ambient-active moves on before the reply lands
+    resolveKill(undefined);
+    await p;
+
+    const killCall = api.tmuxControl.command.mock.calls.find((c) => (c[0] as string).startsWith('kill-window'));
+    // The command was already sent addressed at PROJ before the switch — main
+    // will route it to PROJ's own session regardless of what's active now.
+    expect(killCall?.[1]).toBe(PROJ);
+  });
+
+  it('acquireControlSession addresses tmuxControl.open at its own projectId, even under a mid-flight active-project change', async () => {
+    let resolveOpen!: (v: string) => void;
+    const pending = new Promise<string>((resolve) => {
+      resolveOpen = resolve;
+    });
+    api.tmuxControl.open.mockReset();
+    api.tmuxControl.open.mockImplementation(() => pending);
+    withWindows([['@1', 'zsh']]);
+
+    acquireControlSession(PROJ);
+    useTmuxStore.getState().setActiveProject(OTHER); // switched again before open() settled
+    resolveOpen('agent-cockpit-proj');
+    await whenReady(PROJ);
+
+    expect(api.tmuxControl.open).toHaveBeenCalledTimes(1);
+    expect(api.tmuxControl.open.mock.calls[0]?.[1]).toBe(PROJ);
   });
 });
 
@@ -920,13 +1179,13 @@ describe('nudgeClientSize (client resize round-trip — local_repo_explorer-ppjp
     nudgeClientSize(host);
 
     expect(api.tmuxControl.resize).toHaveBeenCalledTimes(1);
-    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(1, 80, 52);
+    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(1, 80, 52, P);
 
     raf.flush();
 
     expect(api.tmuxControl.resize).toHaveBeenCalledTimes(2);
     // Layout-derived (53), never the pane-summed 54 or any value derived from it.
-    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(2, 80, 53);
+    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(2, 80, 53, P);
   });
 
   it('does not recompute the restore target from the store — pushes the click-time-captured size', () => {
@@ -936,7 +1195,7 @@ describe('nudgeClientSize (client resize round-trip — local_repo_explorer-ppjp
 
     const host = document.createElement('div');
     nudgeClientSize(host);
-    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(1, 80, 52);
+    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(1, 80, 52, P);
 
     // Mutate the seeded layout root to a DIFFERENT size between the click and
     // the rAF flush. A restore that re-reads the store (instead of using the
@@ -947,7 +1206,7 @@ describe('nudgeClientSize (client resize round-trip — local_repo_explorer-ppjp
 
     expect(api.tmuxControl.resize).toHaveBeenCalledTimes(2);
     // Still the ORIGINAL click-time capture (80,53), not 80x40-derived.
-    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(2, 80, 53);
+    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(2, 80, 53, P);
   });
 
   it('skips the restore when the active project changed before the rAF fired (guard unchanged)', () => {
@@ -958,7 +1217,7 @@ describe('nudgeClientSize (client resize round-trip — local_repo_explorer-ppjp
     const host = document.createElement('div');
     nudgeClientSize(host);
     expect(api.tmuxControl.resize).toHaveBeenCalledTimes(1);
-    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(1, 80, 52);
+    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(1, 80, 52, P);
 
     useTmuxStore.getState().setActiveProject('some-other-project');
     raf.flush();
@@ -983,7 +1242,7 @@ describe('nudgeClientSize (client resize round-trip — local_repo_explorer-ppjp
 
     // Default fallback cell metrics are 8x17px: floor(800/8)=100, floor(600/17)=35.
     expect(api.tmuxControl.resize).toHaveBeenCalledTimes(1);
-    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(1, 100, 34);
+    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(1, 100, 34, P);
 
     // Mutate the host's pixel size between the click and the rAF flush. A
     // restore that recomputes clientCells(host) would pick up the new width
@@ -993,6 +1252,6 @@ describe('nudgeClientSize (client resize round-trip — local_repo_explorer-ppjp
     raf.flush();
 
     expect(api.tmuxControl.resize).toHaveBeenCalledTimes(2);
-    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(2, 100, 35);
+    expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(2, 100, 35, P);
   });
 });

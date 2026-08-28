@@ -331,6 +331,7 @@ describe('post-split focus (FR4: new pane gets visual + keyboard focus)', () => 
     });
     expect(api.tmuxControl.command).toHaveBeenCalledWith(
       expect.stringContaining("split-window -h -t %0 -P -F '#{pane_id}'"),
+      undefined,
     );
 
     // Layout-change now reports BOTH panes; the pending id (%1) must win and be

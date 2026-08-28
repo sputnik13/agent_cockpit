@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   useProjectsStore,
   useSessionStore,
@@ -84,7 +84,20 @@ export function ControlTerminalPanel(): JSX.Element {
   // `activeId` cannot observe a BACKGROUNDED project's disconnect (activeId
   // only changes to a project after `projectsStore.activate()`'s reconnect has
   // already fully succeeded).
-  useEffect(() => {
+  //
+  // useLayoutEffect (not useEffect), local_repo_explorer-tesz: `activeId`
+  // (this store) and `selectActiveView`'s data (tmuxStore's OWN, separate
+  // `activeProjectId`) update at different times — this effect's
+  // `acquireControlSession` call is what moves the latter into agreement via
+  // its synchronous `setActiveProject`. A plain `useEffect` runs AFTER the
+  // browser paints, so the mismatched frame — the NEW project's identity
+  // paired with the OLD project's windows/tabs/layout — was genuinely
+  // visible for one frame on every switch (a flicker; content itself was
+  // still correctly sourced per-project once local_repo_explorer-0255
+  // landed, so this is a rendering-selection fix, not a correctness one).
+  // `useLayoutEffect` runs synchronously in the commit phase before paint,
+  // so the correction lands before the browser ever draws the mismatch.
+  useLayoutEffect(() => {
     if (!activeId || !providerConnected) return;
     // Invalidate cell-size cache on each project switch so pushClientSize
     // re-measures from the newly active project's panes.
@@ -276,7 +289,16 @@ export function ControlTerminalPanel(): JSX.Element {
   // Both windowing notifications can arrive BEFORE the corresponding
   // layout-change, so the effect re-runs on layout/panes/tabWindows
   // updates too — whichever input completes last finishes the focus shift.
-  useEffect(() => {
+  //
+  // useLayoutEffect (not useEffect), local_repo_explorer-tesz: `selectedWindow`/
+  // `activePaneId` are local state, not namespaced per project, so on a
+  // switch they briefly hold the PREVIOUS project's window/pane id until
+  // this effect corrects them. Paired with the acquire effect above (also
+  // now a layout effect), both corrections settle in the same pre-paint
+  // commit pass, so the browser never draws the intermediate (wrong tab
+  // highlighted / wrong-project layout) frame — see that effect's comment
+  // for the full mechanism.
+  useLayoutEffect(() => {
     // First: figure out which window should be visible. The pane's owning
     // window (from store.panes, set by layout-change) wins when known;
     // otherwise fall back to storeActiveWindowId (the case where the

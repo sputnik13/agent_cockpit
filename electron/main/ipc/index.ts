@@ -591,8 +591,21 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     tmuxControlSessionName?(): string;
   }
 
-  function activeControl(): { mgr: AnyControlManager; sessionName: string; projectId: string } {
-    const provider = activeProvider();
+  /**
+   * `targetProjectId`, when given, EXPLICITLY addresses this control-mode
+   * lookup at that specific live session (any live session, active or
+   * backgrounded — via `providerFor`, which throws `SessionGoneError` if it no
+   * longer exists) instead of implicitly resolving "whichever project is
+   * active on main right now". Omitted, this is the original active-project
+   * behavior for callers that genuinely mean "whatever's on screen right now"
+   * (local_repo_explorer-0255 — see the `tmuxControlCommand` request type doc).
+   */
+  function activeControl(targetProjectId?: string): {
+    mgr: AnyControlManager;
+    sessionName: string;
+    projectId: string;
+  } {
+    const provider = providerFor(targetProjectId);
     const pid = provider.projectId;
 
     if (provider.kind === 'local') {
@@ -664,24 +677,34 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     throw new Error('tmux control-mode is not available for this provider kind');
   }
 
-  ipcMain.handle(Channels.tmuxControlOpen, async (_e, req: { cols?: number; rows?: number }) => {
-    const { mgr, sessionName, projectId: pid } = activeControl();
-    const provider = activeProvider();
-    if (provider.kind === 'local') {
-      // LocalTmuxControlManager.open() is synchronous; cast for unified call.
-      (mgr as LocalTmuxControlManager).open({ cols: req?.cols, rows: req?.rows });
-    } else {
-      // RemoteTmuxControlManager.open() is async.
-      await (mgr as import('../providers/remote/tmuxControl').RemoteTmuxControlManager).open();
-    }
-    // Opt-in tmux flow control (pause-mode). Off by default; version-gated to
-    // tmux >= 3.2. Best-effort and non-blocking — failure never breaks open.
-    if (loadSettings().tmuxPauseMode) void maybeEnablePauseMode(mgr, pid);
-    return { sessionName };
-  });
-  ipcMain.handle(Channels.tmuxControlClose, async (_e, req: { kill?: boolean }) => {
-    const { mgr, projectId } = activeControl();
-    const provider = activeProvider();
+  ipcMain.handle(
+    Channels.tmuxControlOpen,
+    async (_e, req: { cols?: number; rows?: number; projectId?: string }) => {
+      // `req.projectId`, when supplied, EXPLICITLY addresses this open at that
+      // live session, matching tmuxControlCommand (local_repo_explorer-0255).
+      // This call fires on EVERY acquireControlSession (every project switch,
+      // not just first-visit) — an earlier version resolved ambiently here
+      // even after the command-routing fix, so a project switch racing main's
+      // own activeId update could open/attach the WRONG project's control
+      // manager under the guise of "opening" the intended one.
+      const { mgr, sessionName, projectId: pid } = activeControl(req?.projectId);
+      const provider = providerFor(req?.projectId);
+      if (provider.kind === 'local') {
+        // LocalTmuxControlManager.open() is synchronous; cast for unified call.
+        (mgr as LocalTmuxControlManager).open({ cols: req?.cols, rows: req?.rows });
+      } else {
+        // RemoteTmuxControlManager.open() is async.
+        await (mgr as import('../providers/remote/tmuxControl').RemoteTmuxControlManager).open();
+      }
+      // Opt-in tmux flow control (pause-mode). Off by default; version-gated to
+      // tmux >= 3.2. Best-effort and non-blocking — failure never breaks open.
+      if (loadSettings().tmuxPauseMode) void maybeEnablePauseMode(mgr, pid);
+      return { sessionName };
+    },
+  );
+  ipcMain.handle(Channels.tmuxControlClose, async (_e, req: { kill?: boolean; projectId?: string }) => {
+    const { mgr, projectId } = activeControl(req?.projectId);
+    const provider = providerFor(req?.projectId);
     if (req?.kill && provider.kind === 'local') {
       // Local: killSession() detaches and kills the tmux session in one call.
       (mgr as LocalTmuxControlManager).killSession();
@@ -699,25 +722,38 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     tmuxControl.delete(projectId);
     return { ok: true as const };
   });
-  ipcMain.handle(Channels.tmuxControlCommand, async (_e, req: { args: string }) => {
-    const { mgr } = activeControl();
+  ipcMain.handle(Channels.tmuxControlCommand, async (_e, req: { args: string; projectId?: string }) => {
+    // `req.projectId`, when the caller supplied it, EXPLICITLY addresses this
+    // command at that live session (any live session, active or
+    // backgrounded) instead of implicitly targeting whichever project main
+    // currently considers active — see the request type's doc comment in
+    // channels.ts (local_repo_explorer-0255). `pid` (the project the command
+    // ACTUALLY ran against) is echoed on the reply either way, so even an
+    // unaddressed caller can detect a mismatch if it cares to.
+    const { mgr, projectId: pid } = activeControl(req?.projectId);
     const reply = await mgr.command(requireString(req?.args, 'args'));
-    return { reply };
-  });
-  ipcMain.handle(Channels.tmuxControlInput, async (_e, req: { paneId: string; hex: string }) => {
-    const { mgr } = activeControl();
-    await mgr.input(requireString(req?.paneId, 'paneId'), req?.hex ?? '');
-    return { ok: true as const };
-  });
-  ipcMain.handle(Channels.tmuxControlResize, async (_e, req: { cols: number; rows: number }) => {
-    const { mgr } = activeControl();
-    await mgr.resizeClient(req.cols, req.rows);
-    return { ok: true as const };
+    return { reply: { ...reply, projectId: pid } };
   });
   ipcMain.handle(
+    Channels.tmuxControlInput,
+    async (_e, req: { paneId: string; hex: string; projectId?: string }) => {
+      const { mgr } = activeControl(req?.projectId);
+      await mgr.input(requireString(req?.paneId, 'paneId'), req?.hex ?? '');
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(
+    Channels.tmuxControlResize,
+    async (_e, req: { cols: number; rows: number; projectId?: string }) => {
+      const { mgr } = activeControl(req?.projectId);
+      await mgr.resizeClient(req.cols, req.rows);
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(
     Channels.tmuxControlCapturePane,
-    async (_e, req: { paneId: string; startLine?: number }) => {
-      const { mgr } = activeControl();
+    async (_e, req: { paneId: string; startLine?: number; projectId?: string }) => {
+      const { mgr } = activeControl(req?.projectId);
       const opts = req?.startLine != null ? { startLine: req.startLine } : undefined;
       const lines = await mgr.capturePane(requireString(req?.paneId, 'paneId'), opts);
       return { lines };

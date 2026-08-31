@@ -786,6 +786,19 @@ renderer-side path classification that previously duplicated logic across stores
   - Content panel's FoldingView read cache → `interest: ['working-tree']`,
     matching tagged/untagged events against a discriminated per-entry target
     (see the worktree-watch subsection linked below).
+  - Content panel's manual-refresh staleness indicator (`ContentViewer.tsx`'s
+    `FileContent`, local_repo_explorer-r97u) → `interest: ['working-tree']`,
+    per-mount (not module-scoped like FoldingView's cache), matching an event
+    against the ONE currently-displayed `(worktreePath, path)` the same way
+    (untagged event ⇒ root selection, `worktreePath`-tagged event ⇒ exact
+    string match). A match only sets a passive `stale` flag (a `StatusDot`
+    next to a header Refresh `IconButton`) — it deliberately never triggers a
+    reload itself (auto-reload was explicitly rejected). Clicking Refresh
+    bumps a `refreshToken` that (a) is in the deps of `FileContent`'s own
+    diff-bundle/markdown-source fetch effects, and (b) key-remounts whichever
+    child view owns its own internal fetch (`RawFile`/`FoldingView`/
+    `ImageCompare`/`ImageView`/`HtmlPreview`), forcing every view mode to
+    re-read from disk on demand.
 - **Changes surface filter:** `ChangesPanel` applies `isHiddenFromChanges(rel, { showAll })`
   from the shared policy to the changeset rows for display, keyed off the
   `showAllChanges` setting (`src/shared/settings.ts`). The changeset stays

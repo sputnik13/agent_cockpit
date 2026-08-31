@@ -525,7 +525,7 @@ async function runMatrix(win, record) {
       return longBox;
     }
 
-    const wrapBtn = win.getByRole('button', { name: 'Wrap' });
+    const wrapBtn = win.getByRole('checkbox', { name: 'Wrap' });
 
     const renderedOffBox = await assertGutterAligned('Rendered, Wrap off');
     await wrapBtn.click();
@@ -905,7 +905,7 @@ async function runMatrix(win, record) {
         `short.width=${shortBox?.width}, long.width=${longBox?.width}`,
       );
     }
-    const wrapBtn = win.getByRole('button', { name: 'Wrap' });
+    const wrapBtn = win.getByRole('checkbox', { name: 'Wrap' });
     await assertFoldedAlignment('Wrap off');
     await wrapBtn.click();
     await sleep(SETTLE_WRAP);

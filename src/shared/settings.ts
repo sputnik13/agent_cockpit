@@ -147,6 +147,16 @@ export interface AppSettings {
    */
   wrapLines: boolean;
   /**
+   * Show diff highlighting (per-item/intraline change decoration — see
+   * docs/design/ui-rendered-markdown-diff.md) in the Content panel's Rendered
+   * markdown view. On by default. Toggled from the checkbox at the top of the
+   * Content panel (shown only for the rendered-markdown view); persisted so
+   * the choice survives file switches and restarts, same as `wrapLines`.
+   * Purely a display gate: turning it off does not affect which diff data is
+   * fetched, only whether `RenderedMarkdown` is given it to render with.
+   */
+  renderedDiffHighlighting: boolean;
+  /**
    * Largest JSON/YAML file (MB) the Content panel will structurally fold.
    * Above this size the file falls back to the plain syntax-highlighted line
    * view (ContentViewer's `effectiveCls` degrade) instead of the structural
@@ -185,6 +195,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   tmuxFormatSubscriptions: false,
   workgraphColumnsSoftCap: 2,
   wrapLines: false,
+  renderedDiffHighlighting: true,
   structuredFoldMaxMb: 10,
   contentMode: null,
 };
@@ -315,6 +326,10 @@ export function normalizeSettings(input: unknown): AppSettings {
   const tmuxPauseMode = o.tmuxPauseMode === true;
   const tmuxFormatSubscriptions = o.tmuxFormatSubscriptions === true;
   const wrapLines = o.wrapLines === true;
+  // Default true (unlike the other opt-in booleans above): this preserves
+  // the pre-toggle behavior of always showing diff highlighting for anyone
+  // upgrading from a config file written before this setting existed.
+  const renderedDiffHighlighting = o.renderedDiffHighlighting !== false;
   // contentMode: accept only the three valid mode strings; anything else
   // (missing, malformed, or a stale/unrecognized value) falls back to null
   // ("no remembered preference") rather than a concrete mode — unlike
@@ -377,6 +392,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     tmuxFormatSubscriptions,
     workgraphColumnsSoftCap,
     wrapLines,
+    renderedDiffHighlighting,
     structuredFoldMaxMb,
     contentMode,
   };

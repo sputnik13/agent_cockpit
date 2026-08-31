@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Panel, PanelHeader, PanelBody, EmptyState, Spinner } from '../ui';
+import { Panel, PanelHeader, PanelBody, EmptyState, Spinner, IconButton, StatusDot } from '../ui';
 import { agentCockpit, useProjectsStore } from '../providerClient';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
 import { structuredFoldReadMaxBytes } from '@shared/settings';
+import { subscribeWatch } from '../watch/hub';
+import { normalizeWatchPath } from '@shared/watch/policy';
 import { FindBar } from './FindBar';
 import { useFindInContent } from './findInContent';
 import { parsePatch } from './parsePatch';
@@ -166,10 +168,52 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     | { kind: 'ready'; patch: string; oldContent: string | null; newContent: string | null }
   >({ kind: 'loading' });
 
+  // Manual-refresh support (local_repo_explorer-r97u): the panel never
+  // auto-reloads a displayed file on a disk change (deliberate — see the
+  // issue body), but a Refresh click must force a REAL re-read everywhere,
+  // not just a re-render. `refreshToken` is included in this effect's and
+  // the markdown-source effect's own deps below (so THEY refetch), and is
+  // also used to key-remount whichever child view owns its OWN internal
+  // fetch (RawFile/FoldingView/ImageCompare/ImageView/HtmlPreview) so each
+  // independently re-reads too. `stale` is a passive indicator only — it
+  // never triggers a reload by itself.
+  const [refreshToken, setRefreshToken] = useState(0);
+  const [stale, setStale] = useState(false);
+  const refresh = (): void => {
+    setStale(false);
+    setRefreshToken((t) => t + 1);
+  };
+  // Reset staleness when the selection itself changes underneath an
+  // otherwise-stable FileContent instance is not needed here: ContentViewer
+  // remounts FileContent per selection (its own `key` above), so a fresh
+  // mount always starts with `stale=false`.
+  useEffect(() => {
+    // An external (out-of-project) file has no git tree membership, so a
+    // working-tree watch path can never match it — no subscription needed.
+    if (external) return;
+    const targetPath = normalizeWatchPath(path);
+    return subscribeWatch({
+      interest: ['working-tree'],
+      onEvent: (event) => {
+        // Mirrors FoldingView.tsx's invalidateForWatchPaths matching: an
+        // untagged event is root-relative (this selection's own worktree is
+        // ''/root), a worktreePath-tagged event must match this selection's
+        // OWN worktree exactly. No projectId gating — worktree paths are
+        // globally unique across projects (same rationale as that
+        // precedent), and this selection carries no projectId of its own.
+        const matchesWorktree =
+          worktreePath === '' ? event.worktreePath === undefined : event.worktreePath === worktreePath;
+        if (!matchesWorktree) return;
+        if (event.paths.some((p) => normalizeWatchPath(p) === targetPath)) setStale(true);
+      },
+    });
+  }, [external, worktreePath, path]);
+
   // Load the diff BUNDLE once per file: the patch plus both sides' content for
   // highlighting, in ONE provider round trip (was getFileDiff + 2× readFile —
   // three serialized SSH round trips on remote). Skipped for out-of-project
-  // files, which have no git baseline.
+  // files, which have no git baseline. Also re-runs on a manual refresh
+  // (`refreshToken`).
   useEffect(() => {
     if (external) {
       setDiff({ kind: 'ready', patch: '', oldContent: null, newContent: null });
@@ -183,7 +227,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     return () => {
       active = false;
     };
-  }, [external, worktreePath, path, baseline]);
+  }, [external, worktreePath, path, baseline, refreshToken]);
 
   // Parsed once, for `changedLineSet` below. (DiffView separately parses the
   // raw `patch` string prop itself — see its own doc comment — so this is a
@@ -274,7 +318,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     return () => {
       active = false;
     };
-  }, [mode, cls, path, worktreePath]);
+  }, [mode, cls, path, worktreePath, refreshToken]);
 
   // Which component actually renders the current (class, mode) pair — the
   // single value wrappable/findable/the render block all key off, so they
@@ -293,6 +337,11 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   // Soft-wrap toggle (persisted, global) — applies to the code views only
   // (DiffView, RawFile), regardless of which mode name currently hosts them.
   const wrapLines = useSettingsStore((s) => s.settings.wrapLines);
+  // Rendered-markdown diff-highlighting toggle (persisted, global) — gates
+  // whether RenderedMarkdown gets the diff inputs it needs to decorate
+  // changed content at all. See the `renderedDiffHighlighting` doc comment
+  // (src/shared/settings.ts) and docs/design/ui-rendered-markdown-diff.md.
+  const renderedDiffHighlighting = useSettingsStore((s) => s.settings.renderedDiffHighlighting);
   const setSettings = useSettingsStore((s) => s.set);
   // Persist an explicit mode change as the new global "last picked" value —
   // ONLY here, on a genuine user click via ModeSwitcher. This must never be
@@ -343,29 +392,40 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
       <PanelHeader
         title={path}
         actions={
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              {stale && <StatusDot tone="warn" title="Changed on disk — click Refresh to reload" />}
+              <IconButton
+                label={stale ? 'File changed on disk — click to refresh' : 'Refresh from disk'}
+                size="sm"
+                onClick={refresh}
+              >
+                ⟳
+              </IconButton>
+            </div>
+            {view === 'rendered-markdown' && (
+              <HeaderCheckbox
+                checked={renderedDiffHighlighting}
+                onChange={(checked) => void setSettings({ renderedDiffHighlighting: checked })}
+                label="Diff"
+                title={
+                  renderedDiffHighlighting
+                    ? 'Highlighting changes — uncheck to hide diff highlighting'
+                    : 'Diff highlighting hidden — check to highlight changes'
+                }
+              />
+            )}
             {wrappable && (
-              <button
-                type="button"
-                aria-pressed={wrapLines}
+              <HeaderCheckbox
+                checked={wrapLines}
+                onChange={(checked) => void setSettings({ wrapLines: checked })}
+                label="Wrap"
                 title={
                   wrapLines
-                    ? 'Wrapping long lines — click to scroll instead'
-                    : 'Scrolling long lines — click to wrap'
+                    ? 'Wrapping long lines — uncheck to scroll instead'
+                    : 'Scrolling long lines — check to wrap'
                 }
-                onClick={() => void setSettings({ wrapLines: !wrapLines })}
-                style={{
-                  fontSize: 12,
-                  padding: '2px 8px',
-                  borderRadius: 4,
-                  border: '1px solid var(--border)',
-                  background: wrapLines ? 'var(--accent)' : 'var(--bg-panel)',
-                  color: wrapLines ? 'white' : 'var(--fg)',
-                  cursor: 'pointer',
-                }}
-              >
-                Wrap
-              </button>
+              />
             )}
             <ModeSwitcher available={available} active={effectiveMode} onChange={handleModeChange} />
           </div>
@@ -417,17 +477,31 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
               ) : (
                 <RenderedMarkdown
                   source={source.text}
-                  changedLineSet={changedLineSet}
+                  // Withholding BOTH inputs when the toggle is off reuses
+                  // RenderedMarkdown's own existing "nothing to classify
+                  // against" degrade path (see markdown.tsx's `oldSource` doc
+                  // comment) — no separate on/off branch needed there.
+                  changedLineSet={renderedDiffHighlighting ? changedLineSet : undefined}
                   linkContext={{ projectId: activeId, base: linkBase }}
                   filePath={path}
-                  oldSource={diff.kind === 'ready' ? diff.oldContent : null}
+                  oldSource={renderedDiffHighlighting && diff.kind === 'ready' ? diff.oldContent : null}
                 />
               ))}
 
-            {view === 'html-preview' && <HtmlPreview worktreePath={worktreePath} filePath={path} />}
+            {view === 'html-preview' && (
+              <HtmlPreview key={refreshToken} worktreePath={worktreePath} filePath={path} />
+            )}
 
             {view === 'raw-file' && (
               <RawFile
+                // RawFile owns its own `readFile` call — a manual refresh
+                // must force a real re-read, so it is key-remounted on
+                // `refreshToken` (see the `refresh()`/`refreshToken` doc
+                // comment above). DiffView/RenderedMarkdown need no such key:
+                // their data is ContentViewer's OWN `diff`/`source` state,
+                // which already refetches via `refreshToken` in those
+                // effects' deps.
+                key={refreshToken}
                 worktreePath={worktreePath}
                 filePath={path}
                 wrap={wrapLines}
@@ -447,6 +521,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
 
             {view === 'folding-view' && (
               <FoldingView
+                key={refreshToken}
                 worktreePath={worktreePath}
                 filePath={path}
                 // Reachable only via json/yaml's Rendered cell
@@ -469,6 +544,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
 
             {view === 'image-compare' && (
               <ImageCompare
+                key={refreshToken}
                 worktreePath={worktreePath}
                 baseline={baseline ?? 'HEAD'}
                 filePath={path}
@@ -476,11 +552,46 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
               />
             )}
 
-            {view === 'image-view' && <ImageView worktreePath={worktreePath} filePath={path} />}
+            {view === 'image-view' && (
+              <ImageView key={refreshToken} worktreePath={worktreePath} filePath={path} />
+            )}
           </div>
         </div>
       </PanelBody>
     </Panel>
+  );
+}
+
+/** Panel-header toggle for a persisted boolean setting (Wrap, Diff, …) — a
+ *  native checkbox + label rather than a colored button, matching the
+ *  Preferences dialog's own `<input type="checkbox">` convention. */
+function HeaderCheckbox({
+  checked,
+  onChange,
+  label,
+  title,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+  title: string;
+}): JSX.Element {
+  return (
+    <label
+      title={title}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        fontSize: 12,
+        color: 'var(--fg)',
+        cursor: 'pointer',
+        userSelect: 'none',
+      }}
+    >
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      {label}
+    </label>
   );
 }
 

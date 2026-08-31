@@ -16,7 +16,17 @@ const { getFileDiff, getDiffBundle, readFile } = vi.hoisted(() => ({
 
 vi.mock('../providerClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../providerClient')>();
-  return { ...actual, agentCockpit: { provider: { getFileDiff, getDiffBundle, readFile } } };
+  return {
+    ...actual,
+    agentCockpit: {
+      provider: { getFileDiff, getDiffBundle, readFile },
+      // The watch hub (src/renderer/watch/hub.ts) reads `agentCockpit.events.
+      // onWatch` directly — ContentViewer's manual-refresh staleness
+      // subscription (local_repo_explorer-r97u) needs this to exist even
+      // though this suite never dispatches a synthetic watch event.
+      events: { onWatch: vi.fn().mockReturnValue(() => {}) },
+    },
+  };
 });
 
 (globalThis as unknown as { window: Window }).window ??= globalThis as unknown as Window;

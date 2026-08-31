@@ -483,6 +483,15 @@ diagrams).
   provider calls, only new consumption of data already available at that
   layer (word-level diffing needs the old item's source text, which
   `oldContent` already supplies).
+- **User on/off toggle:** `AppSettings.renderedDiffHighlighting`
+  (`src/shared/settings.ts`, persisted, global, default `true`) gates the
+  whole feature from `ContentViewer.tsx`: when off, `RenderedMarkdown` is
+  given `changedLineSet={undefined}`/`oldSource={null}` instead of the real
+  values, which routes through this record's own existing "nothing to
+  classify against" degrade (every per-item memo already early-returns
+  `null` on `!changedLineSet`) rather than a second code path inside
+  `markdown.tsx`. Surfaced as a checkbox next to Wrap in the Content panel
+  header, shown only for the rendered-markdown view.
 
 **Known upstream limitations affecting these inputs (verified during
 integration testing against the real built app; both pre-existing, both

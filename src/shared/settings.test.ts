@@ -139,6 +139,19 @@ describe('normalizeSettings — wrapLines', () => {
   });
 });
 
+describe('normalizeSettings — renderedDiffHighlighting', () => {
+  it('defaults to true (unlike the other opt-in booleans, so upgrading preserves always-on diff highlighting)', () => {
+    expect(normalizeSettings({}).renderedDiffHighlighting).toBe(true);
+    expect(DEFAULT_SETTINGS.renderedDiffHighlighting).toBe(true);
+  });
+  it('is false only for an exact boolean false', () => {
+    expect(normalizeSettings({ renderedDiffHighlighting: false }).renderedDiffHighlighting).toBe(false);
+    expect(
+      normalizeSettings({ renderedDiffHighlighting: 'off' as unknown as boolean }).renderedDiffHighlighting,
+    ).toBe(true);
+  });
+});
+
 describe('normalizeSettings — sessionIdleTimeoutMin bounds', () => {
   it('defaults to 20 when absent', () => {
     expect(normalizeSettings({}).sessionIdleTimeoutMin).toBe(20);

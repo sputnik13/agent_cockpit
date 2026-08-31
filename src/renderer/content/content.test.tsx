@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, cleanup, act } from '@testing-library/react';
 import { afterEach } from 'vitest';
 import type { ContentSelection } from './selectionStore';
 import { useContentSelection } from './selectionStore';
@@ -10,14 +10,48 @@ import type { NoteRecord, ReviewTargetKind } from '@shared/ipc/channels';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
 import { DEFAULT_SETTINGS, structuredFoldReadMaxBytes } from '@shared/settings';
 
-const { getFileDiff, getDiffBundle, readFile, readFileBytes, notesList, notesCreate } = vi.hoisted(() => ({
-  getFileDiff: vi.fn(),
-  getDiffBundle: vi.fn(),
-  readFile: vi.fn(),
-  readFileBytes: vi.fn(),
-  notesList: vi.fn(),
-  notesCreate: vi.fn(),
-}));
+// `watchHandlers`/`onWatch` fake the preload bridge's `events.onWatch` (the
+// hub's own subscription target — src/renderer/watch/hub.ts), mirroring
+// foldingView.test.tsx's identical `watchHandlers` capture pattern for the
+// same hub — ContentViewer's own manual-refresh staleness detection
+// (local_repo_explorer-r97u) subscribes to it directly.
+const { getFileDiff, getDiffBundle, readFile, readFileBytes, notesList, notesCreate, watchHandlers, onWatch } =
+  vi.hoisted(() => {
+    const watchHandlers: ((e: {
+      projectId?: string;
+      worktreePath?: string;
+      event?: { paths?: string[]; at?: string };
+    }) => void)[] = [];
+    const onWatch = (
+      h: (e: { projectId?: string; worktreePath?: string; event?: { paths?: string[]; at?: string } }) => void,
+    ) => {
+      watchHandlers.push(h);
+      return () => {
+        const i = watchHandlers.indexOf(h);
+        if (i >= 0) watchHandlers.splice(i, 1);
+      };
+    };
+    return {
+      getFileDiff: vi.fn(),
+      getDiffBundle: vi.fn(),
+      readFile: vi.fn(),
+      readFileBytes: vi.fn(),
+      notesList: vi.fn(),
+      notesCreate: vi.fn(),
+      watchHandlers,
+      onWatch,
+    };
+  });
+
+/** Dispatches a synthetic `working-tree` watch event to every currently
+ *  subscribed handler. `paths` are repo-relative POSIX (or, when
+ *  `worktreePath` is set, relative to THAT worktree) — matching what the
+ *  real hub delivers. See foldingView.test.tsx's identical helper. */
+function dispatchWatch(paths: string[], projectId = 'p1', worktreePath?: string): void {
+  for (const h of watchHandlers) {
+    h({ projectId, worktreePath, event: { paths, at: new Date().toISOString() } });
+  }
+}
 
 // `cockpit` resolves `window.api` at module load, so mock the provider client
 // to expose our stub regardless of evaluation order. The retained child
@@ -26,6 +60,10 @@ const { getFileDiff, getDiffBundle, readFile, readFileBytes, notesList, notesCre
 vi.mock('../providerClient', () => ({
   agentCockpit: {
     provider: { getFileDiff, getDiffBundle, readFile, readFileBytes },
+    // The hub (src/renderer/watch/hub.ts) reads `agentCockpit.events.onWatch`
+    // directly — see its module doc comment — so this must be mocked here for
+    // ContentViewer's watch subscription to have anything to attach to.
+    events: { onWatch },
     // RawFile/notes load through the notes store; list/create are hoisted so
     // individual tests can drive them (e.g. simulate a persisted line note).
     notes: {
@@ -137,6 +175,80 @@ describe('ContentViewer', () => {
     expect(screen.getByText('No file selected')).toBeInTheDocument();
   });
 
+  describe('manual refresh + staleness indicator (local_repo_explorer-r97u)', () => {
+    it('shows no stale indicator until a watch event matches this exact (worktreePath, path); an unrelated path or a different worktree never marks it stale', async () => {
+      render(<ContentViewer selection={sel('src/file.ts')} />);
+      await screen.findByText('const b = 2;', { exact: false });
+
+      expect(screen.getByRole('button', { name: 'Refresh from disk' })).toBeInTheDocument();
+      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+
+      // Unrelated path in the SAME worktree: no staleness.
+      act(() => dispatchWatch(['other/file.ts'], 'p1', '/wt'));
+      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+
+      // The SAME path but a DIFFERENT worktree: no staleness (a match must be
+      // exact on both path AND worktree, never path alone).
+      act(() => dispatchWatch(['src/file.ts'], 'p1', '/other-wt'));
+      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+
+      // The exact displayed (worktreePath, path): staleness fires.
+      act(() => dispatchWatch(['src/file.ts'], 'p1', '/wt'));
+      expect(screen.getByTitle('Changed on disk — click Refresh to reload')).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'File changed on disk — click to refresh' }),
+      ).toBeInTheDocument();
+    });
+
+    it('an untagged (root-relative) watch event matches a selection whose worktreePath is empty, not one scoped to a worktree', async () => {
+      render(<ContentViewer selection={sel('src/file.ts', { worktreePath: '' })} />);
+      await screen.findByText('const b = 2;', { exact: false });
+
+      // A worktree-tagged event never matches a root selection.
+      act(() => dispatchWatch(['src/file.ts'], 'p1', '/wt'));
+      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+
+      // An untagged (worktreePath undefined) event matches it.
+      act(() => dispatchWatch(['src/file.ts']));
+      expect(screen.getByTitle('Changed on disk — click Refresh to reload')).toBeInTheDocument();
+    });
+
+    it('clicking Refresh re-fetches the diff bundle and clears the stale indicator', async () => {
+      render(<ContentViewer selection={sel('src/file.ts')} />);
+      await screen.findByText('const b = 2;', { exact: false });
+      expect(getDiffBundle).toHaveBeenCalledTimes(1);
+
+      act(() => dispatchWatch(['src/file.ts'], 'p1', '/wt'));
+      const staleRefreshBtn = screen.getByRole('button', { name: 'File changed on disk — click to refresh' });
+      fireEvent.click(staleRefreshBtn);
+
+      await waitFor(() => expect(getDiffBundle).toHaveBeenCalledTimes(2));
+      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Refresh from disk' })).toBeInTheDocument();
+    });
+
+    it('clicking Refresh remounts a self-fetching child view (RawFile) to force a real re-read from disk', async () => {
+      render(<ContentViewer selection={sel('src/file.ts', { kind: 'file' })} />);
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh from disk' }));
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(2));
+    });
+
+    it('an external-file selection (no git tree membership) offers Refresh but never subscribes to a watch match, and never reports stale', async () => {
+      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      render(
+        <ContentViewer selection={sel('/outside/project/archive.pdf', { kind: 'external-file' })} />,
+      );
+      await screen.findByText('Binary file (2.0 KiB).');
+
+      act(() => dispatchWatch(['/outside/project/archive.pdf'], 'p1', '/wt'));
+      act(() => dispatchWatch(['/outside/project/archive.pdf']));
+      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Refresh from disk' })).toBeInTheDocument();
+    });
+  });
+
   it('defaults to rendered mode for a .md change', async () => {
     render(<ContentViewer selection={sel('docs/readme.md')} />);
     // Rendered mode reads the working-tree source for markdown, scoped to the
@@ -147,6 +259,44 @@ describe('ContentViewer', () => {
     const rendered = screen.getByRole('tab', { name: 'Rendered' });
     expect(rendered).toHaveAttribute('aria-selected', 'true');
     await screen.findByText('Title');
+  });
+
+  it('the Diff checkbox in the Content panel header gates rendered-markdown diff highlighting (on by default, persisted, global)', async () => {
+    const patch = [
+      '--- a/docs/readme.md',
+      '+++ b/docs/readme.md',
+      '@@ -1,3 +1,3 @@',
+      '-# Old Title',
+      '+# Title',
+      ' ',
+      ' body',
+      '',
+    ].join('\n');
+    getDiffBundle.mockResolvedValue({ patch, oldContent: null, newContent: null });
+    render(<ContentViewer selection={sel('docs/readme.md')} />);
+
+    // Diff highlighting is on by default: the changed heading gets the
+    // whole-block "changed" callout (markdown.tsx's ChangedTag) — same
+    // fixture shape as markdown.test.tsx's "flags changed blocks with a
+    // callout" (changedLineSet only, no oldSource).
+    const diffCheckbox = screen.getByRole('checkbox', { name: 'Diff' });
+    expect(diffCheckbox).toBeChecked();
+    await screen.findByText('changed');
+    // The Wrap checkbox is not offered for the rendered-markdown view.
+    expect(screen.queryByRole('checkbox', { name: 'Wrap' })).not.toBeInTheDocument();
+
+    // Unchecking it hides the callout and persists the setting.
+    fireEvent.click(diffCheckbox);
+    await waitFor(() =>
+      expect(useSettingsStore.getState().settings.renderedDiffHighlighting).toBe(false),
+    );
+    expect(screen.queryByText('changed')).not.toBeInTheDocument();
+    expect(diffCheckbox).not.toBeChecked();
+
+    // Checking it back on restores the callout.
+    fireEvent.click(diffCheckbox);
+    await screen.findByText('changed');
+    expect(diffCheckbox).toBeChecked();
   });
 
   it('defaults to diff mode for a .ts change', async () => {
@@ -475,7 +625,7 @@ describe('ContentViewer', () => {
       assertGutterContract(false);
 
       // Toggle Wrap on (global setting) while Rendered — contract holds.
-      fireEvent.click(screen.getByRole('button', { name: 'Wrap' }));
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Wrap' }));
       assertGutterContract(true);
 
       // Back to Raw with Wrap still on — contract holds.
@@ -557,7 +707,7 @@ describe('ContentViewer', () => {
       await waitFor(() => expect(document.body.textContent).toContain(content));
       // Wrap remains offered for json's Raw view (raw-file is, and always
       // was, in `wrappable`).
-      expect(screen.getByRole('button', { name: 'Wrap' })).toBeInTheDocument();
+      expect(screen.getByRole('checkbox', { name: 'Wrap' })).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
       await waitFor(() => expect(screen.getByTestId('folding-view')).toBeInTheDocument());
@@ -572,7 +722,7 @@ describe('ContentViewer', () => {
       expect(screen.getByTestId('folding-view').textContent).toContain(content);
       // Wrap also remains offered for json's (new) Rendered view — 'folding-view'
       // was added to `wrappable` alongside 'raw-file'.
-      expect(screen.getByRole('button', { name: 'Wrap' })).toBeInTheDocument();
+      expect(screen.getByRole('checkbox', { name: 'Wrap' })).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
       await waitFor(() => expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument());

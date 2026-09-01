@@ -88,12 +88,16 @@ describe('ExplorerPanel root browsing', () => {
 
     await waitFor(() => expect(listDir).toHaveBeenCalledWith('', '/repo/agent_cockpit'));
     fireEvent.click(await screen.findByText('README.md'));
+    // No `baseline` here: a plain Explorer open is not a diff-target
+    // selection, and forcing a `gitRef: 'HEAD'` read onto RawFile falsely
+    // reports a file that only exists in the working tree (never committed)
+    // as not found. See ExplorerPanel.tsx's fix comment.
     expect(useContentSelection.getState().selectionFor(PROJECT)).toMatchObject({
       kind: 'file',
       path: 'README.md',
       worktreePath: '/repo/agent_cockpit',
-      baseline: 'HEAD',
     });
+    expect(useContentSelection.getState().selectionFor(PROJECT)?.baseline).toBeUndefined();
   });
 
   it('browsing root lists "/" WITHOUT changing the shared worktree (Changes isolation)', async () => {

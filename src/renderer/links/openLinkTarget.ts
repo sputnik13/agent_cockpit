@@ -64,10 +64,19 @@ export async function openLinkTarget(input: string, ctx: LinkContext): Promise<v
   }
 
   if (resolved.insideProject && resolved.relPath) {
+    // No `baseline` here: this is a plain file open, not a diff-target
+    // selection, and there's no UI to pick a different ref for it. Leaving
+    // it unset means Raw/Rendered show the file's actual working-tree bytes
+    // (never a git-ref read) — Diff mode still compares against HEAD by
+    // default via `getDiffBundle`'s own `baseline || 'HEAD'` fallback.
+    // Hardcoding 'HEAD' here used to force RawFile into a `gitRef: 'HEAD'`
+    // read for EVERY link-opened file, including ones that only exist in
+    // the working tree — `git cat-file blob HEAD:<path>` then fails with
+    // "exists on disk, but not in 'HEAD'" and the file falsely renders as
+    // not found instead of showing its real content.
     useContentSelection.getState().select(projectId, {
       path: resolved.relPath,
       worktreePath: '',
-      baseline: 'HEAD',
       kind: 'file',
     });
     useExplorerStore.getState().reveal(projectId, resolved.relPath);

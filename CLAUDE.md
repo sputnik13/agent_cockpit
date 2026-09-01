@@ -1427,6 +1427,51 @@ local and remote. The primary worktree (or none) must read from the project root
 exactly as before. Covered by the linked-worktree case in `local.test.ts`, the
 `remote-helper` `*WorktreePath` Go tests, and `worktreeStore.test.ts`.
 
+## A plain file-open selection must never carry a `baseline` — it forces a git-ref read that falsely reports untracked files as missing
+
+**Invariant:** A `ContentSelection` with `kind: 'file'` (Explorer double-click,
+or an in-project link opened via `openLinkTarget.ts`) MUST leave `baseline`
+unset. Only a `kind: 'change'` selection (from the Changes panel, whose diff
+TARGET the user can actually pick) legitimately carries one.
+
+**Why this matters:** `baseline`, whenever set, flows straight into
+`ContentViewer.tsx`'s `raw-file` branch as `RawFile`'s `gitRef` prop
+(`{...(baseline !== undefined ? { gitRef: baseline } : {})}`), and `RawFile`
+threads it into `provider.readFile({ ref: gitRef, ... })` regardless of
+whether the file was ever committed. For a file that exists ONLY in the
+working tree (untracked/new — exactly the case a freshly-created or
+just-linked file is in), that becomes a `git cat-file blob HEAD:<path>`
+read, which fails with git's own `fatal: path '<path>' exists on disk, but
+not in 'HEAD'` (exit 128) for a path absent at that ref. `getFile`'s ref
+branch (`electron/main/git/files.ts`) already `.catch(() => null)`s this
+subprocess failure, so the FAILURE MODE IS NOT A CRASH — it's a false
+`content: null` → RawFile's Raw/Rendered-as-raw view renders "File not
+found at ref.", even though the file is sitting right there on disk. Both
+`ExplorerPanel.tsx` and `openLinkTarget.ts` used to hardcode
+`baseline: 'HEAD'` unconditionally for every `kind: 'file'` selection —
+there is no diff-target UI for a plain file open, so this served no purpose
+and only ever introduced this failure mode.
+
+**Diff mode is unaffected by removing it.** `ContentViewer.tsx`'s diff-bundle
+effect calls `getDiffBundle(worktreePath, path, baseline)`, and
+`getDiffBundle` (`electron/main/providers/local/index.ts`) ALREADY defaults
+internally to `ref: baseline || 'HEAD'` for its own old-content read when no
+explicit baseline is supplied — so Diff mode still compares against HEAD by
+default with `baseline` left unset. Both of `getDiffBundle`'s own reads
+(`localReadFile`'s ref branch, and `localFileDiff`/`git diff <ref> --
+<path>`) already degrade gracefully for a path absent at that ref (verified
+live: `git diff HEAD -- <untracked-path>` exits 0 with empty output, never
+an error) — only `RawFile`'s OWN unconditional `gitRef` threading was the
+live bug.
+
+**Regression check:** open a project with an untracked (never-committed)
+markdown file that a tracked file links to. Click the link (or open the
+untracked file directly from the Explorer) and switch to Raw — it must show
+the file's real content, never "File not found at ref.". `explorer.test.tsx`
+asserts the resulting selection carries no `baseline` at all (not merely a
+truthy check) — reverting either fix site's removal reproduces the failure
+live-verified via a throwaway Playwright probe against the real built app.
+
 ## Download/export bytes go over SFTP/fs streams — `provider.readFile` is text-only by construction
 
 **Invariant:** `provider.readFile` is the TEXT PREVIEW/DIFF channel, not a

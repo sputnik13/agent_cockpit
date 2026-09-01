@@ -345,10 +345,17 @@ function FileNode({
             // External read: absolute path, empty base, no baseline (no git diff).
             select(activeId, { path: targetPath, worktreePath: '', kind: 'external-file' });
           } else {
+            // No `baseline` here — see openLinkTarget.ts's identical fix
+            // (local_repo_explorer, "raw content view fails for a file
+            // absent at HEAD"): a plain Explorer file open is not a
+            // diff-target selection, and forcing a `gitRef: 'HEAD'` read
+            // onto RawFile falsely reports an untracked/new file as not
+            // found instead of showing its real working-tree content. Diff
+            // mode still compares against HEAD by default via
+            // getDiffBundle's own fallback.
             select(activeId, {
               path: entry.path,
               worktreePath: worktreePath ?? '',
-              baseline: 'HEAD',
               kind: 'file',
             });
           }

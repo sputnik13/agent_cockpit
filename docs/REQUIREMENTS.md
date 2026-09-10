@@ -165,8 +165,15 @@ agent-cockpit -CC new-session -A -s agent-cockpit-<projectId>`) is the
   both Solarized themes), syntax-highlighted fenced code (`rehype-highlight`,
   base16 Solarized), and a safe link/image transform (absolute http(s)/mailto
   anchors open via the platform shell with `target="_blank"` + `rel="noopener
-noreferrer"`; relative/fragment/`javascript:` anchors stay inert; only
+noreferrer"`; relative links route through the local-file resolver, while
+  empty and `javascript:` anchors stay inert. A fragment link safely scrolls
+  and focuses its matching target within the current rendered preview only;
+  authored target IDs are preserved and generated heading IDs never collide;
+  only
   http(s)/`data:image/` image sources render) are part of this requirement.
+  The Content-panel header also provides local 50–200% zoom controls in 10%
+  steps, including a visible 100% reset; they never alter application or
+  terminal scale.
   Bare/inline HTML written directly in Markdown prose also renders (a fenced
   `` ```html `` block still renders as a plain code listing, matching GitHub):
   it is sanitized against `hast-util-sanitize`'s `defaultSchema` (published as

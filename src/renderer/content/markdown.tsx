@@ -263,6 +263,7 @@ const sanitize = (html: string): string =>
       'data-mermaid-id',
       'data-graphviz-id',
       'data-external',
+      'data-fragment',
       'data-inert',
       'data-localpath',
       'data-image-blocked',
@@ -299,7 +300,10 @@ interface TrustedAnnotation {
  *  placeholder or anchor target, vs. anything an untrusted document's author
  *  could write) can never collide on the same key. See
  *  {@link applyTrustedAnnotations}. */
-function positionKey(position: { start: { offset?: number }; end: { offset?: number } }): string | null {
+function positionKey(position: {
+  start: { offset?: number };
+  end: { offset?: number };
+}): string | null {
   const { start, end } = position;
   if (start.offset === undefined || end.offset === undefined) return null;
   return `${start.offset}-${end.offset}`;
@@ -496,8 +500,8 @@ async function renderDoc(source: string): Promise<PreparedDoc> {
   // rehypeSanitize (GitHub-style schema, see inlineHtmlSchema) MUST run
   // immediately after, before rehypeHighlight/rehypeSafeLinksImages — those
   // two are trusted, app-controlled passes that ADD attributes
-  // (hljs-* classes; target/rel/data-external/data-inert/data-localpath/
-  // data-image-blocked) to already-sanitized content. Reversing this order
+  // (hljs-* classes; target/rel/data-external/data-fragment/data-inert/
+  // data-localpath/data-image-blocked) to already-sanitized content. Reversing this order
   // would either strip the app's own hardening attributes or require
   // widening the schema to accommodate them for no reason. applyTrustedAnnotations
   // runs immediately after rehypeSanitize for the same reason, from the other
@@ -526,12 +530,14 @@ async function renderDoc(source: string): Promise<PreparedDoc> {
         .use(rehypeSanitize, inlineHtmlSchema)
         .use(applyTrustedAnnotations, annotations)
         .use(rehypeHighlight, { detect: false, ignoreMissing: true })
+        .use(rehypeHeadingIds)
         .use(rehypeSafeLinksImages)
         .use(rehypeStringify)
     : unified()
         .use(remarkRehype, { allowDangerousHtml: true })
         .use(applyTrustedAnnotations, annotations)
         .use(rehypeHighlight, { detect: false, ignoreMissing: true })
+        .use(rehypeHeadingIds)
         .use(rehypeSafeLinksImages)
         .use(rehypeStringify);
   const hast = await processor.run(tree);
@@ -539,12 +545,60 @@ async function renderDoc(source: string): Promise<PreparedDoc> {
   return { html: sanitize(html), mermaidById, graphvizById };
 }
 
+// rehype transform: give Markdown headings deterministic, in-document anchor
+// ids. Existing IDs (including sanitized inline HTML) remain authoritative, so
+// authored fragment targets continue to work. Generated IDs reserve every ID
+// already in the document and receive a stable numeric suffix on collision.
+function rehypeHeadingIds() {
+  return (tree: HastRoot): void => {
+    const reservedIds = new Set<string>();
+
+    // Reserve before generating so an existing element that follows a heading
+    // cannot be shadowed by that heading's generated slug.
+    visit(tree, 'element', (node: HastElement) => {
+      const id = node.properties?.id;
+      if (typeof id === 'string' && id !== '') reservedIds.add(id);
+    });
+
+    visit(tree, 'element', (node: HastElement) => {
+      if (!/^h[1-6]$/.test(node.tagName)) return;
+      const existingId = node.properties?.id;
+      if (typeof existingId === 'string' && existingId !== '') {
+        node.properties = { ...(node.properties ?? {}), tabIndex: -1 };
+        return;
+      }
+      let text = '';
+      visit(node, 'text', (textNode) => {
+        text += textNode.value;
+      });
+      const base =
+        text
+          .trim()
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}\s-]/gu, '')
+          .replace(/\s+/g, '-') || 'section';
+      let id = base;
+      let suffix = 1;
+      while (reservedIds.has(id)) {
+        id = `${base}-${suffix}`;
+        suffix += 1;
+      }
+      reservedIds.add(id);
+      node.properties = {
+        ...(node.properties ?? {}),
+        id,
+        tabIndex: -1,
+      };
+    });
+  };
+}
+
 // rehype transform: harden anchors + images.
 //  - Absolute http(s)/mailto anchors get target=_blank, rel=noopener noreferrer,
 //    and a data-external flag the renderer click handler reads.
-//  - Anchors whose href is relative or a fragment get data-inert so the
-//    renderer suppresses default navigation (Electron blocks it anyway via
-//    will-navigate, but the click would otherwise feel broken).
+//  - In-document fragments get data-fragment so the renderer can resolve them
+//    only inside this Markdown preview. Relative paths remain distinct links
+//    for the shared local-file router; empty/unsafe anchors stay inert.
 //  - Images with non-http(s)/data: src are dropped to a plain alt text span so
 //    sanitizer can't fight a `javascript:` slip-through later.
 function rehypeSafeLinksImages() {
@@ -564,8 +618,10 @@ function rehypeSafeLinksImages() {
             rel: 'noopener noreferrer',
             'data-external': 'true',
           };
-        } else if (href === '' || href.startsWith('#') || lower.startsWith('javascript:')) {
-          // Empty, in-page fragment, or javascript: → inert (no navigation).
+        } else if (href.startsWith('#')) {
+          node.properties = { ...(node.properties ?? {}), 'data-fragment': 'true' };
+        } else if (href === '' || lower.startsWith('javascript:')) {
+          // Empty or javascript: → inert (no navigation).
           node.properties = { ...(node.properties ?? {}), 'data-inert': 'true' };
           if (lower.startsWith('javascript:'))
             delete (node.properties as Record<string, unknown>).href;
@@ -658,6 +714,7 @@ function codeBlockEndLine(pre: HTMLElement): number {
 export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
   const [doc, setDoc] = useState<PreparedDoc | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
+  const markdownRef = useRef<HTMLDivElement>(null);
 
   // Line notes (only when a filePath is supplied — i.e. the Content panel, not
   // TaskDetail/compact uses). A note anchors to a block's source start line;
@@ -1222,14 +1279,36 @@ export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
 
   // Route anchor clicks: external links via window.open (Electron main routes
   // window.open through shell.openExternal — see electron/main/window.ts);
-  // inert/relative links are suppressed so the renderer doesn't attempt
-  // in-window navigation (which Electron blocks via will-navigate anyway).
+  // fragment links resolve only inside this preview; inert links are suppressed;
+  // and local paths route through the shared, existence-validating link router.
   const linkContext = props.linkContext;
   const handleRootClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target as HTMLElement | null;
       const anchor = target?.closest?.('a') as HTMLAnchorElement | null;
       if (!anchor) return;
+      if (anchor.hasAttribute('data-fragment')) {
+        e.preventDefault();
+        const href = anchor.getAttribute('href') ?? '';
+        let fragment: string;
+        try {
+          fragment = decodeURIComponent(href.slice(1));
+        } catch {
+          return;
+        }
+        const destination = Array.from(
+          markdownRef.current?.querySelectorAll<HTMLElement>('[id]') ?? [],
+        ).find((element) => element.id === fragment);
+        if (!destination) return;
+        destination.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        // Headings receive tabIndex=-1 during Markdown rendering, but authored
+        // fragment targets can be any sanitized element. Make only otherwise
+        // unfocusable targets programmatically focusable so every valid target
+        // receives the same keyboard focus feedback without changing tab order.
+        if (destination.tabIndex < 0) destination.tabIndex = -1;
+        destination.focus({ preventScroll: true });
+        return;
+      }
       if (anchor.hasAttribute('data-inert')) {
         e.preventDefault();
         return;
@@ -1255,6 +1334,7 @@ export function RenderedMarkdown(props: RenderMarkdownProps): JSX.Element {
   }
   return (
     <div
+      ref={markdownRef}
       className="agent-cockpit-markdown"
       onClick={handleRootClick}
       style={{

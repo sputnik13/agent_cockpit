@@ -396,6 +396,94 @@ async function runMatrix(win, record) {
       `h1 count=${headingCount}, literal "# Demo Notes" leaked=${rawSyntaxLeaked}`,
     );
 
+    const zoomBody = scopeRendered.locator('[data-content-zoom]');
+    const heading = scopeRendered.locator('.agent-cockpit-markdown h1');
+    const decreaseZoom = scopeRendered.getByRole('button', { name: 'Decrease content zoom' });
+    const increaseZoom = scopeRendered.getByRole('button', { name: 'Increase content zoom' });
+    const resetZoom = scopeRendered.getByRole('button', { name: 'Reset content zoom to 100%' });
+    const bodyBefore = await heading.boundingBox();
+    const headerBefore = await decreaseZoom.boundingBox();
+    await increaseZoom.click();
+    await sleep(300);
+    const bodyAfter = await heading.boundingBox();
+    const headerAfter = await decreaseZoom.boundingBox();
+    const zoomed =
+      (await zoomBody.getAttribute('data-content-zoom')) === '110' &&
+      bodyBefore != null &&
+      bodyAfter != null &&
+      headerBefore != null &&
+      headerAfter != null &&
+      bodyAfter.height > bodyBefore.height &&
+      Math.abs(headerAfter.height - headerBefore.height) < 0.5;
+    await resetZoom.click();
+    await sleep(300);
+    const bodyReset = await heading.boundingBox();
+    const reset =
+      (await zoomBody.getAttribute('data-content-zoom')) === '100' &&
+      bodyBefore != null &&
+      bodyReset != null &&
+      Math.abs(bodyReset.height - bodyBefore.height) < 0.5;
+    await decreaseZoom.click();
+    await sleep(300);
+    const bodyDecreased = await heading.boundingBox();
+    const headerDecreased = await decreaseZoom.boundingBox();
+    const decreased =
+      (await zoomBody.getAttribute('data-content-zoom')) === '90' &&
+      bodyBefore != null &&
+      bodyDecreased != null &&
+      headerBefore != null &&
+      headerDecreased != null &&
+      bodyDecreased.height < bodyBefore.height &&
+      Math.abs(headerDecreased.height - headerBefore.height) < 0.5;
+    await resetZoom.click();
+    record(
+      'markdown: zoom in/out scale the content body, leave the header unchanged, and reset to 100%',
+      zoomed && reset && decreased && (await zoomBody.getAttribute('data-content-zoom')) === '100',
+      `body=${bodyBefore?.height}->${bodyAfter?.height}->${bodyReset?.height}->${bodyDecreased?.height}, header=${headerBefore?.height}->${headerAfter?.height}->${headerDecreased?.height}`,
+    );
+
+    const fragmentLink = scopeRendered.getByRole('link', { name: 'Jump to features' });
+    const fragmentTarget = scopeRendered.locator('.agent-cockpit-markdown #features');
+    await fragmentTarget.evaluate((element) => {
+      let parent = element.parentElement;
+      while (parent) {
+        const style = getComputedStyle(parent);
+        if (/(auto|scroll)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) {
+          parent.scrollTop = 0;
+          return;
+        }
+        parent = parent.parentElement;
+      }
+    });
+    await fragmentLink.click();
+    await sleep(700);
+    const fragmentState = await fragmentTarget.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      let parent = element.parentElement;
+      while (parent) {
+        const style = getComputedStyle(parent);
+        if (/(auto|scroll)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) {
+          const parentRect = parent.getBoundingClientRect();
+          return {
+            focused: document.activeElement === element,
+            scrolled: parent.scrollTop > 0,
+            visible: rect.top >= parentRect.top && rect.bottom <= parentRect.bottom,
+          };
+        }
+        parent = parent.parentElement;
+      }
+      return {
+        focused: document.activeElement === element,
+        scrolled: false,
+        visible: rect.top >= 0 && rect.bottom <= window.innerHeight,
+      };
+    });
+    record(
+      'markdown: fragment links scroll to and focus their in-preview target',
+      fragmentState.focused && fragmentState.scrolled && fragmentState.visible,
+      `focused=${fragmentState.focused}, scrolled=${fragmentState.scrolled}, visible=${fragmentState.visible}`,
+    );
+
     await selectMode(win, 'Raw');
     const scopeRaw = contentPanelRoot(win, F.markdown);
     const rawText = await scopeRaw.getByText('# Demo Notes', { exact: false }).count();
@@ -1274,7 +1362,7 @@ async function main() {
   const userDataDir = mkdtempSync(join(tmpdir(), 'agent-cockpit-verify-content-modes-'));
 
   const app = await electron.launch({
-    args: [MAIN, `--user-data-dir=${userDataDir}`, `--tmux-socket=${TMUX_SOCKET}`],
+    args: [MAIN, '--headless', `--user-data-dir=${userDataDir}`, `--tmux-socket=${TMUX_SOCKET}`],
   });
   const win = await app.firstWindow();
   win.setDefaultTimeout(15000);

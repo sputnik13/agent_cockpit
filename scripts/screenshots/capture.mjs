@@ -48,7 +48,12 @@ async function main() {
 
   console.log('Launching isolated app…');
   const app = await electron.launch({
-    args: [MAIN, `--user-data-dir=${userDataDir}`, `--tmux-socket=${TMUX_SOCKET}`],
+    args: [
+      MAIN,
+      '--headless',
+      `--user-data-dir=${userDataDir}`,
+      `--tmux-socket=${TMUX_SOCKET}`,
+    ],
   });
   const win = await app.firstWindow();
   await win.waitForLoadState('domcontentloaded');

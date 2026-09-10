@@ -179,6 +179,23 @@ body,
   font-size: 0.9em;
   color: var(--color-dim);
 }
+.agent-cockpit-markdown h1,
+.agent-cockpit-markdown h2,
+.agent-cockpit-markdown h3,
+.agent-cockpit-markdown h4,
+.agent-cockpit-markdown h5,
+.agent-cockpit-markdown h6 {
+  scroll-margin-top: 8px;
+}
+.agent-cockpit-markdown h1:focus-visible,
+.agent-cockpit-markdown h2:focus-visible,
+.agent-cockpit-markdown h3:focus-visible,
+.agent-cockpit-markdown h4:focus-visible,
+.agent-cockpit-markdown h5:focus-visible,
+.agent-cockpit-markdown h6:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
 
 .agent-cockpit-markdown p {
   margin: 0.6em 0;

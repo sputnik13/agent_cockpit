@@ -166,7 +166,7 @@ describe('RenderedMarkdown — structure (regression net)', () => {
     }
   });
 
-  it('marks external anchors data-external, local paths data-localpath, fragments inert', async () => {
+  it('marks external anchors data-external, local paths data-localpath, and fragments for scoped navigation', async () => {
     const src = [
       '[ext](https://example.com)',
       '',
@@ -180,10 +180,83 @@ describe('RenderedMarkdown — structure (regression net)', () => {
     expect(ext.getAttribute('target')).toBe('_blank');
     expect(ext.getAttribute('rel')).toBe('noopener noreferrer');
     expect(ext.getAttribute('data-external')).toBe('true');
-    // A relative path is now an actionable local-path link (routed by the link
-    // router), not inert; an in-page fragment stays inert.
+    // A relative path is an actionable local-path link (routed by the link
+    // router); an in-page fragment is handled only inside this preview.
     expect(rel.getAttribute('data-localpath')).toBe('true');
-    expect(frag.getAttribute('data-inert')).toBe('true');
+    expect(frag.getAttribute('data-fragment')).toBe('true');
+  });
+
+  it('navigates an in-document fragment to its generated heading id without routing outside the preview', async () => {
+    const scrollIntoView = vi.fn();
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    try {
+      const { container } = setup(
+        ['[Jump to section](#my-section)', '', '## My Section'].join('\n'),
+      );
+      await waitFor(() => expect(container.querySelector('h2')).not.toBeNull());
+      const heading = container.querySelector('h2')!;
+      expect(heading).toHaveAttribute('id', 'my-section');
+      fireEvent.click(container.querySelector('a')!);
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'smooth' });
+      expect(document.activeElement).toBe(heading);
+    } finally {
+      if (original) Object.defineProperty(Element.prototype, 'scrollIntoView', original);
+      else delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  it('preserves authored ids and reserves every rendered fragment target before generating slugs', async () => {
+    const scrollIntoView = vi.fn();
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    try {
+      const { container } = setup(
+        [
+          '[Jump to explicit target](#custom-target)',
+          '',
+          '[Jump to non-heading target](#my-section)',
+          '',
+          '## My Section',
+          '',
+          '<div id="my-section">Existing non-heading target</div>',
+          '',
+          '<h2 id="custom-target">Custom target</h2>',
+          '',
+          '## Custom Target',
+        ].join('\n'),
+      );
+      await waitFor(() => expect(container.querySelectorAll('h2')).toHaveLength(3));
+
+      const headings = Array.from(container.querySelectorAll('h2'));
+      expect(headings[0]).toHaveAttribute('id', 'my-section-1');
+      expect(headings[1]).toHaveAttribute('id', 'custom-target');
+      expect(headings[2]).toHaveAttribute('id', 'custom-target-1');
+      const nonHeadingTarget = container.querySelector<HTMLDivElement>('div#my-section')!;
+      expect(nonHeadingTarget).not.toBeNull();
+
+      const ids = Array.from(container.querySelectorAll('[id]'), (element) => element.id);
+      expect(new Set(ids).size).toBe(ids.length);
+
+      fireEvent.click(container.querySelector('a[href="#custom-target"]')!);
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'smooth' });
+      expect(document.activeElement).toBe(headings[1]);
+
+      scrollIntoView.mockClear();
+      fireEvent.click(container.querySelector('a[href="#my-section"]')!);
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'smooth' });
+      expect(nonHeadingTarget).toHaveAttribute('tabindex', '-1');
+      expect(document.activeElement).toBe(nonHeadingTarget);
+    } finally {
+      if (original) Object.defineProperty(Element.prototype, 'scrollIntoView', original);
+      else delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
   });
 
   it('blocks unsafe image src (only http(s)/data:image allowed)', async () => {
@@ -1760,7 +1833,8 @@ describe('RenderedMarkdown — fenced code-block intraline diff (local_repo_expl
     return html;
   }
 
-  const jsOldBody = 'const total = items.reduce((sum, item) => sum + item.price, 0);\nreturn total;';
+  const jsOldBody =
+    'const total = items.reduce((sum, item) => sum + item.price, 0);\nreturn total;';
   const jsNewBody = 'const total = items.reduce((sum, item) => sum + item.cost, 0);\nreturn total;';
 
   it('a clean single-token change inside a highlighted-language block splices spans inline, preserving every surrounding hljs class', async () => {
@@ -1891,7 +1965,9 @@ describe('RenderedMarkdown — fenced code-block intraline diff (local_repo_expl
     const before = wrapper.querySelector('.ac-before');
     const after = wrapper.querySelector('.ac-after');
     expect(before?.textContent).toBe(['```js', 'foo();', 'baz();', '```'].join('\n'));
-    expect(after?.textContent).toBe(['```js', 'foo();', 'const n = 1;', 'baz();', '```'].join('\n'));
+    expect(after?.textContent).toBe(
+      ['```js', 'foo();', 'const n = 1;', 'baz();', '```'].join('\n'),
+    );
 
     // Hover quick preview: sibling of <pre> (never nested inside it),
     // hidden from the accessibility tree, showing the same reason.
@@ -2030,7 +2106,9 @@ describe('RenderedMarkdown — table row diff (local_repo_explorer-rendered-md-n
   function rowCellTexts(tr: Element): string[] {
     return Array.from(tr.querySelectorAll(':scope > td, :scope > th')).map((cell) => {
       const clone = cell.cloneNode(true) as HTMLElement;
-      clone.querySelectorAll('.ac-mini-tag, .ac-detail, .ac-hover-tip').forEach((el) => el.remove());
+      clone
+        .querySelectorAll('.ac-mini-tag, .ac-detail, .ac-hover-tip')
+        .forEach((el) => el.remove());
       return clone.textContent?.trim() ?? '';
     });
   }
@@ -2088,7 +2166,10 @@ describe('RenderedMarkdown — table row diff (local_repo_explorer-rendered-md-n
       '| Zoom pane | Cmd+Shift+Z |',
       '',
     ].join('\n');
-    const { container } = setup(newThreeRows, { oldSource: oldTwoRows, changedLineSet: new Set([4]) });
+    const { container } = setup(newThreeRows, {
+      oldSource: oldTwoRows,
+      changedLineSet: new Set([4]),
+    });
     await waitFor(() => expect(container.querySelectorAll('tbody > tr').length).toBe(2));
 
     const rows = Array.from(container.querySelectorAll('tbody > tr'));
@@ -2103,9 +2184,13 @@ describe('RenderedMarkdown — table row diff (local_repo_explorer-rendered-md-n
 
   it('renders a ghost row for a removed body row, positioned between its original neighbors, text-node-only content, right column count, never a note-anchor target', async () => {
     const { container } = setup(
-      ['| Action | Shortcut |', '|---|---|', '| New tab | Cmd+T |', '| Split pane | Cmd+D |', ''].join(
-        '\n',
-      ),
+      [
+        '| Action | Shortcut |',
+        '|---|---|',
+        '| New tab | Cmd+T |',
+        '| Split pane | Cmd+D |',
+        '',
+      ].join('\n'),
       { oldSource: oldSrc, changedLineSet: new Set(), filePath: 'shortcuts.md' },
     );
     await waitFor(() => expect(container.querySelectorAll('tbody > tr').length).toBe(3));
@@ -2151,14 +2236,21 @@ describe('RenderedMarkdown — table row diff (local_repo_explorer-rendered-md-n
     expect(container.querySelector('img')).toBeNull();
     expect(container.querySelector('[onerror]')).toBeNull();
     expect(rowCellTexts(ghost)[1]).toContain('<img src=x onerror=alert(1)>');
-    const textNode = Array.from(ghost.children[1].childNodes).find((n) => n.nodeType === Node.TEXT_NODE);
+    const textNode = Array.from(ghost.children[1].childNodes).find(
+      (n) => n.nodeType === Node.TEXT_NODE,
+    );
     expect(textNode?.textContent).toContain('<img');
   });
 
   it('renders two ghost rows in original relative order for adjacent deletions', async () => {
-    const twoDelOldSrc = ['| A |', '|---|', '| one |', '| two |', '| three |', '| four |', ''].join('\n');
+    const twoDelOldSrc = ['| A |', '|---|', '| one |', '| two |', '| three |', '| four |', ''].join(
+      '\n',
+    );
     const twoDelNewSrc = ['| A |', '|---|', '| one |', '| four |', ''].join('\n');
-    const { container } = setup(twoDelNewSrc, { oldSource: twoDelOldSrc, changedLineSet: new Set() });
+    const { container } = setup(twoDelNewSrc, {
+      oldSource: twoDelOldSrc,
+      changedLineSet: new Set(),
+    });
     await waitFor(() => expect(container.querySelectorAll('tbody > tr').length).toBe(4));
 
     const rows = Array.from(container.querySelectorAll('tbody > tr'));
@@ -2197,9 +2289,16 @@ describe('RenderedMarkdown — table row diff (local_repo_explorer-rendered-md-n
   });
 
   it('keeps zebra striping stable across a ghost-row insertion (presentational restripe classes, no row index/ordinal exposed)', async () => {
-    const zebraOldSrc = ['| A |', '|---|', '| r1 |', '| r2 |', '| r3 |', '| r4 |', '| r5 |', ''].join(
-      '\n',
-    );
+    const zebraOldSrc = [
+      '| A |',
+      '|---|',
+      '| r1 |',
+      '| r2 |',
+      '| r3 |',
+      '| r4 |',
+      '| r5 |',
+      '',
+    ].join('\n');
     // r2 removed — a ghost lands between r1 and r3.
     const zebraNewSrc = ['| A |', '|---|', '| r1 |', '| r3 |', '| r4 |', '| r5 |', ''].join('\n');
 
@@ -2365,13 +2464,22 @@ describe('RenderedMarkdown — table row diff (local_repo_explorer-rendered-md-n
     // replace; "Notes" crosses a **bold** boundary (unclean). All three
     // states coexist in one row, proving the fallback in one cell never
     // disturbs an already-clean sibling cell or an untouched one.
-    const mixedOldSrc = ['| Action | Qty | Notes |', '|---|---|---|', '| item | 3 | **old** thing |', ''].join(
-      '\n',
-    );
-    const mixedNewSrc = ['| Action | Qty | Notes |', '|---|---|---|', '| item | 4 | **new** thing |', ''].join(
-      '\n',
-    );
-    const { container } = setup(mixedNewSrc, { oldSource: mixedOldSrc, changedLineSet: new Set([3]) });
+    const mixedOldSrc = [
+      '| Action | Qty | Notes |',
+      '|---|---|---|',
+      '| item | 3 | **old** thing |',
+      '',
+    ].join('\n');
+    const mixedNewSrc = [
+      '| Action | Qty | Notes |',
+      '|---|---|---|',
+      '| item | 4 | **new** thing |',
+      '',
+    ].join('\n');
+    const { container } = setup(mixedNewSrc, {
+      oldSource: mixedOldSrc,
+      changedLineSet: new Set([3]),
+    });
     await waitFor(() => expect(container.querySelector('table')).not.toBeNull());
 
     const row = container.querySelector('tbody > tr')!;
@@ -2457,7 +2565,10 @@ describe('RenderedMarkdown — table row diff (local_repo_explorer-rendered-md-n
 
     it('falls back to the whole-block treatment when oldSource is absent (undefined or null)', async () => {
       for (const oldSource of [undefined, null] as const) {
-        const { container, unmount } = setup(degNewSrc, { oldSource, changedLineSet: new Set([3]) });
+        const { container, unmount } = setup(degNewSrc, {
+          oldSource,
+          changedLineSet: new Set([3]),
+        });
         await waitFor(() => expect(container.querySelector('table')).not.toBeNull());
         expect(container.querySelector('tr')?.className).not.toMatch(/ac-item-/);
         expect(hasBlockChangedTag(container.querySelector('table')!)).toBe(true);
@@ -2596,7 +2707,7 @@ describe('RenderedMarkdown — blockquote per-child diff (local_repo_explorer-re
   });
 
   describe('margin-reset guardrail (Contract: blockquote > :first-child/:last-child margin resets must still apply to a decorated child)', () => {
-    it('a decorated LAST child needing the fallback marker gets the tail-fallback compensating class; the marker/tip trail it as the blockquote\'s new last children', async () => {
+    it("a decorated LAST child needing the fallback marker gets the tail-fallback compensating class; the marker/tip trail it as the blockquote's new last children", async () => {
       const oldSrc = '> Order the [report](https://example.com/doc) today\n';
       const newSrc = '> Order the [file](https://example.com/doc) today\n';
       const { container } = setup(newSrc, { oldSource: oldSrc, changedLineSet: new Set([1]) });
@@ -2789,12 +2900,10 @@ describe('RenderedMarkdown — blockquote per-child diff (local_repo_explorer-re
       ),
     ).toBe(true);
     expect(container.querySelector('p')!.classList.contains('ac-prose-changed')).toBe(true);
-    expect(
-      container.querySelector('blockquote > p')!.classList.contains('ac-item-edited'),
-    ).toBe(true);
-    expect(
-      container.querySelector('tbody > tr')!.classList.contains('ac-item-edited'),
-    ).toBe(true);
+    expect(container.querySelector('blockquote > p')!.classList.contains('ac-item-edited')).toBe(
+      true,
+    );
+    expect(container.querySelector('tbody > tr')!.classList.contains('ac-item-edited')).toBe(true);
   });
 });
 
@@ -3377,93 +3486,87 @@ describe('RenderedMarkdown — integration verification (local_repo_explorer-ren
       return reason ? { verdict: 'fallback', reason } : { verdict: 'clean' };
     }
 
-    it(
-      'renders every corpus file with a perturbed old side: no crash, no unhandled rejection, no console.error, no unsafe markup — and records the clean/fallback distribution',
-      async () => {
-        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-        const rejections: unknown[] = [];
-        const onRejection = (reason: unknown): void => {
-          rejections.push(reason);
-        };
-        process.on('unhandledRejection', onRejection);
+    it('renders every corpus file with a perturbed old side: no crash, no unhandled rejection, no console.error, no unsafe markup — and records the clean/fallback distribution', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const rejections: unknown[] = [];
+      const onRejection = (reason: unknown): void => {
+        rejections.push(reason);
+      };
+      process.on('unhandledRejection', onRejection);
 
-        const rows: Array<{ file: string; kind: BlockKind; verdict: Verdict; reason?: string }> = [];
+      const rows: Array<{ file: string; kind: BlockKind; verdict: Verdict; reason?: string }> = [];
 
-        try {
-          for (const file of CORPUS_FILES) {
-            const { newSource, oldSource, changedLineSet, perturbed } = buildCorpusFixture(file);
-            // Sanity: this file actually contributed at least one real,
-            // extractor-verified perturbation (zero would mean the corpus
-            // silently stopped exercising this file at all).
-            expect(perturbed.length, `${file} contributed no perturbations`).toBeGreaterThan(0);
+      try {
+        for (const file of CORPUS_FILES) {
+          const { newSource, oldSource, changedLineSet, perturbed } = buildCorpusFixture(file);
+          // Sanity: this file actually contributed at least one real,
+          // extractor-verified perturbation (zero would mean the corpus
+          // silently stopped exercising this file at all).
+          expect(perturbed.length, `${file} contributed no perturbations`).toBeGreaterThan(0);
 
-            const { container, unmount } = render(
-              <RenderedMarkdown
-                source={newSource}
-                oldSource={oldSource}
-                changedLineSet={changedLineSet}
-              />,
-            );
-            // renderDoc runs in a useEffect — wait for real content, not just
-            // the empty shell.
-            await waitFor(() =>
-              expect(container.querySelector('.agent-cockpit-markdown > *')).not.toBeNull(),
-            );
+          const { container, unmount } = render(
+            <RenderedMarkdown
+              source={newSource}
+              oldSource={oldSource}
+              changedLineSet={changedLineSet}
+            />,
+          );
+          // renderDoc runs in a useEffect — wait for real content, not just
+          // the empty shell.
+          await waitFor(() =>
+            expect(container.querySelector('.agent-cockpit-markdown > *')).not.toBeNull(),
+          );
 
-            // Sanitizer invariant — DOMPurify's FORBID_TAGS/FORBID_ATTR
-            // (markdown.tsx's `sanitize`) must hold across real content, not
-            // just the hand-written XSS-shaped fixtures elsewhere in this file.
-            expect(container.innerHTML).not.toMatch(/<script/i);
-            const lowerHtml = container.innerHTML.toLowerCase();
-            for (const attr of ['onerror=', 'onload=', 'onclick=']) {
-              expect(lowerHtml).not.toContain(attr);
-            }
-
-            for (const p of perturbed) {
-              const { verdict, reason } = classifyPerturbation(container, p);
-              rows.push({ file, kind: p.kind, verdict, reason });
-            }
-
-            unmount();
+          // Sanitizer invariant — DOMPurify's FORBID_TAGS/FORBID_ATTR
+          // (markdown.tsx's `sanitize`) must hold across real content, not
+          // just the hand-written XSS-shaped fixtures elsewhere in this file.
+          expect(container.innerHTML).not.toMatch(/<script/i);
+          const lowerHtml = container.innerHTML.toLowerCase();
+          for (const attr of ['onerror=', 'onload=', 'onclick=']) {
+            expect(lowerHtml).not.toContain(attr);
           }
-        } finally {
-          process.off('unhandledRejection', onRejection);
-          errorSpy.mockRestore();
+
+          for (const p of perturbed) {
+            const { verdict, reason } = classifyPerturbation(container, p);
+            rows.push({ file, kind: p.kind, verdict, reason });
+          }
+
+          unmount();
         }
+      } finally {
+        process.off('unhandledRejection', onRejection);
+        errorSpy.mockRestore();
+      }
 
-        expect(rejections).toEqual([]);
-        expect(errorSpy.mock.calls).toEqual([]);
+      expect(rejections).toEqual([]);
+      expect(errorSpy.mock.calls).toEqual([]);
 
-        // Every genuinely-classified perturbation (verified via the real
-        // extractors above, so a genuine 'edited'/'added' unit) must show
-        // SOME decoration — an 'undecorated' result would mean a unit
-        // classifyUnits marks changed never reaches decoratedBlockHtml,
-        // itself a real defect distinct from clean-vs-fallback.
-        const undecorated = rows.filter((r) => r.verdict === 'undecorated');
-        expect(undecorated, JSON.stringify(undecorated)).toEqual([]);
+      // Every genuinely-classified perturbation (verified via the real
+      // extractors above, so a genuine 'edited'/'added' unit) must show
+      // SOME decoration — an 'undecorated' result would mean a unit
+      // classifyUnits marks changed never reaches decoratedBlockHtml,
+      // itself a real defect distinct from clean-vs-fallback.
+      const undecorated = rows.filter((r) => r.verdict === 'undecorated');
+      expect(undecorated, JSON.stringify(undecorated)).toEqual([]);
 
-        expect(rows.length).toBeGreaterThanOrEqual(10); // meaningful spread, not a token sample
+      expect(rows.length).toBeGreaterThanOrEqual(10); // meaningful spread, not a token sample
 
-        // ---- Distribution table + fallback-reason set, for this leaf's
-        // Validation requirement (recorded verbatim as a bead comment).
-        const distribution: Record<
-          string,
-          { clean: number; fallback: number; undecorated: number }
-        > = {};
-        for (const r of rows) {
-          distribution[r.kind] ??= { clean: 0, fallback: 0, undecorated: 0 };
-          distribution[r.kind][r.verdict]++;
-        }
-        const reasonsSeen = Array.from(
-          new Set(rows.map((r) => r.reason).filter((r): r is string => Boolean(r))),
-        ).sort();
+      // ---- Distribution table + fallback-reason set, for this leaf's
+      // Validation requirement (recorded verbatim as a bead comment).
+      const distribution: Record<string, { clean: number; fallback: number; undecorated: number }> =
+        {};
+      for (const r of rows) {
+        distribution[r.kind] ??= { clean: 0, fallback: 0, undecorated: 0 };
+        distribution[r.kind][r.verdict]++;
+      }
+      const reasonsSeen = Array.from(
+        new Set(rows.map((r) => r.reason).filter((r): r is string => Boolean(r))),
+      ).sort();
 
-        console.log('[corpus-parity distribution]', JSON.stringify(distribution, null, 2));
-        console.log('[corpus-parity fallback reasons]', JSON.stringify(reasonsSeen));
-        console.log('[corpus-parity rows]', JSON.stringify(rows));
-      },
-      30000,
-    );
+      console.log('[corpus-parity distribution]', JSON.stringify(distribution, null, 2));
+      console.log('[corpus-parity fallback reasons]', JSON.stringify(reasonsSeen));
+      console.log('[corpus-parity rows]', JSON.stringify(rows));
+    }, 30000);
   });
 });
 
@@ -3573,7 +3676,9 @@ describe('RenderedMarkdown — GitHub-style inline HTML (docs/ARCHITECTURE.md "U
     const src = '<a href="file:///Users/me/repo/README.md">local file</a>';
     const { container } = setup(src);
     await waitFor(() => expect(container.querySelector('a')).not.toBeNull());
-    expect(container.querySelector('a')?.getAttribute('href')).toBe('file:///Users/me/repo/README.md');
+    expect(container.querySelector('a')?.getAttribute('href')).toBe(
+      'file:///Users/me/repo/README.md',
+    );
   });
 
   it('local-tool widening: a raw <img src="data:image/…"> survives sanitize with its src intact', async () => {
@@ -3658,9 +3763,15 @@ describe('RenderedMarkdown — GitHub-style inline HTML (docs/ARCHITECTURE.md "U
   });
 
   it('mermaid/graphviz placeholder divs still carry their ids after the new sanitize step', async () => {
-    const src = ['```mermaid', 'graph TD; A-->B;', '```', '', '```dot', 'digraph { A -> B }', '```'].join(
-      '\n',
-    );
+    const src = [
+      '```mermaid',
+      'graph TD; A-->B;',
+      '```',
+      '',
+      '```dot',
+      'digraph { A -> B }',
+      '```',
+    ].join('\n');
     const { container } = setup(src);
     // Both fences route to their own DiagramFrame (toolbar label span), not a
     // <pre> code listing — proves data-mermaid-id/data-graphviz-id survived
@@ -3682,18 +3793,22 @@ describe('RenderedMarkdown — GitHub-style inline HTML (docs/ARCHITECTURE.md "U
     // re-derivation mechanism works OR has failed completely (e.g. the
     // attribute is simply absent) — assert the POSITIVE, correct outcome so
     // a regression that silently drops the mechanism cannot pass this test.
-    const src = ['# real heading', '', '<p data-start-line="999" data-end-line="999">forged</p>'].join(
-      '\n',
-    );
+    const src = [
+      '# real heading',
+      '',
+      '<p data-start-line="999" data-end-line="999">forged</p>',
+    ].join('\n');
     const { container } = setup(src);
     await waitFor(() => expect(container.textContent).toContain('forged'));
-    const forged = Array.from(container.querySelectorAll('p')).find((p) => p.textContent === 'forged');
+    const forged = Array.from(container.querySelectorAll('p')).find(
+      (p) => p.textContent === 'forged',
+    );
     expect(forged).toBeTruthy();
     expect(forged?.getAttribute('data-start-line')).toBe('3');
     expect(forged?.getAttribute('data-end-line')).toBe('3');
   });
 
-  it('SECURITY: a forged data-mermaid-id matching a real diagram\'s id never hijacks the render loop into replacing attacker content with that diagram', async () => {
+  it("SECURITY: a forged data-mermaid-id matching a real diagram's id never hijacks the render loop into replacing attacker content with that diagram", async () => {
     const src = [
       '```mermaid',
       'graph TD; A-->B;',
@@ -3761,7 +3876,7 @@ describe('RenderedMarkdown — GitHub-style inline HTML (docs/ARCHITECTURE.md "U
     expect(container.querySelector(`#${CSS.escape(targetId)}`)).not.toBeNull();
   });
 
-  it('a fenced code block\'s data-start-line/data-end-line land only on <code>, never the wrapping <pre> (codeBlockStartLine\'s documented invariant)', async () => {
+  it("a fenced code block's data-start-line/data-end-line land only on <code>, never the wrapping <pre> (codeBlockStartLine's documented invariant)", async () => {
     // mdast-util-to-hast patches the SAME source position onto both <pre>
     // and its inner <code> — applyTrustedAnnotations must not let a
     // position-keyed match set the anchor on both, or every code-block

@@ -660,8 +660,8 @@ resize|capture-pane` request channels and forwards parsed notifications on
   deviations — see ARCHITECTURE.md "Untrusted repository content"), run only
   when the document contains bare inline HTML; a plain document skips both
   stages] → `applyTrustedAnnotations` →
-  `rehype-highlight` → a local safe-link/image transform → `rehype-stringify`
-  — so reference link definitions, footnotes, and reference images resolve
+  `rehype-highlight` → `rehypeHeadingIds` → a local safe-link/image transform
+  → `rehype-stringify` — so reference link definitions, footnotes, and reference images resolve
   across blocks, and bare/inline HTML written directly in Markdown prose
   renders (GitHub-style sanitized; a fenced `` ```html `` block still renders
   as a plain code listing, matching GitHub). Top-level mdast nodes and the
@@ -701,7 +701,14 @@ resize|capture-pane` request channels and forwards parsed notifications on
   under the strict `script-src 'self' 'wasm-unsafe-eval'` CSP). External anchors get `target="_blank"` +
   `rel="noopener noreferrer"` and a delegated click handler routes them
   through `window.open` (Electron's `setWindowOpenHandler` funnels that to
-  `shell.openExternal`); relative/`javascript:` anchors get `data-inert`;
+  `shell.openExternal`); relative links get `data-localpath` for the shared
+  local-file router, while empty/`javascript:` anchors are inert. Same-document
+  fragments get `data-fragment`, then the delegated Content preview click
+  handler resolves them only within that preview, scrolls to the matching
+  authored or collision-safe generated heading/element id, and focuses it;
+  malformed or missing fragments are a safe no-op. The Content header has local 50–200% zoom
+  controls (10% increments plus 100% reset) which apply Chromium layout-aware
+  CSS `zoom` to the Content body alone;
   images with non-`http(s)`/`data:image/` `src` collapse to alt-text spans.
   Fenced code is highlighted by `rehype-highlight` using the base16
   Solarized hljs theme — token colors are theme-invariant across Solarized
@@ -1179,3 +1186,5 @@ src/shared/
   rendered-view per-item diff-highlighting design breakout.
 - [docs/design/ui-design-language.md](design/ui-design-language.md) — UI
   design-language record (color roles, component patterns).
+- [docs/reference/README.md](reference/README.md) — durable research records,
+  including the Ghostty-WASM custom WebGL renderer viability assessment.

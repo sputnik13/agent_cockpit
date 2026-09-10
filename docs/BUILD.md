@@ -168,6 +168,10 @@ e.g. `verify-html-preview.mjs`, `verify-explorer-root.mjs`,
 full content-type x Diff/Rendered/Raw mode matrix). Each is self-documenting in
 its own header comment (what it asserts, how to run it). Run one directly:
 
+The harness passes Electron's `--headless` flag. This keeps the verifier
+reliable in noninteractive macOS sessions while Playwright continues to drive
+the real Electron renderer through its normal debugging connection.
+
 ```sh
 npm run build && node scripts/screenshots/verify-content-modes.mjs
 # or:

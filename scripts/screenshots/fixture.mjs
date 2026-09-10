@@ -381,9 +381,16 @@ export function generateFixture() {
     // brand-new file (shows as added)
     'src/search.ts': `import { searchNotes } from './notes';\n\nexport function runSearch(query: string): void {\n  const hits = searchNotes(query);\n  console.log(\`\${hits.length} match(es) for "\${query}"\`);\n}\n`,
     // tweak the README (shows as modified): reword the intro line (a real
-    // del+add pair, not just an appended section) AND add a features list, so
-    // the Diff cell has both removed and added rows.
-    'README.md': `# Demo Notes\n\nA tiny notes library used to demo **Agent Cockpit**, with tags and search.\n\n## Features\n\n- Create notes\n- Tag notes\n- Full-text search (in progress)\n`,
+    // del+add pair, not just an appended section), add a same-document link,
+    // and put its target well below the fold. The content-mode verifier uses
+    // this to prove real fragment scrolling/focus alongside the features list.
+    'README.md': `# Demo Notes\n\nA tiny notes library used to demo **Agent Cockpit**, with tags and search.\n\n[Jump to features](#features)\n\n${Array.from(
+      { length: 28 },
+      (_, index) =>
+        `Supporting paragraph ${index + 1}: this fixture keeps the features anchor below the visible content area.`,
+    ).join(
+      '\n\n',
+    )}\n\n## Features\n\n- Create notes\n- Tag notes\n- Full-text search (in progress)\n`,
     // tweak package.json (shows as modified; gives the JSON matrix cell a real diff)
     'package.json':
       JSON.stringify(

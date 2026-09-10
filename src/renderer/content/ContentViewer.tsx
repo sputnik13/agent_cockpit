@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Panel, PanelHeader, PanelBody, EmptyState, Spinner, IconButton, StatusDot } from '../ui';
+import {
+  Button,
+  Panel,
+  PanelHeader,
+  PanelBody,
+  EmptyState,
+  Spinner,
+  IconButton,
+  StatusDot,
+} from '../ui';
 import { agentCockpit, useProjectsStore } from '../providerClient';
 import { useSettingsStore } from '@renderer/settings/settingsStore';
 import { structuredFoldReadMaxBytes } from '@shared/settings';
@@ -27,17 +36,30 @@ import {
 } from './modeSwitcher';
 import type { ContentSelection } from './selectionStore';
 
+const CONTENT_ZOOM_DEFAULT = 100;
+const CONTENT_ZOOM_MIN = 50;
+const CONTENT_ZOOM_MAX = 200;
+const CONTENT_ZOOM_STEP = 10;
+
 export function ContentViewer({ selection }: { selection: ContentSelection | null }): JSX.Element {
   if (selection == null) {
     return (
       <Panel>
         <PanelBody>
-          <EmptyState title="No file selected" hint="Select a file in Changes or Explorer to view it." />
+          <EmptyState
+            title="No file selected"
+            hint="Select a file in Changes or Explorer to view it."
+          />
         </PanelBody>
       </Panel>
     );
   }
-  return <FileContent key={`${selection.kind}:${selection.path}:${selection.baseline ?? ''}`} selection={selection} />;
+  return (
+    <FileContent
+      key={`${selection.kind}:${selection.path}:${selection.baseline ?? ''}`}
+      selection={selection}
+    />
+  );
 }
 
 function FileContent({ selection }: { selection: ContentSelection }): JSX.Element {
@@ -162,7 +184,9 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   // user choice. `setMode` (via ModeSwitcher's onChange below, wired through
   // `handleModeChange` which also persists the choice) still writes the real
   // preference, so a later manual switch is unaffected.
-  const effectiveMode = available.includes(mode) ? mode : defaultModeFor(path, kind, confirmedBinary);
+  const effectiveMode = available.includes(mode)
+    ? mode
+    : defaultModeFor(path, kind, confirmedBinary);
   const [diff, setDiff] = useState<
     | { kind: 'loading' }
     | { kind: 'ready'; patch: string; oldContent: string | null; newContent: string | null }
@@ -179,6 +203,11 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   // never triggers a reload by itself.
   const [refreshToken, setRefreshToken] = useState(0);
   const [stale, setStale] = useState(false);
+  // This state belongs to the currently mounted Content panel instance: a
+  // selection change remounts FileContent, while switching modes preserves a
+  // user's chosen scale for the same file. It intentionally does not affect
+  // app, terminal, or diagram-specific zoom.
+  const [contentZoom, setContentZoom] = useState(CONTENT_ZOOM_DEFAULT);
   const refresh = (): void => {
     setStale(false);
     setRefreshToken((t) => t + 1);
@@ -202,7 +231,9 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
         // globally unique across projects (same rationale as that
         // precedent), and this selection carries no projectId of its own.
         const matchesWorktree =
-          worktreePath === '' ? event.worktreePath === undefined : event.worktreePath === worktreePath;
+          worktreePath === ''
+            ? event.worktreePath === undefined
+            : event.worktreePath === worktreePath;
         if (!matchesWorktree) return;
         if (event.paths.some((p) => normalizeWatchPath(p) === targetPath)) setStale(true);
       },
@@ -222,7 +253,13 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
     let active = true;
     setDiff({ kind: 'loading' });
     void agentCockpit.provider.getDiffBundle(worktreePath, path, baseline).then((b) => {
-      if (active) setDiff({ kind: 'ready', patch: b.patch, oldContent: b.oldContent, newContent: b.newContent });
+      if (active)
+        setDiff({
+          kind: 'ready',
+          patch: b.patch,
+          oldContent: b.oldContent,
+          newContent: b.newContent,
+        });
     });
     return () => {
       active = false;
@@ -232,10 +269,7 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   // Parsed once, for `changedLineSet` below. (DiffView separately parses the
   // raw `patch` string prop itself — see its own doc comment — so this is a
   // ContentViewer-only parse, not a dedupe across components.)
-  const parsedDiff = useMemo(
-    () => (diff.kind === 'ready' ? parsePatch(diff.patch) : null),
-    [diff],
-  );
+  const parsedDiff = useMemo(() => (diff.kind === 'ready' ? parsePatch(diff.patch) : null), [diff]);
   const changedLineSet = useMemo(() => {
     if (!parsedDiff) return undefined;
     return changedLinesFromPatch(parsedDiff);
@@ -393,6 +427,41 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
         title={path}
         actions={
           <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <div
+              role="group"
+              aria-label="Content zoom"
+              style={{ display: 'flex', gap: 2, alignItems: 'center' }}
+            >
+              <IconButton
+                label="Decrease content zoom"
+                size="sm"
+                disabled={contentZoom <= CONTENT_ZOOM_MIN}
+                onClick={() =>
+                  setContentZoom((zoom) => Math.max(CONTENT_ZOOM_MIN, zoom - CONTENT_ZOOM_STEP))
+                }
+              >
+                −
+              </IconButton>
+              <Button
+                size="sm"
+                aria-label="Reset content zoom to 100%"
+                title="Reset content zoom to 100%"
+                disabled={contentZoom === CONTENT_ZOOM_DEFAULT}
+                onClick={() => setContentZoom(CONTENT_ZOOM_DEFAULT)}
+              >
+                {contentZoom}%
+              </Button>
+              <IconButton
+                label="Increase content zoom"
+                size="sm"
+                disabled={contentZoom >= CONTENT_ZOOM_MAX}
+                onClick={() =>
+                  setContentZoom((zoom) => Math.min(CONTENT_ZOOM_MAX, zoom + CONTENT_ZOOM_STEP))
+                }
+              >
+                +
+              </IconButton>
+            </div>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               {stale && <StatusDot tone="warn" title="Changed on disk — click Refresh to reload" />}
               <IconButton
@@ -427,7 +496,11 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                 }
               />
             )}
-            <ModeSwitcher available={available} active={effectiveMode} onChange={handleModeChange} />
+            <ModeSwitcher
+              available={available}
+              active={effectiveMode}
+              onChange={handleModeChange}
+            />
           </div>
         }
       />
@@ -448,7 +521,12 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
               VIEW_DISPATCH table), not on `mode`/extension directly — this is
               the one per-(class,mode) render site ContentViewer owns instead
               of hand-branching per extension. */}
-          <div ref={contentRef} className="h-full">
+          <div
+            ref={contentRef}
+            className="h-full"
+            data-content-zoom={contentZoom}
+            style={{ zoom: contentZoom / 100 }}
+          >
             {view === 'diff-view' &&
               (diff.kind === 'loading' ? (
                 <Centered>
@@ -484,7 +562,9 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                   changedLineSet={renderedDiffHighlighting ? changedLineSet : undefined}
                   linkContext={{ projectId: activeId, base: linkBase }}
                   filePath={path}
-                  oldSource={renderedDiffHighlighting && diff.kind === 'ready' ? diff.oldContent : null}
+                  oldSource={
+                    renderedDiffHighlighting && diff.kind === 'ready' ? diff.oldContent : null
+                  }
                 />
               ))}
 
@@ -515,7 +595,9 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                 // `onBinaryConfirmed` prop.
                 onBinaryConfirmed={setRawConfirmation}
                 {...(baseline !== undefined ? { gitRef: baseline } : {})}
-                {...(structuredReadMaxBytes !== undefined ? { maxBytes: structuredReadMaxBytes } : {})}
+                {...(structuredReadMaxBytes !== undefined
+                  ? { maxBytes: structuredReadMaxBytes }
+                  : {})}
               />
             )}
 
@@ -538,7 +620,9 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                 // forwards this straight to its inner RawFile.
                 onBinaryConfirmed={setRawConfirmation}
                 {...(baseline !== undefined ? { gitRef: baseline } : {})}
-                {...(structuredReadMaxBytes !== undefined ? { maxBytes: structuredReadMaxBytes } : {})}
+                {...(structuredReadMaxBytes !== undefined
+                  ? { maxBytes: structuredReadMaxBytes }
+                  : {})}
               />
             )}
 
@@ -597,7 +681,9 @@ function HeaderCheckbox({
 
 function Centered({ children }: { children: React.ReactNode }): JSX.Element {
   return (
-    <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
+    <div
+      style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center' }}
+    >
       {children}
     </div>
   );

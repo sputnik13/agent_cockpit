@@ -40,8 +40,9 @@ The durable architectural boundaries are:
 - **Untrusted repository content.** Repository Markdown/Mermaid and file bytes
   are untrusted: Markdown runs through one whole-document `unified`
   (`remark-parse` → `remark-gfm` → `remark-rehype` → `rehype-raw` →
-  `rehype-sanitize` → `rehype-highlight` → local safe-link/image transform →
-  `rehype-stringify`) pass and is sanitized via DOMPurify; `rehype-raw` and
+  `rehype-sanitize` → `rehype-highlight` → `rehypeHeadingIds` → local
+  safe-link/image transform → `rehype-stringify`) pass and is sanitized via
+  DOMPurify; `rehype-raw` and
   `rehype-sanitize` run only when the document contains bare inline HTML (see
   below) — a plain document skips both stages entirely. Mermaid and
   Graphviz (`dot`/`graphviz` fences) compile to SVG via a bundled,
@@ -1336,7 +1337,10 @@ the panel cases in `changes.test.tsx` / `explorer.test.tsx`.
 ## Content Modes & Bounded Binary-Preview Reads
 
 The Content panel presents every file through one uniform mode model: **Diff**,
-**Rendered**, and — text-like content only — **Raw**. Which modes a file
+**Rendered**, and — text-like content only — **Raw**. Its header owns an
+ephemeral Content-body-only zoom state (50–200% in 10% steps, with reset to
+100%) and applies it using Chromium CSS `zoom` to the body wrapper only,
+leaving application and terminal scale untouched. Which modes a file
 offers, which is the default, and which component renders each combination are
 all decided in a single authoring site,
 [src/renderer/content/modeSwitcher.tsx](../src/renderer/content/modeSwitcher.tsx),

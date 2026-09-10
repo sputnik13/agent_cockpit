@@ -119,7 +119,9 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   against `changedLineSet`, `rehype-highlight` token emission, sanitization
   (no `script` survives; no `javascript:` href; no inline event handlers),
   and the safe-link/image transform (`target`/`rel`/`data-external` on
-  absolute anchors, `data-inert` on relative/fragment, blocked image src
+  absolute anchors, `data-localpath` on relative links, `data-inert` on
+  empty/unsafe anchors, and `data-fragment` plus scoped scroll/focus navigation
+  for matching authored and generated in-document fragment targets; blocked image src
   collapses to alt-text span).
 - **Bare/inline HTML in Markdown prose** (GitHub-style sanitation,
   `docs/ARCHITECTURE.md` "Untrusted repository content"): positive cases
@@ -265,7 +267,8 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   the full (class × mode) matrix — see ARCHITECTURE "Content Modes & Bounded
   Binary-Preview Reads"'s Regression Check for the harness's general shape.
   This harness is the one that extends to the JSON/YAML structural-folding
-  surface (folding-view dispatch, collapse/expand against the real DOM,
+  surface (Content-body zoom-in/out/reset geometry plus in-preview fragment
+  scroll/focus, folding-view dispatch, collapse/expand against the real DOM,
   multi-document stacking, anchor/alias badges, gutter alignment, and — since
   `local_repo_explorer-ftbq` landed — the real threshold-degrade contract: a
   file sized inside the raised read-cap band degrades to the plain

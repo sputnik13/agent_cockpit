@@ -15,33 +15,45 @@ import { DEFAULT_SETTINGS, structuredFoldReadMaxBytes } from '@shared/settings';
 // foldingView.test.tsx's identical `watchHandlers` capture pattern for the
 // same hub — ContentViewer's own manual-refresh staleness detection
 // (local_repo_explorer-r97u) subscribes to it directly.
-const { getFileDiff, getDiffBundle, readFile, readFileBytes, notesList, notesCreate, watchHandlers, onWatch } =
-  vi.hoisted(() => {
-    const watchHandlers: ((e: {
+const {
+  getFileDiff,
+  getDiffBundle,
+  readFile,
+  readFileBytes,
+  notesList,
+  notesCreate,
+  watchHandlers,
+  onWatch,
+} = vi.hoisted(() => {
+  const watchHandlers: ((e: {
+    projectId?: string;
+    worktreePath?: string;
+    event?: { paths?: string[]; at?: string };
+  }) => void)[] = [];
+  const onWatch = (
+    h: (e: {
       projectId?: string;
       worktreePath?: string;
       event?: { paths?: string[]; at?: string };
-    }) => void)[] = [];
-    const onWatch = (
-      h: (e: { projectId?: string; worktreePath?: string; event?: { paths?: string[]; at?: string } }) => void,
-    ) => {
-      watchHandlers.push(h);
-      return () => {
-        const i = watchHandlers.indexOf(h);
-        if (i >= 0) watchHandlers.splice(i, 1);
-      };
+    }) => void,
+  ) => {
+    watchHandlers.push(h);
+    return () => {
+      const i = watchHandlers.indexOf(h);
+      if (i >= 0) watchHandlers.splice(i, 1);
     };
-    return {
-      getFileDiff: vi.fn(),
-      getDiffBundle: vi.fn(),
-      readFile: vi.fn(),
-      readFileBytes: vi.fn(),
-      notesList: vi.fn(),
-      notesCreate: vi.fn(),
-      watchHandlers,
-      onWatch,
-    };
-  });
+  };
+  return {
+    getFileDiff: vi.fn(),
+    getDiffBundle: vi.fn(),
+    readFile: vi.fn(),
+    readFileBytes: vi.fn(),
+    notesList: vi.fn(),
+    notesCreate: vi.fn(),
+    watchHandlers,
+    onWatch,
+  };
+});
 
 /** Dispatches a synthetic `working-tree` watch event to every currently
  *  subscribed handler. `paths` are repo-relative POSIX (or, when
@@ -163,10 +175,20 @@ describe('ContentViewer', () => {
     getFileDiff.mockResolvedValue(SAMPLE_DIFF);
     // Diff mode now loads a one-call bundle (patch + both sides' content).
     getDiffBundle.mockResolvedValue({ patch: SAMPLE_DIFF, oldContent: null, newContent: null });
-    readFile.mockResolvedValue({ content: '# Title\n\nbody', truncated: false, isBinary: false, sizeBytes: 13 });
+    readFile.mockResolvedValue({
+      content: '# Title\n\nbody',
+      truncated: false,
+      isBinary: false,
+      sizeBytes: 13,
+    });
     // Image content's default: a tiny "present" byte payload so tests that
     // don't care about the specific image state see a normal 'shown' result.
-    readFileBytes.mockResolvedValue({ bytesBase64: 'ZmFrZQ==', sizeBytes: 5, exists: true, reason: null });
+    readFileBytes.mockResolvedValue({
+      bytesBase64: 'ZmFrZQ==',
+      sizeBytes: 5,
+      exists: true,
+      reason: null,
+    });
     notesList.mockResolvedValue([]);
   });
 
@@ -175,22 +197,50 @@ describe('ContentViewer', () => {
     expect(screen.getByText('No file selected')).toBeInTheDocument();
   });
 
+  it('zooms only the content body, respects bounds, and resets it to 100%', async () => {
+    const { container } = render(<ContentViewer selection={sel('src/file.ts')} />);
+    await screen.findByText('const b = 2;', { exact: false });
+    const content = container.querySelector('[data-content-zoom]')!;
+    const decrease = screen.getByRole('button', { name: 'Decrease content zoom' });
+    const increase = screen.getByRole('button', { name: 'Increase content zoom' });
+    expect(content).toHaveAttribute('data-content-zoom', '100');
+
+    fireEvent.click(decrease);
+    expect(content).toHaveAttribute('data-content-zoom', '90');
+    for (let i = 0; i < 4; i += 1) fireEvent.click(decrease);
+    expect(content).toHaveAttribute('data-content-zoom', '50');
+    expect(decrease).toBeDisabled();
+
+    for (let i = 0; i < 15; i += 1) fireEvent.click(increase);
+    expect(content).toHaveAttribute('data-content-zoom', '200');
+    expect(increase).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset content zoom to 100%' }));
+    expect(content).toHaveAttribute('data-content-zoom', '100');
+  });
+
   describe('manual refresh + staleness indicator (local_repo_explorer-r97u)', () => {
     it('shows no stale indicator until a watch event matches this exact (worktreePath, path); an unrelated path or a different worktree never marks it stale', async () => {
       render(<ContentViewer selection={sel('src/file.ts')} />);
       await screen.findByText('const b = 2;', { exact: false });
 
       expect(screen.getByRole('button', { name: 'Refresh from disk' })).toBeInTheDocument();
-      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+      expect(
+        screen.queryByTitle('Changed on disk — click Refresh to reload'),
+      ).not.toBeInTheDocument();
 
       // Unrelated path in the SAME worktree: no staleness.
       act(() => dispatchWatch(['other/file.ts'], 'p1', '/wt'));
-      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+      expect(
+        screen.queryByTitle('Changed on disk — click Refresh to reload'),
+      ).not.toBeInTheDocument();
 
       // The SAME path but a DIFFERENT worktree: no staleness (a match must be
       // exact on both path AND worktree, never path alone).
       act(() => dispatchWatch(['src/file.ts'], 'p1', '/other-wt'));
-      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+      expect(
+        screen.queryByTitle('Changed on disk — click Refresh to reload'),
+      ).not.toBeInTheDocument();
 
       // The exact displayed (worktreePath, path): staleness fires.
       act(() => dispatchWatch(['src/file.ts'], 'p1', '/wt'));
@@ -206,7 +256,9 @@ describe('ContentViewer', () => {
 
       // A worktree-tagged event never matches a root selection.
       act(() => dispatchWatch(['src/file.ts'], 'p1', '/wt'));
-      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+      expect(
+        screen.queryByTitle('Changed on disk — click Refresh to reload'),
+      ).not.toBeInTheDocument();
 
       // An untagged (worktreePath undefined) event matches it.
       act(() => dispatchWatch(['src/file.ts']));
@@ -219,11 +271,15 @@ describe('ContentViewer', () => {
       expect(getDiffBundle).toHaveBeenCalledTimes(1);
 
       act(() => dispatchWatch(['src/file.ts'], 'p1', '/wt'));
-      const staleRefreshBtn = screen.getByRole('button', { name: 'File changed on disk — click to refresh' });
+      const staleRefreshBtn = screen.getByRole('button', {
+        name: 'File changed on disk — click to refresh',
+      });
       fireEvent.click(staleRefreshBtn);
 
       await waitFor(() => expect(getDiffBundle).toHaveBeenCalledTimes(2));
-      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+      expect(
+        screen.queryByTitle('Changed on disk — click Refresh to reload'),
+      ).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Refresh from disk' })).toBeInTheDocument();
     });
 
@@ -236,15 +292,24 @@ describe('ContentViewer', () => {
     });
 
     it('an external-file selection (no git tree membership) offers Refresh but never subscribes to a watch match, and never reports stale', async () => {
-      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: false,
+        isBinary: true,
+        sizeBytes: 2048,
+      });
       render(
-        <ContentViewer selection={sel('/outside/project/archive.pdf', { kind: 'external-file' })} />,
+        <ContentViewer
+          selection={sel('/outside/project/archive.pdf', { kind: 'external-file' })}
+        />,
       );
       await screen.findByText('Binary file (2.0 KiB).');
 
       act(() => dispatchWatch(['/outside/project/archive.pdf'], 'p1', '/wt'));
       act(() => dispatchWatch(['/outside/project/archive.pdf']));
-      expect(screen.queryByTitle('Changed on disk — click Refresh to reload')).not.toBeInTheDocument();
+      expect(
+        screen.queryByTitle('Changed on disk — click Refresh to reload'),
+      ).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Refresh from disk' })).toBeInTheDocument();
     });
   });
@@ -314,7 +379,12 @@ describe('ContentViewer', () => {
     await screen.findByText('const b = 2;', { exact: false });
 
     // Switch to Raw -> RawFile reads file content.
-    readFile.mockResolvedValue({ content: 'raw text body', truncated: false, isBinary: false, sizeBytes: 13 });
+    readFile.mockResolvedValue({
+      content: 'raw text body',
+      truncated: false,
+      isBinary: false,
+      sizeBytes: 13,
+    });
     fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
     await waitFor(() =>
       expect(readFile).toHaveBeenCalledWith('src/file.ts', { ref: 'HEAD', worktreePath: '/wt' }),
@@ -338,15 +408,24 @@ describe('ContentViewer', () => {
       expect(screen.queryByRole('tab', { name: 'Raw' })).not.toBeInTheDocument();
     });
 
-    it('a changed image (kind:\'change\') whose patch is binary-flagged (git emits "Binary files … differ" for an image diff too, exactly like a generic binary) still renders ImageCompare, never the Diff cannot-compare placeholder, and never a readFile call — regression coverage for a prior bug where ContentViewer\'s Diff-mode size-fallback fired on ANY parsedDiff.binary regardless of which view was actually showing, issuing an extra, unconsumed readFile call on top of ImageCompare\'s own reads', async () => {
+    it("a changed image (kind:'change') whose patch is binary-flagged (git emits \"Binary files … differ\" for an image diff too, exactly like a generic binary) still renders ImageCompare, never the Diff cannot-compare placeholder, and never a readFile call — regression coverage for a prior bug where ContentViewer's Diff-mode size-fallback fired on ANY parsedDiff.binary regardless of which view was actually showing, issuing an extra, unconsumed readFile call on top of ImageCompare's own reads", async () => {
       const IMAGE_BINARY_DIFF = [
         'diff --git a/assets/logo.png b/assets/logo.png',
         'index 1234567..89abcde 100644',
         'Binary files a/assets/logo.png and b/assets/logo.png differ',
         '',
       ].join('\n');
-      getDiffBundle.mockResolvedValue({ patch: IMAGE_BINARY_DIFF, oldContent: null, newContent: null });
-      readFileBytes.mockResolvedValue({ bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: null });
+      getDiffBundle.mockResolvedValue({
+        patch: IMAGE_BINARY_DIFF,
+        oldContent: null,
+        newContent: null,
+      });
+      readFileBytes.mockResolvedValue({
+        bytesBase64: 'Zm9v',
+        sizeBytes: 3,
+        exists: true,
+        reason: null,
+      });
       render(<ContentViewer selection={sel('assets/logo.png', { baseline: 'HEAD' })} />);
 
       // image's Diff mode dispatches to ImageCompare (viewFor('image', 'diff')
@@ -367,12 +446,13 @@ describe('ContentViewer', () => {
     });
 
     it('Diff: BOTH panes fetch and show real images (local_repo_explorer-bn8a) — before via a git-ref read, after via the working tree, never the old "(unavailable)"', async () => {
-      readFileBytes.mockImplementation((path: string, opts?: { worktreePath?: string; ref?: string }) =>
-        Promise.resolve(
-          opts?.ref
-            ? { bytesBase64: 'QkFTRQ==', sizeBytes: 4, exists: true, reason: null }
-            : { bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: null },
-        ),
+      readFileBytes.mockImplementation(
+        (path: string, opts?: { worktreePath?: string; ref?: string }) =>
+          Promise.resolve(
+            opts?.ref
+              ? { bytesBase64: 'QkFTRQ==', sizeBytes: 4, exists: true, reason: null }
+              : { bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: null },
+          ),
       );
       render(<ContentViewer selection={sel('assets/logo.png', { baseline: 'HEAD' })} />);
 
@@ -382,7 +462,10 @@ describe('ContentViewer', () => {
       // appear again.
       const beforeImg = (await screen.findByAltText('Before (baseline)')) as HTMLImageElement;
       expect(beforeImg.src).toBe('data:image/png;base64,QkFTRQ==');
-      expect(readFileBytes).toHaveBeenCalledWith('assets/logo.png', { worktreePath: '/wt', ref: 'HEAD' });
+      expect(readFileBytes).toHaveBeenCalledWith('assets/logo.png', {
+        worktreePath: '/wt',
+        ref: 'HEAD',
+      });
       expect(screen.queryByText(/Baseline preview unavailable/)).not.toBeInTheDocument();
       expect(screen.queryByText('(unavailable)')).not.toBeInTheDocument();
 
@@ -394,15 +477,26 @@ describe('ContentViewer', () => {
     });
 
     it('a rename: the before-pane reads bytes from the OLD path at the baseline ref (oldPath ?? filePath), and the label surfaces it', async () => {
-      readFileBytes.mockResolvedValue({ bytesBase64: 'UkVE', sizeBytes: 3, exists: true, reason: null });
+      readFileBytes.mockResolvedValue({
+        bytesBase64: 'UkVE',
+        sizeBytes: 3,
+        exists: true,
+        reason: null,
+      });
       render(
         <ContentViewer
-          selection={sel('assets/new-name.png', { baseline: 'HEAD', oldPath: 'assets/old-name.png' })}
+          selection={sel('assets/new-name.png', {
+            baseline: 'HEAD',
+            oldPath: 'assets/old-name.png',
+          })}
         />,
       );
       await screen.findByText(/was assets\/old-name\.png/);
       await waitFor(() =>
-        expect(readFileBytes).toHaveBeenCalledWith('assets/old-name.png', { worktreePath: '/wt', ref: 'HEAD' }),
+        expect(readFileBytes).toHaveBeenCalledWith('assets/old-name.png', {
+          worktreePath: '/wt',
+          ref: 'HEAD',
+        }),
       );
       // The "after" (working-tree) pane still reads the NEW (current) path.
       await waitFor(() =>
@@ -428,7 +522,12 @@ describe('ContentViewer', () => {
     });
 
     it('Rendered: ImageView shows the current image alone (same fetch/state machine as the Diff after-pane)', async () => {
-      readFileBytes.mockResolvedValue({ bytesBase64: 'Zm9v', sizeBytes: 3, exists: true, reason: null });
+      readFileBytes.mockResolvedValue({
+        bytesBase64: 'Zm9v',
+        sizeBytes: 3,
+        exists: true,
+        reason: null,
+      });
       render(<ContentViewer selection={sel('assets/logo.png', { baseline: 'HEAD' })} />);
       fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
 
@@ -439,8 +538,15 @@ describe('ContentViewer', () => {
     });
 
     it('SVG renders through <img src="data:...svg+xml">, never injected as markup', async () => {
-      readFileBytes.mockResolvedValue({ bytesBase64: 'PHN2Zy8+', sizeBytes: 8, exists: true, reason: null });
-      const { container } = render(<ContentViewer selection={sel('assets/icon.svg', { baseline: 'HEAD' })} />);
+      readFileBytes.mockResolvedValue({
+        bytesBase64: 'PHN2Zy8+',
+        sizeBytes: 8,
+        exists: true,
+        reason: null,
+      });
+      const { container } = render(
+        <ContentViewer selection={sel('assets/icon.svg', { baseline: 'HEAD' })} />,
+      );
 
       const img = (await screen.findByAltText('After (working tree)')) as HTMLImageElement;
       expect(img.src).toBe('data:image/svg+xml;base64,PHN2Zy8+');
@@ -503,7 +609,12 @@ describe('ContentViewer', () => {
     it.each([{ label: 'a TypeScript file', path: 'src/file.ts', content: 'const a = 1;' }])(
       '$label: Rendered shows highlighted token spans, Raw shows the same plain text, from ONE read',
       async ({ path, content }) => {
-        readFile.mockResolvedValue({ content, truncated: false, isBinary: false, sizeBytes: content.length });
+        readFile.mockResolvedValue({
+          content,
+          truncated: false,
+          isBinary: false,
+          sizeBytes: content.length,
+        });
         const { container } = render(<ContentViewer selection={sel(path, { kind: 'file' })} />);
 
         // A plain-file selection defaults to Raw (never an empty diff).
@@ -573,7 +684,9 @@ describe('ContentViewer', () => {
         fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
         expect(screen.getByText(renderedMatch)).toBeInTheDocument();
         if (expectDownload) {
-          expect(screen.getByText(/Right-click this file in Changes or Explorer and choose Download/)).toBeInTheDocument();
+          expect(
+            screen.getByText(/Right-click this file in Changes or Explorer and choose Download/),
+          ).toBeInTheDocument();
         } else {
           expect(screen.queryByText(/Download/)).not.toBeInTheDocument();
         }
@@ -587,13 +700,21 @@ describe('ContentViewer', () => {
     );
 
     it('keeps the gutter-alignment invariant (flexShrink:0 gutters, minWidth rules) in Raw AND Rendered, with Wrap off and on', async () => {
-      const content = 'short\na noticeably longer line than the short one above it, for width contrast';
-      readFile.mockResolvedValue({ content, truncated: false, isBinary: false, sizeBytes: content.length });
+      const content =
+        'short\na noticeably longer line than the short one above it, for width contrast';
+      readFile.mockResolvedValue({
+        content,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: content.length,
+      });
       render(<ContentViewer selection={sel('src/file.ts', { kind: 'file' })} />);
       await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
 
       function assertGutterContract(wrapExpected: boolean): void {
-        const gutters = Array.from(document.querySelectorAll('button[title^="Add a note on line"]'));
+        const gutters = Array.from(
+          document.querySelectorAll('button[title^="Add a note on line"]'),
+        );
         expect(gutters).toHaveLength(2); // one gutter per line
         for (const gutter of gutters) {
           // Guardrail: gutters stay flex-shrink:0 (Tailwind's `shrink-0`).
@@ -637,7 +758,12 @@ describe('ContentViewer', () => {
 
     it('a line note added while Raw is showing is visible after switching to Rendered (same anchor), with no re-fetch', async () => {
       const content = 'const a = 1;\nconst b = 2;';
-      readFile.mockResolvedValue({ content, truncated: false, isBinary: false, sizeBytes: content.length });
+      readFile.mockResolvedValue({
+        content,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: content.length,
+      });
 
       // A minimal in-memory notes "backend": create() appends, list() reads it
       // back — mirrors what addLineNote/load actually do against the real IPC.
@@ -695,7 +821,12 @@ describe('ContentViewer', () => {
   describe('json/yaml classes (folding-view dispatch seam — local_repo_explorer-jp2f.2)', () => {
     it('a .json selection in Rendered mode dispatches to FoldingView ([data-testid="folding-view"] in the DOM); the same path in Raw mode does not', async () => {
       const content = '{ "a": 1 }';
-      readFile.mockResolvedValue({ content, truncated: false, isBinary: false, sizeBytes: content.length });
+      readFile.mockResolvedValue({
+        content,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: content.length,
+      });
       render(<ContentViewer selection={sel('data.json', { kind: 'file' })} />);
 
       // A plain-file selection defaults to Raw (never an empty diff) — same
@@ -731,13 +862,16 @@ describe('ContentViewer', () => {
 
     it('a .yaml selection: Diff still dispatches to DiffView (unaffected), Rendered dispatches to FoldingView', async () => {
       const content = 'key: value\n';
-      readFile.mockResolvedValue({ content, truncated: false, isBinary: false, sizeBytes: content.length });
+      readFile.mockResolvedValue({
+        content,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: content.length,
+      });
       render(<ContentViewer selection={sel('config.yaml', { baseline: 'HEAD' })} />);
 
       // A 'change' selection defaults to Diff — unchanged.
-      await waitFor(() =>
-        expect(getDiffBundle).toHaveBeenCalledWith('/wt', 'config.yaml', 'HEAD'),
-      );
+      await waitFor(() => expect(getDiffBundle).toHaveBeenCalledWith('/wt', 'config.yaml', 'HEAD'));
       expect(screen.getByRole('tab', { name: 'Diff' })).toHaveAttribute('aria-selected', 'true');
       expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
 
@@ -747,7 +881,12 @@ describe('ContentViewer', () => {
     });
 
     it('a JSON-path file that RawFile confirms binary still reclassifies to generic-binary and gets the existing graceful placeholder — the folding-view dispatch is bypassed entirely once binary is confirmed (the confirmedBinary path is unaffected by the new json/yaml classes)', async () => {
-      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: false,
+        isBinary: true,
+        sizeBytes: 2048,
+      });
       const BINARY_DIFF = [
         'diff --git a/data.json b/data.json',
         'index 1234567..89abcde 100644',
@@ -819,7 +958,10 @@ describe('ContentViewer', () => {
       // Mode switcher is unaffected by the degrade: still Diff/Rendered/Raw,
       // Rendered active — only WHICH component renders changed.
       expect(screen.getByRole('tab', { name: 'Diff' })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
       expect(screen.getByRole('tab', { name: 'Raw' })).toBeInTheDocument();
 
       // Stable across further renders (no flip-flop): re-selecting the SAME
@@ -862,7 +1004,12 @@ describe('ContentViewer', () => {
 
     it('a confirmed-BINARY .json file reclassifies to generic-binary regardless of the fold threshold — the binary rule wins precedence over the size rule', async () => {
       useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, structuredFoldMaxMb: 1 } });
-      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: false,
+        isBinary: true,
+        sizeBytes: 2048,
+      });
       const BINARY_DIFF = [
         'diff --git a/data.json b/data.json',
         'index 1234567..89abcde 100644',
@@ -895,7 +1042,9 @@ describe('ContentViewer', () => {
       // json/yaml-only — a non-json/yaml class (here 'text', via .ts) must read
       // with NO maxBytes at all, leaving the default cap completely unchanged.
       expect(readFile).toHaveBeenCalledWith('src/file.ts', { worktreePath: '/wt' });
-      expect((readFile.mock.calls[0]?.[1] as { maxBytes?: number } | undefined)?.maxBytes).toBeUndefined();
+      expect(
+        (readFile.mock.calls[0]?.[1] as { maxBytes?: number } | undefined)?.maxBytes,
+      ).toBeUndefined();
 
       fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
       expect(screen.queryByTestId('folding-view')).not.toBeInTheDocument();
@@ -920,7 +1069,10 @@ describe('ContentViewer', () => {
       // The remembered 'rendered' mode seeds Rendered directly at mount (json
       // offers 'rendered' -- see the seed logic above `mode`'s useState) --
       // no click anywhere in this test.
-      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
       await waitFor(() => expect(document.body.textContent).toContain(JSON_CONTENT));
       // Degraded purely from the render-time effectiveCls derivation. This
       // mount sequence is FoldingView first (an unconfirmed json/yaml
@@ -987,7 +1139,7 @@ describe('ContentViewer', () => {
     });
   });
 
-  describe('generic-binary Diff placeholder (binary detected from the patch text OR from RawFile\'s own confirmation; size sourced ONLY from RawFile\'s own read, never a separate fallback fetch)', () => {
+  describe("generic-binary Diff placeholder (binary detected from the patch text OR from RawFile's own confirmation; size sourced ONLY from RawFile's own read, never a separate fallback fetch)", () => {
     const BINARY_DIFF = [
       'diff --git a/data.bin b/data.bin',
       'index 1234567..89abcde 100644',
@@ -1003,7 +1155,9 @@ describe('ContentViewer', () => {
       // Exact title match — proves no size suffix was ever appended (the
       // component appends " (<size>)" whenever `size` is non-null).
       await screen.findByText("This file type can't be compared line-by-line.");
-      expect(screen.getByText(/changed between the baseline and the working tree/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/changed between the baseline and the working tree/),
+      ).toBeInTheDocument();
       expect(screen.queryByText('No textual diff for this file.')).not.toBeInTheDocument();
       expect(
         screen.getByText(/Right-click this file in Changes or Explorer and choose Download/),
@@ -1030,7 +1184,12 @@ describe('ContentViewer', () => {
 
     it('once RawFile has independently confirmed a too-large file (by having mounted via Raw, which never reclassifies), switching to Diff shows the SAME too-large reason instead of the generic empty-diff hint — proves the knownReason threading covers too-large, not just binary', async () => {
       getDiffBundle.mockResolvedValue({ patch: '', oldContent: null, newContent: null });
-      readFile.mockResolvedValue({ content: null, truncated: true, isBinary: false, sizeBytes: 5_000_000 });
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: true,
+        isBinary: false,
+        sizeBytes: 5_000_000,
+      });
       render(<ContentViewer selection={sel('huge.bin', { kind: 'file' })} />);
 
       // Raw is the default for an Explorer file; too-large does not
@@ -1054,7 +1213,12 @@ describe('ContentViewer', () => {
 
   describe('generic-binary reclassification (RawFile confirms isBinary -> effective class upgrade, no new read)', () => {
     it('an Explorer-opened, runtime-confirmed-binary file redefaults from Raw to Diff, drops the Raw tab, and shows the graceful placeholder instead of the terse "Binary file (N)" line — the exact bug this issue exists to fix', async () => {
-      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: false,
+        isBinary: true,
+        sizeBytes: 2048,
+      });
       const BINARY_DIFF = [
         'diff --git a/archive.pdf b/archive.pdf',
         'index 1234567..89abcde 100644',
@@ -1091,7 +1255,12 @@ describe('ContentViewer', () => {
     });
 
     it('a non-binary Explorer file never reclassifies: the Raw tab stays available and active', async () => {
-      readFile.mockResolvedValue({ content: 'const a = 1;', truncated: false, isBinary: false, sizeBytes: 13 });
+      readFile.mockResolvedValue({
+        content: 'const a = 1;',
+        truncated: false,
+        isBinary: false,
+        sizeBytes: 13,
+      });
       render(<ContentViewer selection={sel('src/file.ts', { kind: 'file' })} />);
       await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
       expect(screen.getByRole('tab', { name: 'Raw' })).toHaveAttribute('aria-selected', 'true');
@@ -1099,7 +1268,12 @@ describe('ContentViewer', () => {
     });
 
     it('an Explorer-opened, runtime-confirmed-binary file with an EMPTY diff (unmodified-tracked or untracked — the dominant real-world Explorer case) still shows the graceful cannot-compare/Download placeholder under Diff, with "changed" left unasserted — this is the exact gap the 2nd review pass found: reclassification alone (default -> Diff) is not enough without ALSO threading the confirmed signal into DiffView, since git\'s patch alone carries no signal for an unmodified/untracked file', async () => {
-      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: false,
+        isBinary: true,
+        sizeBytes: 2048,
+      });
       // No "Binary files … differ" line at all — this is the case
       // parsePatch.ts's `binary` field doc comment describes: an unmodified
       // or untracked binary file's diff is genuinely empty.
@@ -1119,7 +1293,9 @@ describe('ContentViewer', () => {
       ).toBeInTheDocument();
       // No git signal that the file actually changed -> no changed/unchanged
       // claim either way (never falsely asserts "not changed").
-      expect(screen.queryByText(/changed between the baseline and the working tree/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/changed between the baseline and the working tree/),
+      ).not.toBeInTheDocument();
       expect(screen.queryByText(/has not changed since the baseline/)).not.toBeInTheDocument();
       // Never the terse one-liner this issue exists to eliminate, and never
       // the OLD empty-diff fallback either — the exact 2nd-review-pass bug:
@@ -1132,9 +1308,16 @@ describe('ContentViewer', () => {
 
   describe('external-file binary (raw-only carve-out, no reclassification-driven redirect)', () => {
     it('an out-of-project binary file: Raw keeps the terse "Binary file (N)" message, never the graceful BinaryPlaceholder — external files never reach Diff/Rendered even once confirmed binary (modesFor\'s external-file carve-out is unconditional; see modeSwitcher.tsx)', async () => {
-      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: false,
+        isBinary: true,
+        sizeBytes: 2048,
+      });
       render(
-        <ContentViewer selection={sel('/outside/project/archive.pdf', { kind: 'external-file' })} />,
+        <ContentViewer
+          selection={sel('/outside/project/archive.pdf', { kind: 'external-file' })}
+        />,
       );
 
       await screen.findByText('Binary file (2.0 KiB).');
@@ -1160,15 +1343,28 @@ describe('ContentViewer', () => {
 
     it('seeds from the remembered global mode when it is valid for the new selection\'s class, overriding the per-class default (a .ts Explorer file defaults to Raw, but a remembered "rendered" wins)', async () => {
       useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, contentMode: 'rendered' } });
-      readFile.mockResolvedValue({ content: 'const a = 1;', truncated: false, isBinary: false, sizeBytes: 13 });
+      readFile.mockResolvedValue({
+        content: 'const a = 1;',
+        truncated: false,
+        isBinary: false,
+        sizeBytes: 13,
+      });
       render(<ContentViewer selection={sel('src/file.ts', { kind: 'file' })} />);
       await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
-      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
     });
 
     it('falls back to the per-class default when the remembered mode is not offered for the new selection\'s class (remembered "raw", new selection is an image)', async () => {
       useSettingsStore.setState({ settings: { ...DEFAULT_SETTINGS, contentMode: 'raw' } });
-      readFileBytes.mockResolvedValue({ bytesBase64: 'ZmFrZQ==', sizeBytes: 5, exists: true, reason: null });
+      readFileBytes.mockResolvedValue({
+        bytesBase64: 'ZmFrZQ==',
+        sizeBytes: 5,
+        exists: true,
+        reason: null,
+      });
       render(<ContentViewer selection={sel('assets/logo.png', { baseline: 'HEAD' })} />);
       // image's modesFor never offers 'raw' — falls back to defaultModeFor's
       // 'diff' default, never crashes, never silently drops to an
@@ -1186,13 +1382,21 @@ describe('ContentViewer', () => {
 
       fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
       expect(setSpy).toHaveBeenCalledWith({ contentMode: 'rendered' });
-      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tab', { name: 'Rendered' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
     });
 
     it('the effectiveMode reclassification-safety fallback never persists — only a genuine user click does', async () => {
       const setSpy = vi.fn().mockResolvedValue(undefined);
       useSettingsStore.setState({ set: setSpy });
-      readFile.mockResolvedValue({ content: null, truncated: false, isBinary: true, sizeBytes: 2048 });
+      readFile.mockResolvedValue({
+        content: null,
+        truncated: false,
+        isBinary: true,
+        sizeBytes: 2048,
+      });
       const BINARY_DIFF = [
         'diff --git a/archive.pdf b/archive.pdf',
         'index 1234567..89abcde 100644',
@@ -1224,7 +1428,9 @@ describe('BinaryPlaceholder (shared Diff/Rendered placeholder for generic-binary
     ['rendered', 'too-large'],
     ['rendered', 'missing'],
   ] as const)('renders a message for mode=%s reason=%s', (mode, reason) => {
-    render(<BinaryPlaceholder mode={mode} reason={reason} size={2048} changed={reason === 'binary'} />);
+    render(
+      <BinaryPlaceholder mode={mode} reason={reason} size={2048} changed={reason === 'binary'} />,
+    );
     expect(document.body.textContent?.trim().length).toBeGreaterThan(0);
   });
 
@@ -1250,27 +1456,35 @@ describe('BinaryPlaceholder (shared Diff/Rendered placeholder for generic-binary
   it('Rendered binary/too-large point at Download with the shipped row-context-menu wording; missing does not', () => {
     render(<BinaryPlaceholder mode="rendered" reason="binary" size={10} />);
     expect(
-      screen.getByText('Right-click this file in Changes or Explorer and choose Download to open it in an external application.'),
+      screen.getByText(
+        'Right-click this file in Changes or Explorer and choose Download to open it in an external application.',
+      ),
     ).toBeInTheDocument();
     cleanup();
 
     render(<BinaryPlaceholder mode="rendered" reason="too-large" size={10} />);
-    expect(screen.getByText(/choose Download to open it in an external application/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/choose Download to open it in an external application/),
+    ).toBeInTheDocument();
     cleanup();
 
     render(<BinaryPlaceholder mode="rendered" reason="missing" />);
     expect(screen.queryByText(/Download/)).not.toBeInTheDocument();
   });
 
-  it('Diff mentions Download for binary/too-large (the file still can\'t be compared, but Download still opens it externally); missing does not (nothing exists to download)', () => {
+  it("Diff mentions Download for binary/too-large (the file still can't be compared, but Download still opens it externally); missing does not (nothing exists to download)", () => {
     render(<BinaryPlaceholder mode="diff" reason="binary" changed size={10} />);
     expect(
-      screen.getByText(/Right-click this file in Changes or Explorer and choose Download to open it in an external application\./),
+      screen.getByText(
+        /Right-click this file in Changes or Explorer and choose Download to open it in an external application\./,
+      ),
     ).toBeInTheDocument();
     cleanup();
 
     render(<BinaryPlaceholder mode="diff" reason="too-large" changed size={10} />);
-    expect(screen.getByText(/choose Download to open it in an external application/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/choose Download to open it in an external application/),
+    ).toBeInTheDocument();
     cleanup();
 
     render(<BinaryPlaceholder mode="diff" reason="missing" />);
@@ -1282,7 +1496,9 @@ describe('BinaryPlaceholder (shared Diff/Rendered placeholder for generic-binary
     expect(screen.getByText("This file type can't be compared line-by-line.")).toBeInTheDocument();
     // No `changed` passed -> the hint is Download alone, not an
     // empty/malformed string.
-    expect(screen.getByText(/Right-click this file in Changes or Explorer and choose Download/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Right-click this file in Changes or Explorer and choose Download/),
+    ).toBeInTheDocument();
     cleanup();
 
     render(<BinaryPlaceholder mode="rendered" reason="too-large" />);

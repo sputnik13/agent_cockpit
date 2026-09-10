@@ -31,7 +31,12 @@ async function main() {
   const fixture = generateFixture();
   const userDataDir = mkdtempSync(join(tmpdir(), 'agent-cockpit-verify-'));
   const app = await electron.launch({
-    args: [MAIN, `--user-data-dir=${userDataDir}`, `--tmux-socket=${TMUX_SOCKET}`],
+    args: [
+      MAIN,
+      '--headless',
+      `--user-data-dir=${userDataDir}`,
+      `--tmux-socket=${TMUX_SOCKET}`,
+    ],
   });
   const win = await app.firstWindow();
   win.setDefaultTimeout(15000);

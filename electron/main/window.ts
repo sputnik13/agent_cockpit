@@ -1,5 +1,6 @@
 import { BrowserWindow, shell } from 'electron';
 import { join } from 'node:path';
+import { developmentAppIcon } from './appIcon';
 import { logger } from './logger';
 
 const DEV_SERVER_URL = process.env['ELECTRON_RENDERER_URL'];
@@ -82,6 +83,7 @@ export function createMainWindow(): BrowserWindow {
   // (src/renderer/shell/AppShell.tsx) so the OS window controls vertically center
   // within it.
   const TITLE_BAR_HEIGHT = 32;
+  const icon = developmentAppIcon(__dirname, Boolean(DEV_SERVER_URL));
   const chrome: Pick<
     Electron.BrowserWindowConstructorOptions,
     'titleBarStyle' | 'titleBarOverlay' | 'trafficLightPosition'
@@ -110,6 +112,7 @@ export function createMainWindow(): BrowserWindow {
     minHeight: 640,
     show: false,
     title: 'Agent Cockpit',
+    ...(icon ? { icon } : {}),
     backgroundColor: '#0e0f12',
     ...chrome,
     webPreferences: {

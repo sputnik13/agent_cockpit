@@ -52,6 +52,7 @@ In scope:
   mutates beads issue state via the `br` CLI (close/reopen/comment/create — NFR-2).
 - A renderer visual system: Tailwind v4 token layer, app-owned primitives, and
   Radix controls.
+- A branded application/launcher icon derived from a transparent source image.
 
 Out of scope:
 

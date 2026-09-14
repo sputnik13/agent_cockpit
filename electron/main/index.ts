@@ -8,6 +8,7 @@ import { startSessionReaper, type SessionReaperHandle } from './providers/sessio
 import { loadSettings } from './config';
 import { installApplicationMenu } from './menu';
 import { bootstrapPath } from './pathBootstrap';
+import { developmentAppIcon } from './appIcon';
 import { logger } from './logger';
 import { initLogFileSink } from './logFileSink';
 import { join } from 'node:path';
@@ -87,6 +88,13 @@ app.whenReady().then(() => {
   // so without this the terminal (tmux) and task detail pane (br) fail to find
   // their tools even though they are installed. See pathBootstrap.ts.
   bootstrapPath();
+  // BrowserWindow's icon is ignored by macOS. Set the Dock icon explicitly in
+  // development so it matches the packaged app rather than Electron's default.
+  const developmentIcon = developmentAppIcon(
+    __dirname,
+    Boolean(process.env['ELECTRON_RENDERER_URL']),
+  );
+  if (developmentIcon) app.dock?.setIcon(developmentIcon);
   // Start persisting the log to disk as early as possible (right after the PATH
   // bootstrap, before any other startup work) so everything from here survives a
   // crash. The sink flushes the current in-memory buffer first, so any entry

@@ -30,6 +30,8 @@ extraResources:
       - '**/*'
 
 mac:
+  # electron-builder derives the macOS icon bundle from this square, alpha-preserving PNG.
+  icon: build/icon.png
   category: public.app-category.developer-tools
   target:
     - target: dmg
@@ -46,6 +48,7 @@ mac:
   # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID. See docs/BUILD.md.
 
 linux:
+  icon: build/icon.png
   category: Development
   target:
     - AppImage

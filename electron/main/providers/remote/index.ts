@@ -34,6 +34,8 @@ import type {
   FileBytesUnavailableReason,
   FileReadOptions,
   FileReadResult,
+  MuxSessionInfo,
+  MuxTopologySnapshot,
   ProjectKind,
   RemoteConnectionSpec,
   ResolvedPath,
@@ -43,6 +45,8 @@ import type {
   TerminalExitHandler,
   TerminalHandle,
   TerminalOpenOptions,
+  TerminalScrollbackLine,
+  TerminalWriteKind,
   WatchHandler,
   WatchSubscription,
   WorkspaceProvider,
@@ -63,6 +67,9 @@ import type {
 import { beadsArgs, beadsErrorMessage, parseComments, parseCreatedId } from '../../beads/runner';
 import { RemoteTerminalManager } from './tmux';
 import { RemoteTmuxControlManager, type ControlChannel } from './tmuxControl';
+import { RemoteMuxLauncher } from './mux';
+import { RemoteMuxConnectionManager } from './muxConnection';
+import { RemoteMuxTerminalManager } from './muxTerminal';
 import { createEnvLauncher, DEV_ENV_SCOPE_UNIT, type EnvLauncher } from './envLauncher';
 import { sessionNameToken } from '../sessionKey';
 import { loadSettings } from '../../config';
@@ -71,7 +78,6 @@ import { createConnectionMachine, type ConnectionMachine } from '../connectionMa
 import { createWatchIngest } from '../../watch/ingest';
 import { deriveWatchSpec } from '@shared/watch/policy';
 import { TERMINAL_COLORTERM, tmuxServerOptionShell } from '@shared/tmux';
-
 
 /**
  * Map a git porcelain/name-status code to a FileChangeStatus. Codes come from
@@ -366,6 +372,8 @@ export class RemoteProvider implements WorkspaceProvider {
   private readonly nameToken: string;
   private helper: LaunchedHelper | null = null;
   private controlMgr: RemoteTmuxControlManager | null = null;
+  private muxMgr: RemoteMuxConnectionManager | null = null;
+  private muxTerminals: RemoteMuxTerminalManager | null = null;
   /** Dev-environment launcher (resolved at connect from the global devEnv
    *  setting); ensure() applies the systemd-scope memory cap, wrapExec wraps the
    *  control opener (identity for the shipped modes). */
@@ -474,7 +482,9 @@ export class RemoteProvider implements WorkspaceProvider {
         const ctrl: ControlChannel = {
           write: (data: string) => channel.write(data),
           onData: (handler: (chunk: Buffer) => void) => {
-            channel.onData((chunk) => handler(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)));
+            channel.onData((chunk) =>
+              handler(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)),
+            );
           },
           onClose: (handler: () => void) => {
             channel.onClose(handler);
@@ -492,9 +502,43 @@ export class RemoteProvider implements WorkspaceProvider {
       // (e.g. a hook firing outside the connected/reconnecting window) safe no-ops.
       this.controlMgr.onReconnecting = () => this.machine.toReconnecting();
       this.controlMgr.onReattached = () => this.machine.toConnected();
-      this.controlMgr.onReattachExhausted = () => this.machine.toFailed('tmux control channel lost');
+      this.controlMgr.onReattachExhausted = () =>
+        this.machine.toFailed('tmux control channel lost');
     }
     return this.controlMgr;
+  }
+
+  /**
+   * Lazily creates the remote mux raw-channel manager. Its reconnect cycle is
+   * deliberately observable through the existing ConnectionMachine, while the
+   * consumer-facing re-initialization contract remains its monotonic mux epoch.
+   * This does not select the mux backend yet; it supplies the M2 transport seam.
+   */
+  muxConnection(): RemoteMuxConnectionManager {
+    if (!this.muxMgr) {
+      const launcher = new RemoteMuxLauncher(this.transport);
+      this.muxMgr = new RemoteMuxConnectionManager(
+        async () => (await launcher.launch()).channel,
+        this.projectId,
+      );
+      this.muxMgr.onReconnecting = () => this.machine.toReconnecting();
+      this.muxMgr.onReattached = () => this.machine.toConnected();
+      this.muxMgr.onReattachExhausted = () => this.machine.toFailed('mux channel lost');
+    }
+    return this.muxMgr;
+  }
+
+  private muxTerminalManager(): RemoteMuxTerminalManager {
+    if (!this.muxTerminals) {
+      this.muxTerminals = new RemoteMuxTerminalManager(
+        this.muxConnection(),
+        this.spec.remotePath,
+        this.projectId,
+        () => loadSettings().muxPersistScrollback,
+        () => loadSettings().muxScrollbackLines,
+      );
+    }
+    return this.muxTerminals;
   }
 
   /** The control-mode session name for use in IPC responses. */
@@ -529,8 +573,7 @@ export class RemoteProvider implements WorkspaceProvider {
       // with a generic message; append the underlying cause so the failure is
       // diagnosable from the log alone.
       const cause = (err as { cause?: unknown }).cause;
-      const causeMsg =
-        cause instanceof Error ? cause.message : cause != null ? String(cause) : '';
+      const causeMsg = cause instanceof Error ? cause.message : cause != null ? String(cause) : '';
       logger.error(
         `SSH connect failed at phase=${phase}: ${msg}${causeMsg ? ` (cause: ${causeMsg})` : ''}`,
         ctx,
@@ -563,8 +606,7 @@ export class RemoteProvider implements WorkspaceProvider {
     // connecting. The bare server-start command (no shell env prefix; systemd-run
     // execs it directly) mirrors the opener's first chained command.
     const devEnv = loadSettings().devEnv;
-    const serverStartCmd =
-      `tmux -L ${CONTROL_SOCKET} start-server \\; ${tmuxServerOptionShell()}`;
+    const serverStartCmd = `tmux -L ${CONTROL_SOCKET} start-server \\; ${tmuxServerOptionShell()}`;
     this.envLauncher = createEnvLauncher(devEnv, {
       transport: this.transport,
       scopeUnit: DEV_ENV_SCOPE_UNIT,
@@ -592,8 +634,12 @@ export class RemoteProvider implements WorkspaceProvider {
     const ctx = 'remote-disconnect';
     logger.info(`SSH disconnect start: ${this.spec.user}@${this.spec.host}`, ctx);
     this.terminals.closeAll();
+    this.muxTerminals?.closeAll();
+    this.muxTerminals = null;
     this.controlMgr?.close();
     this.controlMgr = null;
+    this.muxMgr?.close();
+    this.muxMgr = null;
     this.helper?.channel.close();
     this.helper = null;
     await this.transport.disconnect();
@@ -665,7 +711,11 @@ export class RemoteProvider implements WorkspaceProvider {
     const res = await this.rpc().gitDiff(cwd, filePath, baseline);
     return res.patch;
   }
-  async getDiffBundle(worktreePath: string, filePath: string, baseline?: string): Promise<DiffBundle> {
+  async getDiffBundle(
+    worktreePath: string,
+    filePath: string,
+    baseline?: string,
+  ): Promise<DiffBundle> {
     // One round trip: patch + both sides' content. The helper reads the new side
     // from the working tree and the old side via `git show <baseline>:<path>`
     // (repo-relative). Unreadable/truncated sides come back as null so the
@@ -770,7 +820,11 @@ export class RemoteProvider implements WorkspaceProvider {
   // over the SFTP-backed RemoteTransport primitive, NOT the helper RPC's
   // text-only, 2 MiB-capped readFile — this is the whole point of the SFTP
   // design (see the issue's Contract). Always the whole file; never a range.
-  async exportFile(path: string, destAbsPath: string, opts?: { worktreePath?: string }): Promise<void> {
+  async exportFile(
+    path: string,
+    destAbsPath: string,
+    opts?: { worktreePath?: string },
+  ): Promise<void> {
     const base = opts?.worktreePath || this.spec.remotePath;
     const source = await this.transport.createReadStream(this.resolveIn(base, path));
     await writeStreamToDest(source, destAbsPath);
@@ -811,7 +865,8 @@ export class RemoteProvider implements WorkspaceProvider {
     const res = await this.rpc().beadsExec(this.spec.remotePath, [...args, '--json']);
     if (res.exitCode !== 0) {
       throw new Error(
-        beadsErrorMessage(res.stdout, null) ?? `br ${args.join(' ')} exited ${String(res.exitCode)}`,
+        beadsErrorMessage(res.stdout, null) ??
+          `br ${args.join(' ')} exited ${String(res.exitCode)}`,
       );
     }
     return res.stdout;
@@ -832,28 +887,121 @@ export class RemoteProvider implements WorkspaceProvider {
     return parseComments(await this.runBeads(beadsArgs.listComments(issueId)));
   }
 
-  // Terminal — persistent tmux session over an ssh2 PTY shell (br h7a.7.4).
+  // Terminal — tmux by default; cockpit-mux uses the raw MessagePack bridge.
   async openTerminal(opts: TerminalOpenOptions): Promise<TerminalHandle> {
     const cwd = opts.cwd ?? this.spec.remotePath;
+    if (loadSettings().terminalBackend === 'cockpit-mux') {
+      return this.muxTerminalManager().open({ ...opts, cwd });
+    }
     return this.terminals.open({ ...opts, cwd });
   }
-  async writeTerminal(id: string, data: string): Promise<void> {
+  async splitMuxTerminal(
+    sourceId: string,
+    id: string,
+    direction?: 'horizontal' | 'vertical',
+  ): Promise<TerminalHandle> {
+    return this.muxTerminalManager().split(sourceId, id, direction);
+  }
+  async newMuxWindow(sourceId: string, id: string): Promise<TerminalHandle> {
+    return this.muxTerminalManager().newWindow(sourceId, id);
+  }
+  async writeTerminal(id: string, data: string, kind?: TerminalWriteKind): Promise<void> {
+    if (this.muxTerminals?.has(id)) {
+      await this.muxTerminals.write(id, data, kind);
+      return;
+    }
     this.terminals.write(id, data);
   }
   async resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
+    if (this.muxTerminals?.has(id)) {
+      await this.muxTerminals.resize(id, cols, rows);
+      return;
+    }
     this.terminals.resize(id, cols, rows);
   }
+  async scrollbackTerminal(
+    id: string,
+    before: number,
+    count: number,
+  ): Promise<TerminalScrollbackLine[]> {
+    if (loadSettings().terminalBackend !== 'cockpit-mux') return [];
+    return this.muxTerminalManager().scrollback(id, before, count);
+  }
+  async setTerminalBroadcast(id: string, enabled: boolean): Promise<void> {
+    if (this.muxTerminals?.has(id)) await this.muxTerminals.setBroadcast(id, enabled);
+  }
+  async setTerminalBroadcastScope(id: string, scope: 'window' | 'session'): Promise<void> {
+    if (this.muxTerminals?.has(id)) await this.muxTerminals.setBroadcastScope(id, scope);
+  }
   onTerminalData(id: string, handler: TerminalDataHandler): () => void {
+    if (this.muxTerminals?.has(id)) return this.muxTerminals.onData(id, handler);
     return this.terminals.onData(id, handler);
   }
   onTerminalExit(id: string, handler: TerminalExitHandler): () => void {
+    if (this.muxTerminals?.has(id)) return this.muxTerminals.onExit(id, handler);
     return this.terminals.onExit(id, handler);
   }
   async closeTerminal(id: string, opts?: { kill?: boolean }): Promise<void> {
+    if (
+      loadSettings().terminalBackend === 'cockpit-mux' ||
+      this.muxTerminals?.has(id) ||
+      this.muxTerminals?.hasDetached(id)
+    ) {
+      await this.muxTerminalManager().close(id, opts);
+      return;
+    }
     this.terminals.close(id, opts);
   }
   async listTerminals(): Promise<string[]> {
+    if (loadSettings().terminalBackend === 'cockpit-mux')
+      return this.muxTerminalManager().listSessions();
     return this.terminals.listSessions();
+  }
+  async listMuxSessions(): Promise<MuxSessionInfo[]> {
+    return this.muxTerminals?.listMuxSessions() ?? [];
+  }
+  async listMuxTopology(): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().listMuxTopology();
+  }
+  async selectMuxWindow(sessionId: string, windowId: string): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().selectMuxWindow(sessionId, windowId);
+  }
+  async selectMuxPane(
+    sessionId: string,
+    windowId: string,
+    paneId: string,
+  ): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().selectMuxPane(sessionId, windowId, paneId);
+  }
+  async zoomMuxPane(
+    sessionId: string,
+    windowId: string,
+    paneId: string | null,
+  ): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().zoomMuxPane(sessionId, windowId, paneId);
+  }
+  async resizeMuxSplit(
+    sessionId: string,
+    windowId: string,
+    paneId: string,
+    ratio: number,
+  ): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().resizeMuxSplit(sessionId, windowId, paneId, ratio);
+  }
+  async destroyMuxWindow(sessionId: string, windowId: string): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().destroyWindow(sessionId, windowId);
+  }
+  async destroyMuxSession(sessionId: string): Promise<void> {
+    await this.muxTerminalManager().destroySession(sessionId);
+  }
+  async pinMuxSession(sessionId: string, pinned: boolean): Promise<void> {
+    await this.muxTerminalManager().pinSession(sessionId, pinned);
+  }
+  async shutdownMux(): Promise<void> {
+    if (!this.muxTerminals) return;
+    await this.muxTerminals.shutdown();
+    this.muxTerminals = null;
+    this.muxMgr = null;
   }
 
   // Watch — helper watch.subscribe push events (br h7a.7.3). The helper applies
@@ -903,7 +1051,10 @@ export class RemoteProvider implements WorkspaceProvider {
    * exist under a worktree root at all — there is nothing for
    * `matchesSignal` to ever match.
    */
-  async subscribeWorktreeWatch(worktreePath: string, handler: WatchHandler): Promise<WatchSubscription> {
+  async subscribeWorktreeWatch(
+    worktreePath: string,
+    handler: WatchHandler,
+  ): Promise<WatchSubscription> {
     return this.subscribeAt(worktreePath, handler);
   }
 }

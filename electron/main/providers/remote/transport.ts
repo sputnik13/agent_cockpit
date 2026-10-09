@@ -29,6 +29,7 @@ import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { ConnectionState, RemoteConnectionSpec, StatResult } from '../types';
 import { resolveSshConfig } from './sshConfigResolve';
 import { logger } from '../../logger';
@@ -75,6 +76,8 @@ export class Ssh2Transport implements RemoteTransport {
   private conn: Ssh2Client | null = null;
   private stateValue: ConnectionState = 'disconnected';
   private readonly stateHandlers = new Set<(s: ConnectionState) => void>();
+  /** Long-lived exec channels must finish before their parent SSH connection. */
+  private readonly streams = new Set<ClientChannel>();
 
   /** Current connection state. */
   state(): ConnectionState {
@@ -215,6 +218,8 @@ export class Ssh2Transport implements RemoteTransport {
       return;
     }
 
+    await Promise.all([...this.streams].map((channel) => this.closeStream(channel)));
+
     await new Promise<void>((resolve) => {
       let done = false;
       const finish = (): void => {
@@ -306,8 +311,32 @@ export class Ssh2Transport implements RemoteTransport {
           reject(new RemoteTransportError(`execStream failed: ${err.message}`, '', 'connect', err));
           return;
         }
+        this.streams.add(channel);
+        channel.once('close', () => this.streams.delete(channel));
+        channel.once('error', () => this.streams.delete(channel));
         resolve({ stdin: channel, stdout: channel, stderr: channel.stderr });
       });
+    });
+  }
+
+  private closeStream(channel: ClientChannel): Promise<void> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        this.streams.delete(channel);
+        resolve();
+      };
+      channel.once('close', finish);
+      channel.once('error', finish);
+      try {
+        channel.end();
+      } catch {
+        finish();
+        return;
+      }
+      setTimeout(finish, 1_000).unref?.();
     });
   }
 
@@ -364,7 +393,9 @@ export class Ssh2Transport implements RemoteTransport {
         { term: opts.term ?? TERMINAL_TERM, cols: opts.cols, rows: opts.rows },
         (err, channel) => {
           if (err) {
-            reject(new RemoteTransportError(`openShell failed: ${err.message}`, '', 'connect', err));
+            reject(
+              new RemoteTransportError(`openShell failed: ${err.message}`, '', 'connect', err),
+            );
             return;
           }
           resolve(asPtyChannel(channel));
@@ -383,7 +414,9 @@ export class Ssh2Transport implements RemoteTransport {
       if (!conn) return;
       conn.sftp((err, sftp) => {
         if (err) {
-          reject(new RemoteTransportError(`failed to open SFTP: ${err.message}`, '', 'connect', err));
+          reject(
+            new RemoteTransportError(`failed to open SFTP: ${err.message}`, '', 'connect', err),
+          );
           return;
         }
         resolve(new Ssh2ProvisionSession(sftp));
@@ -408,7 +441,9 @@ export class Ssh2Transport implements RemoteTransport {
       if (!conn) return;
       conn.sftp((err, sftp) => {
         if (err) {
-          reject(new RemoteTransportError(`failed to open SFTP: ${err.message}`, '', 'connect', err));
+          reject(
+            new RemoteTransportError(`failed to open SFTP: ${err.message}`, '', 'connect', err),
+          );
           return;
         }
         sftp.stat(remotePath, (statErr, stats) => {
@@ -449,7 +484,9 @@ export class Ssh2Transport implements RemoteTransport {
       if (!conn) return;
       conn.sftp((err, sftp) => {
         if (err) {
-          reject(new RemoteTransportError(`failed to open SFTP: ${err.message}`, '', 'connect', err));
+          reject(
+            new RemoteTransportError(`failed to open SFTP: ${err.message}`, '', 'connect', err),
+          );
           return;
         }
         const streamOpts: ReadStreamOptions = {};
@@ -645,7 +682,15 @@ class Ssh2ProvisionSession implements ProvisionSession {
         }
         this.sftp.exists(dir, (exists) => {
           if (exists) resolve();
-          else reject(new RemoteTransportError(`failed to create ${dir}: ${err.message}`, '', 'connect', err));
+          else
+            reject(
+              new RemoteTransportError(
+                `failed to create ${dir}: ${err.message}`,
+                '',
+                'connect',
+                err,
+              ),
+            );
         });
       });
     });
@@ -655,16 +700,41 @@ class Ssh2ProvisionSession implements ProvisionSession {
     return new Promise((resolve, reject) => {
       this.sftp.fastPut(localPath, remotePath, (putErr) => {
         if (putErr) {
-          reject(new RemoteTransportError(`upload failed: ${putErr.message}`, '', 'connect', putErr));
+          reject(
+            new RemoteTransportError(`upload failed: ${putErr.message}`, '', 'connect', putErr),
+          );
           return;
         }
         this.sftp.chmod(remotePath, mode, (chmodErr) => {
           if (chmodErr) {
-            reject(new RemoteTransportError(`chmod failed: ${chmodErr.message}`, '', 'connect', chmodErr));
+            reject(
+              new RemoteTransportError(
+                `chmod failed: ${chmodErr.message}`,
+                '',
+                'connect',
+                chmodErr,
+              ),
+            );
           } else {
             resolve();
           }
         });
+      });
+    });
+  }
+
+  async replaceExecutable(localPath: string, remotePath: string, mode: number): Promise<void> {
+    const temporaryPath = `${remotePath}.incoming-${randomUUID()}`;
+    await this.uploadExecutable(localPath, temporaryPath, mode);
+    await new Promise<void>((resolve, reject) => {
+      this.sftp.ext_openssh_rename(temporaryPath, remotePath, (err) => {
+        if (err) {
+          reject(
+            new RemoteTransportError(`atomic rename failed: ${err.message}`, '', 'connect', err),
+          );
+        } else {
+          resolve();
+        }
       });
     });
   }

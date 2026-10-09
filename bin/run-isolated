@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build this checkout's current source as an unpacked macOS app, then launch it
+# with an isolated Electron profile and Cockpit mux home. Every path is derived
+# from this script's location, so the command works from any managed worktree.
+#
+# Usage:
+#   bin/run-isolated [additional Electron arguments]
+#
+# The build and profile directories are intentionally unique and additive. The
+# script never reuses or modifies a developer's normal app profile or a prior
+# isolated build.
+
+root_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) app_subdir="mac-arm64" ;;
+  *)
+    echo "bin/run-isolated currently supports Apple Silicon macOS only." >&2
+    exit 1
+    ;;
+esac
+
+cd "${root_dir}"
+
+if [[ ! -d node_modules ]]; then
+  bin/setup
+fi
+
+mkdir -p release
+build_dir="$(mktemp -d "${root_dir}/release/isolated-current.XXXXXX")"
+profile_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-cockpit-isolated.XXXXXX")"
+tmux_socket="ac-isolated-${$}-${RANDOM}"
+launcher_started="$(ps -o lstart= -p "$$")"
+
+# The guardian survives this launcher and cleans only this run's isolated app,
+# profile, and tmux server after the app exits or the launcher dies during build.
+node "${root_dir}/scripts/start-isolated-run-guardian.mjs" \
+  "${profile_dir}" "${build_dir}" "${tmux_socket}" "$$" "${launcher_started}" \
+  >"${profile_dir}/guardian.log" 2>&1 </dev/null &
+guardian_pid=$!
+version="$(node scripts/release-version.mjs)"
+
+echo "Building isolated app from ${root_dir}"
+npm run mux:build
+npm run build
+npx electron-builder --mac --dir --config.directories.output="${build_dir}" -c.extraMetadata.version="${version}"
+
+app_path="${build_dir}/${app_subdir}/Agent Cockpit.app/Contents/MacOS/Agent Cockpit"
+if [[ ! -x "${app_path}" ]]; then
+  echo "Expected packaged app is missing: ${app_path}" >&2
+  exit 1
+fi
+
+BYOBU_DISABLE=1 \
+COCKPIT_MUX_HOME="${profile_dir}/mux-home" \
+AC_TMUX_SOCKET="${tmux_socket}" \
+AC_TMUX_EPHEMERAL=1 \
+COCKPIT_MUX_EPHEMERAL=1 \
+"${app_path}" --user-data-dir="${profile_dir}" "$@" >"${profile_dir}/app.log" 2>&1 &
+app_pid=$!
+
+printf 'App: %s\nProfile: %s\nLog: %s\nPID: %s\nGuardian PID: %s\n' \
+  "${app_path}" "${profile_dir}" "${profile_dir}/app.log" "${app_pid}" "${guardian_pid}"

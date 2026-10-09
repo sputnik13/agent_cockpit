@@ -63,9 +63,7 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
             lights / Windows caption overlay). It is the window drag region; on
             Linux (default frame) it is omitted. Height matches TITLE_BAR_HEIGHT
             in electron/main/window.ts. */}
-        {SHOW_TITLE_STRIP && (
-          <div className="app-drag h-8 shrink-0 bg-panel" aria-hidden="true" />
-        )}
+        {SHOW_TITLE_STRIP && <div className="app-drag h-8 shrink-0 bg-panel" aria-hidden="true" />}
         <ProjectTabs />
         <div className="min-h-0 min-w-0 flex-1">{children}</div>
         <StatusRegion />

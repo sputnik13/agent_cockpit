@@ -21,6 +21,6 @@
     "declarationDir": "out/types/renderer",
     "allowImportingTsExtensions": false
   },
-  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/shared/**/*.ts"],
+  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/shared/**/*.ts", "cockpit-mux/daemon/scrollback-policy.json"],
   "exclude": ["node_modules", "out", "dist", "electron", "**/*.test.ts", "**/*.test.tsx"]
 }

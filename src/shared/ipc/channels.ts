@@ -20,8 +20,12 @@ import type {
   ProjectKind,
   ResolvedPath,
   StatResult,
+  TerminalData,
   TerminalExitInfo,
   TerminalOpenOptions,
+  TerminalScrollbackLine,
+  MuxSessionInfo,
+  MuxTopologySnapshot,
   WatchEvent,
 } from '@shared/providers/types';
 import type { AppSettings } from '@shared/settings';
@@ -88,8 +92,13 @@ export const Channels = {
   filesSaveAs: 'files:save-as',
 
   terminalOpen: 'terminal:open',
+  terminalSplit: 'terminal:split',
+  terminalNewWindow: 'terminal:new-window',
   terminalWrite: 'terminal:write',
   terminalResize: 'terminal:resize',
+  terminalBroadcast: 'terminal:broadcast',
+  terminalBroadcastScope: 'terminal:broadcast-scope',
+  terminalScrollback: 'terminal:scrollback',
   terminalClose: 'terminal:close',
   terminalList: 'terminal:list',
 
@@ -114,6 +123,16 @@ export const Channels = {
   sessionsList: 'sessions:list',
   sessionsKill: 'sessions:kill',
   sessionsKillDetached: 'sessions:kill-detached',
+  muxSessionsList: 'mux-sessions:list',
+  muxSessionsDestroy: 'mux-sessions:destroy',
+  muxSessionsPin: 'mux-sessions:pin',
+  muxSessionsShutdown: 'mux-sessions:shutdown',
+  muxTopologyList: 'mux-topology:list',
+  muxTopologySelectWindow: 'mux-topology:select-window',
+  muxTopologySelectPane: 'mux-topology:select-pane',
+  muxTopologyZoomPane: 'mux-topology:zoom-pane',
+  muxTopologyResizeSplit: 'mux-topology:resize-split',
+  muxTopologyDestroyWindow: 'mux-topology:destroy-window',
 
   // diagnostics log channels
   logsGet: 'logs:get',
@@ -272,7 +291,7 @@ export interface TmuxSessionInfo {
 export interface TerminalDataEvent {
   projectId: string;
   terminalId: string;
-  data: string;
+  data: TerminalData;
 }
 export interface TerminalExitEvent {
   projectId: string;
@@ -384,7 +403,10 @@ export interface IpcContract {
     request: { path: string; opts?: FileBytesOptions; projectId?: string };
     response: { bytes: FileBytesResult };
   };
-  [Channels.providerStat]: { request: { path: string; projectId?: string }; response: { stat: StatResult } };
+  [Channels.providerStat]: {
+    request: { path: string; projectId?: string };
+    response: { stat: StatResult };
+  };
   [Channels.providerListDir]: {
     request: { dirPath: string; projectId?: string };
     response: { entries: DirEntry[] };
@@ -393,8 +415,14 @@ export interface IpcContract {
     request: { input: string; base?: string; projectId?: string };
     response: { resolved: ResolvedPath };
   };
-  [Channels.providerDetectBeads]: { request: { projectId?: string } | void; response: { hasBeads: boolean } };
-  [Channels.providerGetTaskGraph]: { request: { projectId?: string } | void; response: { graph: BeadsTaskGraph } };
+  [Channels.providerDetectBeads]: {
+    request: { projectId?: string } | void;
+    response: { hasBeads: boolean };
+  };
+  [Channels.providerGetTaskGraph]: {
+    request: { projectId?: string } | void;
+    response: { graph: BeadsTaskGraph };
+  };
   [Channels.providerGetTask]: {
     request: { issueId: string; projectId?: string };
     response: { issue: BeadsIssue | null };
@@ -437,17 +465,91 @@ export interface IpcContract {
     response: { savedPath: string | null };
   };
 
-  [Channels.terminalOpen]: { request: { opts: TerminalOpenOptions }; response: { terminalId: string } };
-  [Channels.terminalWrite]: { request: { terminalId: string; data: string }; response: { ok: true } };
-  [Channels.terminalResize]: {
-    request: { terminalId: string; cols: number; rows: number };
+  [Channels.terminalOpen]: {
+    request: { opts: TerminalOpenOptions; projectId?: string };
+    response: { terminalId: string };
+  };
+  [Channels.terminalWrite]: {
+    request: { terminalId: string; data: string; kind?: 'input' | 'reply'; projectId?: string };
     response: { ok: true };
+  };
+  [Channels.terminalResize]: {
+    request: { terminalId: string; cols: number; rows: number; projectId?: string };
+    response: { ok: true };
+  };
+  [Channels.terminalBroadcast]: {
+    request: { terminalId: string; enabled: boolean; projectId?: string };
+    response: { ok: true };
+  };
+  [Channels.terminalBroadcastScope]: {
+    request: { terminalId: string; scope: 'window' | 'session'; projectId?: string };
+    response: { ok: true };
+  };
+  [Channels.terminalScrollback]: {
+    request: { terminalId: string; before: number; count: number; projectId?: string };
+    response: { lines: TerminalScrollbackLine[] };
   };
   [Channels.terminalClose]: {
-    request: { terminalId: string; kill?: boolean };
+    request: { terminalId: string; kill?: boolean; projectId?: string };
     response: { ok: true };
   };
-  [Channels.terminalList]: { request: void; response: { keys: string[] } };
+  [Channels.terminalList]: { request: { projectId?: string } | void; response: { keys: string[] } };
+  [Channels.terminalSplit]: {
+    request: {
+      sourceId: string;
+      terminalId: string;
+      direction?: 'horizontal' | 'vertical';
+      projectId?: string;
+    };
+    response: { terminalId: string };
+  };
+  [Channels.terminalNewWindow]: {
+    request: { sourceId: string; terminalId: string; projectId?: string };
+    response: { terminalId: string };
+  };
+  [Channels.muxSessionsList]: {
+    request: void;
+    response: { sessions: Array<MuxSessionInfo & { projectId: string }> };
+  };
+  [Channels.muxSessionsDestroy]: {
+    request: { projectId: string; sessionId: string };
+    response: { ok: true };
+  };
+  [Channels.muxSessionsPin]: {
+    request: { projectId: string; sessionId: string; pinned: boolean };
+    response: { ok: true };
+  };
+  [Channels.muxSessionsShutdown]: { request: void; response: { failedProjectIds: string[] } };
+  [Channels.muxTopologyList]: {
+    request: { projectId?: string };
+    response: MuxTopologySnapshot;
+  };
+  [Channels.muxTopologySelectWindow]: {
+    request: { projectId: string; sessionId: string; windowId: string };
+    response: MuxTopologySnapshot;
+  };
+  [Channels.muxTopologySelectPane]: {
+    request: { projectId: string; sessionId: string; windowId: string; paneId: string };
+    response: MuxTopologySnapshot;
+  };
+  [Channels.muxTopologyZoomPane]: {
+    request: { projectId: string; sessionId: string; windowId: string; paneId: string | null };
+    response: MuxTopologySnapshot;
+  };
+  [Channels.muxTopologyResizeSplit]: {
+    request: {
+      projectId: string;
+      sessionId: string;
+      windowId: string;
+      paneId: string;
+      ratio: number;
+    };
+    response: MuxTopologySnapshot;
+  };
+  [Channels.muxTopologyDestroyWindow]: {
+    request: { projectId: string; sessionId: string; windowId: string };
+    response: MuxTopologySnapshot;
+  };
 
   // tmux control-mode (-CC): additive channels for the active project's control session.
   // `projectId` (optional, additive) EXPLICITLY addresses this open at a
@@ -487,7 +589,10 @@ export interface IpcContract {
   // original "active project" behavior for callers that genuinely mean
   // "whatever's on screen right now" (e.g. a user-driven keystroke/click
   // while looking at the active project).
-  [Channels.tmuxControlClose]: { request: { kill?: boolean; projectId?: string }; response: { ok: true } };
+  [Channels.tmuxControlClose]: {
+    request: { kill?: boolean; projectId?: string };
+    response: { ok: true };
+  };
   [Channels.tmuxControlCommand]: {
     request: { args: string; projectId?: string };
     response: { reply: TmuxCommandReply };
@@ -523,7 +628,10 @@ export interface IpcContract {
     };
     response: { note: NoteRecord };
   };
-  [Channels.notesUpdate]: { request: { id: number; body: string }; response: { note: NoteRecord | null } };
+  [Channels.notesUpdate]: {
+    request: { id: number; body: string };
+    response: { note: NoteRecord | null };
+  };
   [Channels.notesDelete]: { request: { id: number }; response: { ok: true } };
   [Channels.notesList]: {
     request: { projectId: string; targetKind?: ReviewTargetKind; targetId?: string };
@@ -532,7 +640,10 @@ export interface IpcContract {
   [Channels.notesExport]: { request: { projectId: string }; response: { markdown: string } };
 
   [Channels.settingsGet]: { request: void; response: { settings: AppSettings } };
-  [Channels.settingsSet]: { request: { patch: Partial<AppSettings> }; response: { settings: AppSettings } };
+  [Channels.settingsSet]: {
+    request: { patch: Partial<AppSettings> };
+    response: { settings: AppSettings };
+  };
   [Channels.settingsFonts]: { request: void; response: { fonts: string[] } };
 
   [Channels.sessionsList]: { request: void; response: { sessions: TmuxSessionInfo[] } };

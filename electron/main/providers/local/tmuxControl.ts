@@ -88,7 +88,9 @@ export interface CommandOptions {
 /** Resolve or reject a pending command from its reply, honoring its tolerance. */
 function settleCommand(cmd: PendingCommand, reply: CommandReply): void {
   if (reply.error && !cmd.tolerateErrors) {
-    cmd.reject(new Error(`tmux command error: ${reply.lines.join('; ') || 'tmux returned %error'}`));
+    cmd.reject(
+      new Error(`tmux command error: ${reply.lines.join('; ') || 'tmux returned %error'}`),
+    );
   } else {
     cmd.resolve(reply);
   }
@@ -100,6 +102,7 @@ function settleCommand(cmd: PendingCommand, reply: CommandReply): void {
  * in the `%begin`/`%end`/`%error` block so replies correlate in FIFO order.
  */
 export class LocalTmuxControlManager {
+  private readonly socket: string;
   private proc: pty.IPty | null = null;
   private readonly parser = new TmuxControlParser();
   private readonly handlers = new Set<NotificationHandler>();
@@ -140,7 +143,11 @@ export class LocalTmuxControlManager {
   constructor(
     private readonly sessionToken: string,
     private readonly rootPath: string,
-  ) {}
+    socket = SOCKET,
+    private readonly configPath?: string,
+  ) {
+    this.socket = socket;
+  }
 
   /** Control-session name for this project (distinct from per-key sessions).
    *  `sessionToken` is the project id (default) or a sha of the project root
@@ -164,6 +171,7 @@ export class LocalTmuxControlManager {
     const cols = opts?.cols ?? 80;
     const rows = opts?.rows ?? 24;
     const env = terminalPaneEnv(process.env);
+    const configArgs = this.configPath ? ['-f', this.configPath] : [];
     // Set the GLOBAL history-limit on the socket BEFORE the first new-session.
     // `new-session -A` creates the initial pane as part of session creation
     // (there is no pre-pane command slot), and `set-option` does NOT resize
@@ -188,16 +196,27 @@ export class LocalTmuxControlManager {
     // `set -g` sub-commands chained after it via the literal `;` is harmless (they
     // target the server it just started).
     const srv = withNativeArch('tmux', [
-      '-L', SOCKET,
+      ...configArgs,
+      '-L',
+      this.socket,
       'start-server',
-      ...tmuxServerOptionArgs(),
+      ...tmuxServerOptionArgs({ exitEmpty: process.env['AC_TMUX_EPHEMERAL'] === '1' }),
     ]);
     spawnSync(srv.file, srv.args, { stdio: 'ignore' });
     // Wrap with arch -arm64 when translated under Rosetta (no-op otherwise) so
     // the control-mode tmux client attaches native; the server above is already
     // born native via the same wrapper.
     const ctl = withNativeArch('tmux', [
-      '-L', SOCKET, '-CC', 'new-session', '-A', '-s', this.sessionName(), '-c', this.rootPath,
+      ...configArgs,
+      '-L',
+      this.socket,
+      '-CC',
+      'new-session',
+      '-A',
+      '-s',
+      this.sessionName(),
+      '-c',
+      this.rootPath,
     ]);
     this.proc = pty.spawn(
       ctl.file,
@@ -431,7 +450,9 @@ export class LocalTmuxControlManager {
   killSession(): void {
     this.close();
     if (hasTmux()) {
-      spawnSync('tmux', ['-L', SOCKET, 'kill-session', '-t', this.sessionName()], { stdio: 'ignore' });
+      spawnSync('tmux', ['-L', this.socket, 'kill-session', '-t', this.sessionName()], {
+        stdio: 'ignore',
+      });
     }
   }
 }

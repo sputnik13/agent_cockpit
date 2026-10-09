@@ -24,6 +24,9 @@ import type {
   TerminalExitHandler,
   TerminalHandle,
   TerminalOpenOptions,
+  MuxTopologySnapshot,
+  MuxSessionInfo,
+  TerminalScrollbackLine,
   WatchHandler,
   WatchSubscription,
   WorkspaceProvider,
@@ -56,7 +59,10 @@ export class FakeProvider implements WorkspaceProvider {
   readonly kind: ProjectKind;
   readonly projectId: string;
 
-  private statusValue: ConnectionStatus = { state: 'disconnected', since: new Date(0).toISOString() };
+  private statusValue: ConnectionStatus = {
+    state: 'disconnected',
+    since: new Date(0).toISOString(),
+  };
   private statusHandlers = new Set<(s: ConnectionStatus) => void>();
   private terminalData = new Map<string, Set<TerminalDataHandler>>();
   private terminalExit = new Map<string, Set<TerminalExitHandler>>();
@@ -108,13 +114,48 @@ export class FakeProvider implements WorkspaceProvider {
     if (!this.terminalExit.has(id)) this.terminalExit.set(id, new Set());
     return { id };
   }
+  async splitMuxTerminal(_sourceId: string, id: string): Promise<TerminalHandle> {
+    return this.openTerminal({ key: id, cols: 80, rows: 24 });
+  }
+  async newMuxWindow(_sourceId: string, id: string): Promise<TerminalHandle> {
+    return this.openTerminal({ key: id, cols: 80, rows: 24 });
+  }
   async listTerminals(): Promise<string[]> {
     return [...this.terminalData.keys()];
   }
+  async listMuxSessions(): Promise<MuxSessionInfo[]> {
+    return [];
+  }
+  async listMuxTopology(): Promise<MuxTopologySnapshot> {
+    return { epoch: 'fake', revision: 0, sessions: [] };
+  }
+  async selectMuxWindow(): Promise<MuxTopologySnapshot> {
+    return { epoch: 'fake', revision: 0, sessions: [] };
+  }
+  async selectMuxPane(): Promise<MuxTopologySnapshot> {
+    return { epoch: 'fake', revision: 0, sessions: [] };
+  }
+  async zoomMuxPane(): Promise<MuxTopologySnapshot> {
+    return { epoch: 'fake', revision: 0, sessions: [] };
+  }
+  async resizeMuxSplit(): Promise<MuxTopologySnapshot> {
+    return { epoch: 'fake', revision: 0, sessions: [] };
+  }
+  async destroyMuxWindow(): Promise<MuxTopologySnapshot> {
+    return { epoch: 'fake', revision: 0, sessions: [] };
+  }
+  async destroyMuxSession(): Promise<void> {}
+  async pinMuxSession(): Promise<void> {}
+  async shutdownMux(): Promise<void> {}
   async writeTerminal(id: string, data: string): Promise<void> {
     for (const h of this.terminalData.get(id) ?? []) h(data);
   }
   async resizeTerminal(): Promise<void> {}
+  async setTerminalBroadcast(): Promise<void> {}
+  async setTerminalBroadcastScope(): Promise<void> {}
+  async scrollbackTerminal(): Promise<TerminalScrollbackLine[]> {
+    return [];
+  }
   onTerminalData(id: string, handler: TerminalDataHandler): () => void {
     const set = this.terminalData.get(id) ?? new Set();
     set.add(handler);
@@ -151,7 +192,11 @@ export class FakeProvider implements WorkspaceProvider {
   async getFileDiff(_worktreePath: string, filePath: string): Promise<string> {
     return this.data.fileDiffs?.[filePath] ?? '';
   }
-  async getDiffBundle(_worktreePath: string, filePath: string, baseline?: string): Promise<DiffBundle> {
+  async getDiffBundle(
+    _worktreePath: string,
+    filePath: string,
+    baseline?: string,
+  ): Promise<DiffBundle> {
     const patch = this.data.fileDiffs?.[filePath] ?? '';
     const file = this.data.files?.[filePath];
     const newContent = file && !file.truncated && !file.isBinary ? file.content : null;
@@ -189,7 +234,12 @@ export class FakeProvider implements WorkspaceProvider {
 
   async readFileBytes(path: string, _opts?: FileBytesOptions): Promise<FileBytesResult> {
     return (
-      this.data.fileBytes?.[path] ?? { bytesBase64: null, sizeBytes: 0, exists: false, reason: 'missing' }
+      this.data.fileBytes?.[path] ?? {
+        bytesBase64: null,
+        sizeBytes: 0,
+        exists: false,
+        reason: 'missing',
+      }
     );
   }
 
@@ -235,7 +285,10 @@ export class FakeProvider implements WorkspaceProvider {
   /** Stub mirroring `subscribeWatch` — shares the same `watchers` map (keyed
    *  by its own unique token) so `emitWatch(paths, token)` can target either
    *  subscription independently in tests. */
-  async subscribeWorktreeWatch(_worktreePath: string, handler: WatchHandler): Promise<WatchSubscription> {
+  async subscribeWorktreeWatch(
+    _worktreePath: string,
+    handler: WatchHandler,
+  ): Promise<WatchSubscription> {
     const token = `fake-watch-wt-${++counter}`;
     this.watchers.set(token, handler);
     return {

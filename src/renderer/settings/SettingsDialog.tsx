@@ -1,8 +1,10 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   DEV_ENV_MODE_OPTIONS,
   FONT_FAMILY_OPTIONS,
   FONT_SIZE_OPTIONS,
+  MUX_SCROLLBACK_LINES_MAX,
+  MUX_SCROLLBACK_LINES_MIN,
   STRUCTURED_FOLD_MAX_MB_MAX,
   STRUCTURED_FOLD_MAX_MB_MIN,
   TERMINAL_BACKEND_OPTIONS,
@@ -14,7 +16,8 @@ import {
   type TerminalRenderer,
   type ThemeId,
 } from '@shared/settings';
-import { Dialog, Select, Tooltip, cn } from '../ui';
+import { Button, Dialog, Select, Tooltip, cn } from '../ui';
+import { agentCockpit } from '../providerClient';
 import { switchTerminalBackend, switchTerminalRenderer } from '../terminal/backendSwitch';
 import { useSettingsStore } from './settingsStore';
 
@@ -26,6 +29,8 @@ export function SettingsDialog(): JSX.Element {
   const set = useSettingsStore((s) => s.set);
   const fonts = useSettingsStore((s) => s.fonts);
   const loadFonts = useSettingsStore((s) => s.loadFonts);
+  const [confirmMuxShutdown, setConfirmMuxShutdown] = useState(false);
+  const [muxShutdownMessage, setMuxShutdownMessage] = useState<string | null>(null);
 
   // Enumerate system fonts the first time the dialog opens.
   useEffect(() => {
@@ -45,7 +50,12 @@ export function SettingsDialog(): JSX.Element {
   }, [fonts, settings.fontFamily]);
 
   return (
-    <Dialog open={open} onOpenChange={setOpen} title="Preferences" description="Settings are saved to your config file.">
+    <Dialog
+      open={open}
+      onOpenChange={setOpen}
+      title="Preferences"
+      description="Settings are saved to your config file."
+    >
       <div className="flex flex-col gap-3">
         <Field label="Color theme" help="Light or dark color palette for the whole app.">
           <Select
@@ -73,7 +83,7 @@ export function SettingsDialog(): JSX.Element {
         </Field>
         <Field
           label="Terminal backend"
-          help="How terminals run: one tmux session per tab, or a single tmux control-mode (-CC) session per project mapping windows to tabs and panes to splits."
+          help="Choose tmux session tabs, tmux control mode, or the Ghostty-backed Cockpit mux for local and remote projects."
         >
           <Select
             aria-label="Terminal backend"
@@ -83,8 +93,63 @@ export function SettingsDialog(): JSX.Element {
           />
         </Field>
         <Field
+          label="Cockpit mux daemon"
+          help="Stops existing experimental mux daemons only after their live sessions are explicitly destroyed. This never starts a daemon just to stop it."
+        >
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => {
+                if (!confirmMuxShutdown) {
+                  setConfirmMuxShutdown(true);
+                  setMuxShutdownMessage(
+                    'Confirm to stop all currently connected Cockpit mux daemons.',
+                  );
+                  return;
+                }
+                void agentCockpit.muxSessions.shutdown().then((failedProjectIds) => {
+                  setConfirmMuxShutdown(false);
+                  setMuxShutdownMessage(
+                    failedProjectIds.length === 0
+                      ? 'Cockpit mux daemons stopped.'
+                      : `Could not stop the mux daemon for ${String(failedProjectIds.length)} project(s).`,
+                  );
+                });
+              }}
+            >
+              {confirmMuxShutdown ? 'Confirm shutdown' : 'Shut down Cockpit mux'}
+            </Button>
+            {muxShutdownMessage && <span className="text-xs text-dim">{muxShutdownMessage}</span>}
+          </div>
+        </Field>
+        <Field
+          label="Persist Cockpit mux scrollback"
+          help="Keep terminal recovery content in Cockpit mux's private database. Turn this off for sensitive hosts: existing stored terminal content is erased the next time a Cockpit mux terminal is opened or reconnected. The optional long-term archive is configured separately."
+        >
+          <input
+            type="checkbox"
+            aria-label="Persist Cockpit mux scrollback"
+            checked={settings.muxPersistScrollback ?? true}
+            onChange={(e) => void set({ muxPersistScrollback: e.target.checked })}
+          />
+        </Field>
+        <Field
+          label="Cockpit mux live scrollback lines"
+          help="Finite history target per pane (default 10,000). Ghostty trims at page boundaries, so the exact retained count can vary slightly."
+        >
+          <input
+            aria-label="Cockpit mux live scrollback lines"
+            type="number"
+            min={MUX_SCROLLBACK_LINES_MIN}
+            max={MUX_SCROLLBACK_LINES_MAX}
+            value={settings.muxScrollbackLines ?? 10_000}
+            onChange={(event) => void set({ muxScrollbackLines: Number(event.target.value) })}
+          />
+        </Field>
+        <Field
           label="Terminal renderer"
-          help="How control-mode panes are drawn. xterm.js DOM is broadly compatible; xterm.js WebGL paints to the GPU (experimental, can briefly show stale cells); wterm renders to the DOM with the libghostty VT core (experimental). Changing this rebuilds the terminal without killing tmux."
+          help="How terminal panes are drawn. xterm.js DOM is broadly compatible; xterm.js WebGL paints to the GPU (experimental, can briefly show stale cells); wterm renders to the DOM with the libghostty VT core (experimental). Changing this rebuilds the terminal without killing the mux or tmux session."
         >
           <Select
             aria-label="Terminal renderer"
@@ -176,12 +241,12 @@ export function SettingsDialog(): JSX.Element {
         </Field>
         <Field
           label="Byobu/screen keybindings"
-          help="Enable screen-style shortcuts in the control-mode terminal: Ctrl+a prefix (z=zoom active pane, n/p=next/previous tab, a=send a literal Ctrl+a) plus Shift+Arrow to move between split panes. Off by default; the existing ⌘ shortcuts always work."
+          help="Screen-style shortcuts are on by default: Ctrl+a prefix in control-mode, plus Shift+Arrow to move between split panes in either terminal backend. Ctrl+a, then a forwards a literal Ctrl+a to the shell; turn this off to retain readline Ctrl+a. The existing ⌘ shortcuts always work."
         >
           <input
             type="checkbox"
             aria-label="Byobu/screen keybindings"
-            checked={settings.byobuKeybindings ?? false}
+            checked={settings.byobuKeybindings ?? true}
             onChange={(e) => void set({ byobuKeybindings: e.target.checked })}
           />
         </Field>

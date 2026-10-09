@@ -38,11 +38,21 @@ export interface PaneRenderer {
   readonly cols: number;
   /** Rows the terminal is currently rendering (0 before first layout). */
   readonly rows: number;
+  /** Optional stable features the provider may use when composing an attach
+   * seed. Absent means no renderer-specific seed is accepted. */
+  readonly features?: readonly string[];
 
   /** Write raw bytes to the parser. MUST pass bytes verbatim (no UTF-8 decode). */
   write(bytes: Uint8Array): void;
+  /** Complete when the renderer can accept input and report real geometry.
+   *  xterm resolves immediately; WTerm waits for its WASM core and DOM grid. */
+  ready(): Promise<void>;
   /** Subscribe to user input (escape sequences to send to the pty). */
   onData(handler: (data: string) => void): RendererDisposable;
+  /** Subscribe to terminal-generated replies (for example a libghostty device
+   *  capability reply). xterm has no separate reply channel and returns a
+   *  no-op subscription. */
+  onReply(handler: (data: string) => void): RendererDisposable;
   /** Move keyboard focus to the terminal. */
   focus(): void;
 
@@ -54,6 +64,10 @@ export interface PaneRenderer {
   onDetach(): void;
   /** Fit to the current container size (no-op when not laid out). */
   fit(): void;
+  /** Called only after Cockpit has committed the renderer's latest geometry to
+   *  the daemon PTY. A renderer may use this to emit a mode-gated terminal
+   *  response whose semantics depend on the new size. */
+  geometryCommitted?(): void;
   /** Cell pixel metrics from the rendered font, or null when not yet measurable. */
   cellMetrics(): CellMetrics | null;
 
@@ -62,6 +76,10 @@ export interface PaneRenderer {
   /** Non-destructively repaint every visible row from the renderer's OWN buffer
    *  (glyph-atlas rebuild + refresh). MUST NOT re-seed from capture-pane. */
   repaintFromBuffer(): void;
+
+  /** Renderer-local scrollback used only as a bounded fallback when the daemon
+   *  cannot supply history. Adapters without an exposed history return null. */
+  scrollbackLines?(offset: number, limit: number): string[] | null;
 
   /** Dispose the terminal and remove its container. */
   dispose(): void;

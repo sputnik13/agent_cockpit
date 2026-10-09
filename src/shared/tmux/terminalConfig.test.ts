@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  TMUX_SERVER_OPTIONS,
-  tmuxServerOptionArgs,
-  tmuxServerOptionShell,
-} from './terminalConfig';
+import { TMUX_SERVER_OPTIONS, tmuxServerOptionArgs, tmuxServerOptionShell } from './terminalConfig';
 
 // Regression: in-pane apps (e.g. Claude Code) reported terminal focus events as
 // unavailable. tmux defaults `focus-events` to off, so unless the shared server
@@ -29,6 +25,15 @@ describe('tmux server options — focus-events', () => {
 
   it('emits `set -g focus-events on` in the remote (shell) opener', () => {
     expect(tmuxServerOptionShell()).toContain("set -g focus-events 'on'");
+  });
+});
+
+describe('ephemeral tmux server options', () => {
+  it('lets isolated test and dev sockets exit after their last session is removed', () => {
+    const args = tmuxServerOptionArgs({ exitEmpty: true });
+    const i = args.indexOf('exit-empty');
+    expect(args.slice(i - 2, i + 2)).toEqual(['set', '-g', 'exit-empty', 'on']);
+    expect(tmuxServerOptionArgs().slice(i - 2, i + 2)).toEqual(['set', '-g', 'exit-empty', 'off']);
   });
 });
 

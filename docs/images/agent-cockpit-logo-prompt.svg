@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Cockpit prompt lattice</title>
+  <desc id="desc">A terminal-like AC command sitting above a directional agent network.</desc>
+  <defs>
+    <linearGradient id="blue" x1="80" y1="78" x2="412" y2="197" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5b9bd0"/><stop offset="1" stop-color="#268bd2"/>
+    </linearGradient>
+  </defs>
+
+  <path d="M76 113h36l-25 29 25 29H76l-25-29 25-29Zm360 0h-36l25 29-25 29h36l25-29-25-29Z" fill="url(#blue)"/>
+  <path d="M143 203 167 78h57l27 125h-39l-4-23h-27l-4 23h-38Zm51-96-8 45h19l-8-45h-3Z" fill="#002b36"/>
+  <path d="M355 108c-9-7-19-11-31-11-22 0-36 15-36 44s14 44 36 44c12 0 22-3 31-10v27c-10 6-23 9-38 9-43 0-70-26-70-70 0-45 27-71 70-71 15 0 28 3 38 9v29Z" fill="#002b36"/>
+  <path d="M105 229h302" stroke="#268bd2" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="105" cy="229" r="8" fill="#2aa198"/><circle cx="407" cy="229" r="8" fill="#2aa198"/>
+
+  <g fill="none" stroke="#2aa198" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m142 289 75 41 67-44 85 42M142 289l16 103 59-62 53 95 14-139M217 330l-59 62 112 33 99-63M284 286l85 42-99 97M217 330l67-44 46 103M158 392l112 33 99-63"/>
+    <path d="m95 270 47 19m75 41 53 95m14-139 68-20m17 61 48 22" stroke-width="3" opacity=".82"/>
+  </g>
+  <g fill="#2aa198">
+    <circle cx="95" cy="270" r="7"/><circle cx="142" cy="289" r="11"/><circle cx="158" cy="392" r="9"/>
+    <circle cx="217" cy="330" r="11"/><circle cx="270" cy="425" r="9"/><circle cx="284" cy="286" r="10"/>
+    <circle cx="330" cy="266" r="7"/><circle cx="369" cy="328" r="11"/><circle cx="369" cy="362" r="7"/>
+    <circle cx="417" cy="350" r="8"/>
+  </g>
+</svg>

@@ -32,7 +32,7 @@ describe('capturePane builder (history-seed depth)', () => {
 
 describe('TERMINAL_SCROLLBACK (single source of scrollback depth)', () => {
   it('is the agreed target depth feeding tmux history-limit, capture -S, and xterm scrollback', () => {
-    expect(TERMINAL_SCROLLBACK).toBe(5000);
+    expect(TERMINAL_SCROLLBACK).toBe(10_000);
   });
 });
 

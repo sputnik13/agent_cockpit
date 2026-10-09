@@ -857,6 +857,22 @@ body,
   overflow-y: auto;
 }
 
+/* WTerm's demo-oriented default skin has 12px content-box padding, rounded
+   corners, and a shadow. Inside a Cockpit mux leaf that overflows its allocated
+   rectangle, leaving a false right/bottom gutter and causing Ghostty's grid to
+   calculate against the wrong reflow size. Cockpit owns pane borders; make the
+   DOM terminal a precise, border-box fill of its host. */
+.ac-term.wterm {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 /* Modern, unobtrusive scrollbars that fit the dark surfaces. */
 * {
   scrollbar-width: thin;

@@ -31,6 +31,10 @@ import type {
   ResolvePathOptions,
   StatResult,
   TerminalOpenOptions,
+  TerminalScrollbackLine,
+  TerminalWriteKind,
+  MuxSessionInfo,
+  MuxTopologySnapshot,
 } from '@shared/providers/types';
 import type { AppSettings } from '@shared/settings';
 
@@ -47,7 +51,10 @@ export interface RendererApi {
     add(input: { label: string; connection: ConnectionSpec }): Promise<ProjectInfo>;
     remove(id: string): Promise<void>;
     /** Update a project's label and/or connection spec (kind immutable). */
-    update(id: string, patch: { label?: string; connection?: ConnectionSpec }): Promise<ProjectInfo>;
+    update(
+      id: string,
+      patch: { label?: string; connection?: ConnectionSpec },
+    ): Promise<ProjectInfo>;
     openDialog(): Promise<string | null>;
     activate(id: string): Promise<void>;
     getActive(): Promise<string | null>;
@@ -70,7 +77,12 @@ export interface RendererApi {
   provider: {
     listWorktrees(projectId?: string): Promise<WorktreeRecord[]>;
     getChangeset(worktreePath: string, baseline?: string, projectId?: string): Promise<Changeset>;
-    getFileDiff(worktreePath: string, filePath: string, baseline?: string, projectId?: string): Promise<string>;
+    getFileDiff(
+      worktreePath: string,
+      filePath: string,
+      baseline?: string,
+      projectId?: string,
+    ): Promise<string>;
     getDiffBundle(
       worktreePath: string,
       filePath: string,
@@ -80,11 +92,19 @@ export interface RendererApi {
     readFile(path: string, opts?: FileReadOptions, projectId?: string): Promise<FileReadResult>;
     /** Bounded binary-preview read (base64 bytes, size-capped, no range, no
      *  `ref`) — see WorkspaceProvider.readFileBytes for the full contract. */
-    readFileBytes(path: string, opts?: FileBytesOptions, projectId?: string): Promise<FileBytesResult>;
+    readFileBytes(
+      path: string,
+      opts?: FileBytesOptions,
+      projectId?: string,
+    ): Promise<FileBytesResult>;
     stat(path: string, projectId?: string): Promise<StatResult>;
     listDir(dirPath: string, worktreePath?: string, projectId?: string): Promise<DirEntry[]>;
     /** Resolve + validate + classify a link target (inside/outside project). */
-    resolvePath(input: string, opts?: ResolvePathOptions, projectId?: string): Promise<ResolvedPath>;
+    resolvePath(
+      input: string,
+      opts?: ResolvePathOptions,
+      projectId?: string,
+    ): Promise<ResolvedPath>;
     detectBeads(projectId?: string): Promise<boolean>;
     getTaskGraph(projectId?: string): Promise<BeadsTaskGraph>;
     getTask(issueId: string, projectId?: string): Promise<BeadsIssue | null>;
@@ -135,11 +155,37 @@ export interface RendererApi {
   };
 
   terminal: {
-    open(opts: TerminalOpenOptions): Promise<string>;
-    write(terminalId: string, data: string): Promise<void>;
-    resize(terminalId: string, cols: number, rows: number): Promise<void>;
-    close(terminalId: string, kill?: boolean): Promise<void>;
-    list(): Promise<string[]>;
+    /** Addressing is explicit for retained/background renderers. Omitting
+     * projectId preserves the active-project behavior for legacy callers. */
+    open(opts: TerminalOpenOptions, projectId?: string): Promise<string>;
+    split(
+      sourceId: string,
+      terminalId: string,
+      direction?: 'horizontal' | 'vertical',
+      projectId?: string,
+    ): Promise<string>;
+    newWindow(sourceId: string, terminalId: string, projectId?: string): Promise<string>;
+    write(
+      terminalId: string,
+      data: string,
+      kind?: TerminalWriteKind,
+      projectId?: string,
+    ): Promise<void>;
+    resize(terminalId: string, cols: number, rows: number, projectId?: string): Promise<void>;
+    setBroadcast(terminalId: string, enabled: boolean, projectId?: string): Promise<void>;
+    setBroadcastScope(
+      terminalId: string,
+      scope: 'window' | 'session',
+      projectId?: string,
+    ): Promise<void>;
+    scrollback(
+      terminalId: string,
+      before: number,
+      count: number,
+      projectId?: string,
+    ): Promise<TerminalScrollbackLine[]>;
+    close(terminalId: string, kill?: boolean, projectId?: string): Promise<void>;
+    list(projectId?: string): Promise<string[]>;
   };
 
   /**
@@ -194,7 +240,10 @@ export interface RendererApi {
     }): Promise<NoteRecord>;
     update(id: number, body: string): Promise<NoteRecord | null>;
     remove(id: number): Promise<void>;
-    list(projectId: string, filter?: { targetKind?: ReviewTargetKind; targetId?: string }): Promise<NoteRecord[]>;
+    list(
+      projectId: string,
+      filter?: { targetKind?: ReviewTargetKind; targetId?: string },
+    ): Promise<NoteRecord[]>;
     exportMarkdown(projectId: string): Promise<string>;
   };
 
@@ -208,6 +257,43 @@ export interface RendererApi {
     list(): Promise<TmuxSessionInfo[]>;
     kill(name: string): Promise<void>;
     killDetached(): Promise<string[]>;
+  };
+
+  muxSessions: {
+    list(): Promise<Array<MuxSessionInfo & { projectId: string }>>;
+    destroy(projectId: string, sessionId: string): Promise<void>;
+    pin(projectId: string, sessionId: string, pinned: boolean): Promise<void>;
+    shutdown(): Promise<string[]>;
+    topology(projectId?: string): Promise<MuxTopologySnapshot>;
+    selectWindow(
+      projectId: string,
+      sessionId: string,
+      windowId: string,
+    ): Promise<MuxTopologySnapshot>;
+    selectPane(
+      projectId: string,
+      sessionId: string,
+      windowId: string,
+      paneId: string,
+    ): Promise<MuxTopologySnapshot>;
+    zoomPane(
+      projectId: string,
+      sessionId: string,
+      windowId: string,
+      paneId: string | null,
+    ): Promise<MuxTopologySnapshot>;
+    resizeSplit(
+      projectId: string,
+      sessionId: string,
+      windowId: string,
+      paneId: string,
+      ratio: number,
+    ): Promise<MuxTopologySnapshot>;
+    destroyWindow(
+      projectId: string,
+      sessionId: string,
+      windowId: string,
+    ): Promise<MuxTopologySnapshot>;
   };
 
   logs: {

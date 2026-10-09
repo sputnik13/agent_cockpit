@@ -85,6 +85,26 @@ export interface TerminalOpenOptions {
   key?: string;
   /** Session namespace. Defaults to `terminal`. See {@link TerminalKind}. */
   kind?: TerminalKind;
+  /**
+   * Hydrate daemon-owned history before the active-screen seed. Set only when
+   * opening a brand-new renderer for an existing mux pane; transport
+   * reconnects retain their renderer state and must not replay history.
+   */
+  hydrateScrollback?: boolean;
+  /**
+   * Explicitly allow creating a daemon terminal when this stable key is absent.
+   * Reattach and history-replay paths leave this false so a late renderer
+   * cannot recreate a pane that was deliberately closed.
+   */
+  createIfMissing?: boolean;
+  /** Renderer capabilities negotiated for this attachment. The mux uses this
+   * only to select compatible rehydration data; it never trusts a client to
+   * change the raw PTY stream. */
+  rendererFeatures?: string[];
+  /** Physical cell dimensions from a graphical renderer. They let the daemon
+   * resolve Kitty images which specify pixels but omit a grid span. */
+  cellWidth?: number;
+  cellHeight?: number;
 }
 
 export interface TerminalHandle {
@@ -102,8 +122,89 @@ export interface TerminalExitInfo {
   signal: string | null;
 }
 
-export type TerminalDataHandler = (data: string) => void;
+/** Origin of bytes written to a terminal. Mux broadcast forwards only input. */
+export type TerminalWriteKind = 'input' | 'reply';
+
+/** PTY output is text for legacy backends and raw bytes for cockpit-mux. */
+export type TerminalData = string | Uint8Array;
+export type TerminalDataHandler = (data: TerminalData) => void;
 export type TerminalExitHandler = (info: TerminalExitInfo) => void;
+
+/** One styled renderer-copy row supplied by cockpit-mux history. */
+export interface TerminalScrollbackRun {
+  text: string;
+  sgr: string;
+}
+export interface TerminalScrollbackLine {
+  line: number;
+  runs: TerminalScrollbackRun[];
+}
+export interface MuxSessionInfo {
+  sessionId: string;
+  paneId: string;
+  key: string;
+  exited: boolean;
+  broadcast: boolean;
+  /** Daemon-owned marker for retaining a session in the Sessions manager. */
+  pinned: boolean;
+  attachedKind: 'cockpit' | 'tty' | null;
+  logicalSessionId: string;
+  windowId: string;
+  broadcastScope: 'window' | 'session';
+  /** Recovery import failed; the exited pane remains available for explicit cleanup. */
+  recoveryDiagnostic: string | null;
+}
+
+/** Content-free daemon snapshot for Cockpit's native mux window/pane surface. */
+export interface MuxTopologyPane {
+	  sessionId: string;
+	  paneId: string;
+	  key: string;
+	  exited: boolean;
+	  cols: number;
+	  rows: number;
+	  /** Kernel-reported live PTY size; distinct from the persisted requested geometry. */
+	  actualCols: number;
+	  actualRows: number;
+}
+
+export interface MuxTopologyLayoutNode {
+  paneId: string | null;
+  direction: 'horizontal' | 'vertical' | null;
+  ratio: number | null;
+  first: MuxTopologyLayoutNode | null;
+  second: MuxTopologyLayoutNode | null;
+}
+
+export interface MuxTopologyWindow {
+  windowId: string;
+  panes: MuxTopologyPane[];
+  activePaneId: string | null;
+  zoomedPaneId: string | null;
+  layout: MuxTopologyLayoutNode | null;
+}
+
+export interface MuxTopologySession {
+  sessionId: string;
+  /** Session-local window placement; IDs identify windows but never imply order. */
+  windowOrder: string[];
+  windows: MuxTopologyWindow[];
+  activeWindowId: string | null;
+}
+
+/**
+ * One daemon-authoritative topology read. `epoch` changes on every daemon
+ * start; `revision` is allocated while it holds the topology lock. Consumers
+ * compare revisions only within one epoch, so recovery cannot freeze a view
+ * behind the previous daemon's counter.
+ */
+export interface MuxTopologySnapshot {
+  epoch: string;
+  revision: number;
+  /** The daemon-selected logical session for this project, if one exists. */
+  activeSessionId?: string | null;
+  sessions: MuxTopologySession[];
+}
 
 // ---- Filesystem (read-only) ------------------------------------------------
 
@@ -240,12 +341,40 @@ export interface WorkspaceProvider {
   // dedicated tmux session, so multiple coexist per project and persist across
   // restarts. `listTerminals` returns existing session keys for tab restore.
   openTerminal(opts: TerminalOpenOptions): Promise<TerminalHandle>;
-  writeTerminal(id: string, data: string): Promise<void>;
+  splitMuxTerminal(
+    sourceId: string,
+    id: string,
+    direction?: 'horizontal' | 'vertical',
+  ): Promise<TerminalHandle>;
+  newMuxWindow(sourceId: string, id: string): Promise<TerminalHandle>;
+  writeTerminal(id: string, data: string, kind?: TerminalWriteKind): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
+  setTerminalBroadcast(id: string, enabled: boolean): Promise<void>;
+  setTerminalBroadcastScope(id: string, scope: 'window' | 'session'): Promise<void>;
+  scrollbackTerminal(id: string, before: number, count: number): Promise<TerminalScrollbackLine[]>;
   onTerminalData(id: string, handler: TerminalDataHandler): () => void;
   onTerminalExit(id: string, handler: TerminalExitHandler): () => void;
   closeTerminal(id: string, opts?: TerminalCloseOptions): Promise<void>;
   listTerminals(): Promise<string[]>;
+  listMuxSessions(): Promise<MuxSessionInfo[]>;
+  listMuxTopology(): Promise<MuxTopologySnapshot>;
+  selectMuxWindow(sessionId: string, windowId: string): Promise<MuxTopologySnapshot>;
+  selectMuxPane(sessionId: string, windowId: string, paneId: string): Promise<MuxTopologySnapshot>;
+  zoomMuxPane(
+    sessionId: string,
+    windowId: string,
+    paneId: string | null,
+  ): Promise<MuxTopologySnapshot>;
+  resizeMuxSplit(
+    sessionId: string,
+    windowId: string,
+    paneId: string,
+    ratio: number,
+  ): Promise<MuxTopologySnapshot>;
+  destroyMuxWindow(sessionId: string, windowId: string): Promise<MuxTopologySnapshot>;
+  destroyMuxSession(sessionId: string): Promise<void>;
+  pinMuxSession(sessionId: string, pinned: boolean): Promise<void>;
+  shutdownMux(): Promise<void>;
 
   // Git (read-only)
   listWorktrees(): Promise<WorktreeRecord[]>;

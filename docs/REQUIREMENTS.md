@@ -23,12 +23,14 @@ In scope:
 - An embedded `xterm.js` terminal as a first-class, dockable center surface
   running an interactive CLI agent harness. Both local and remote terminals run
   inside `tmux` on a dedicated `agent-cockpit` socket so sessions persist across
-  restarts; local attaches via `node-pty`, remote over an SSH PTY shell. Two
-  terminal backends ship and are selectable in Preferences
-  (`terminalBackend`): the default **session-per-tab** model (one tmux session
-  per terminal tab) and **tmux control mode (`-CC`)** (one per-project control
-  connection where tmux is the source of truth for windows↔tabs and
-  panes↔splits, with native xterm scrollback per pane).
+  restarts; local attaches via `node-pty`, remote over an SSH PTY shell. Three
+  terminal backends ship and are selectable in Preferences (`terminalBackend`):
+  the session-per-tab and tmux control-mode (`-CC`) models, plus **Cockpit mux**:
+  a standalone Ghostty-native PTY multiplexer with persistent local and remote
+  sessions, a DOM wterm/libghostty renderer, and no tmux dependency. Cockpit mux
+  is the default for fresh macOS/Linux installs; existing users silently retain
+  their selected backend, with no migration prompt or automatic switch. Users may
+  change it explicitly in Preferences, and Windows remains on a tmux backend.
 - A per-project **Run panel**: a saved run command (e.g. `npm run dev`) executed
   in its own persistent `tmux` tty (the `agent-cockpit-run-<projectId>` session),
   with Run/Stop controls. It is a peer of the terminal in the left column.
@@ -87,7 +89,7 @@ Out of scope:
   losing focus.
 - **FR-4 Terminal.** Each active project exposes one or more interactive
   terminals bound to the project's working directory, suitable for running a CLI
-  agent harness. Two backends are supported and selectable in Preferences via
+  agent harness. Three backends are supported and selectable in Preferences via
   the `terminalBackend` setting:
   - **session-per-tab** (default): each terminal tab is its own persistent
     `tmux` session (`agent-cockpit-terminal-<projectId>-<key>`) on the
@@ -105,7 +107,8 @@ agent-cockpit -CC new-session -A -s agent-cockpit-<projectId>`) is the
     through tmux notifications and commands. A per-pane **zoom** toggle drives
     tmux `resize-pane -Z`, and the view follows tmux's reported visible layout so
     a zoom toggled outside the app (a keybinding or another client) is reflected.
-    An opt-in **byobu/screen keybinding** mode (`byobuKeybindings`, default off)
+    A default-on **byobu/screen keybinding** mode (`byobuKeybindings`, set it
+    false to opt out)
     binds a `Ctrl+a` prefix (z=zoom, n/p=next/previous tab, a=send a literal
     `Ctrl+a`) plus `Shift+Arrow` pane navigation, intercepted before xterm so the
     prefix byte never reaches the pane; the existing ⌘ shortcuts always coexist.
@@ -114,6 +117,46 @@ agent-cockpit -CC new-session -A -s agent-cockpit-<projectId>`) is the
     `sysctl.proc_translated`); server-query calls are unaffected.
     Switching backends is a clean-slate operation that kills every cockpit-socket
     tmux session and re-initializes the terminal panel.
+  - **Cockpit mux:** a separately runnable Go daemon owns PTYs, logical
+    sessions/windows/panes, Ghostty terminal state, and private persisted
+    keyframes/tails. The app connects locally through its protected Unix socket or
+    remotely through a raw SSH exec bridge; both paths attach-seed a wterm DOM
+    renderer, preserve input/output bytes, support copy-mode history and scoped
+    broadcast, and provide terminal-session rescue controls. Fresh macOS/Linux
+    installs select this backend with wterm as the default renderer; users can
+    independently select the xterm DOM/WebGL adapters. Existing installs retain
+    their saved backend without a prompt or automatic change. The WTerm 0.5 path renders
+    Kitty's direct PNG/RGB/RGBA transfer subset through bounded Ghostty-WASM image
+    storage and a DOM-owned canvas overlay. File-path, shared-memory, URL, Sixel,
+    iTerm2, animation, and virtual-placement transports remain unsupported. While
+    the mux daemon remains alive, a WTerm renderer reload or reconnect receives a
+    quiet direct-graphics seed after its text seed. The negotiated attachment also
+    carries the renderer's physical cell dimensions, which resolve PNG placements
+    that omit an explicit grid span; xterm and TTY clients receive none. Graphics
+    are intentionally absent after daemon exit, restart,
+    replacement, or handoff. libghostty WASM is
+    served only from Cockpit's private packaged `cockpit-wasm:` endpoint, so the
+    Electron `file:` renderer never needs a network fetch or a build-machine path.
+    Mux-owned PTYs use `TERM=xterm-ghostty` and receive a private, pinned Ghostty
+    terminfo cache, so local and remote hosts need no system-wide terminfo entry.
+    Within a logical session, the user-visible placement of windows is durable
+    state: creation order, close behavior, visible tab order, and previous/next
+    navigation must not be inferred from opaque window IDs. Each logical session
+    retains its own ordered window placement and selected window, while each
+    window retains its selected pane and split tree. Reload, reconnect, daemon
+    recovery, and handoff must restore that complete relationship before input is
+    accepted. A future capability to link one window into several logical
+    sessions would represent placement as a separate link/placement entity rather
+    than make window identity ambiguous. The interactive dock always owns at
+    least one default-shell pane: after its final pane/window exits, Cockpit
+    creates a fresh root rather than exposing an empty terminal surface. Cockpit
+    mux topology is keyboard-first—there are no split/window manipulation
+    buttons. A renderer-agnostic frontend command layer handles Cmd/Ctrl+T,
+    Cmd/Ctrl+D, Cmd/Ctrl+Shift+D, Cmd/Ctrl+Alt+Arrow, Cmd/Ctrl+Shift+[ / ],
+    Cmd/Ctrl+W, and Cmd/Ctrl+Shift+Z, then dispatches mux commands identically
+    for xterm and WTerm. The opt-in Byobu mode also applies to both renderers:
+    `Ctrl+A` prefix `z/n/p/a` and bare `Shift+Arrow` are consumed before the
+    renderer receives terminal bytes.
 - **FR-5 Terminal resilience (remote).** On an _unexpected_ dropped link or app
   restart, re-attaching reconnects to the same tmux session with scrollback
   intact; the agent process keeps running on the host throughout. In control
@@ -176,7 +219,7 @@ noreferrer"`; relative links route through the local-file resolver, while
   steps, including a visible 100% reset; they never alter application or
   terminal scale.
   Bare/inline HTML written directly in Markdown prose also renders (a fenced
-  `` ```html `` block still renders as a plain code listing, matching GitHub):
+  ` ```html ` block still renders as a plain code listing, matching GitHub):
   it is sanitized against `hast-util-sanitize`'s `defaultSchema` (published as
   following GitHub's own Markdown HTML sanitization rules), extended with two
   narrow protocol widenings — `href` gains `file:`, `img[src]` gains
@@ -328,9 +371,9 @@ The high-level user loop:
 - **simple-git**, **chokidar**, **better-sqlite3** for local git/watch/beads
   reads, and the app-local SQLite store.
 - **unified / remark / rehype / rehype-raw / rehype-sanitize / rehype-highlight**
-  + **DOMPurify** for single-pass sanitized Markdown (including GitHub-style
-  sanitized bare inline HTML) with syntax-highlighted fenced code; **mermaid**
-  rendered inline as sanitized SVG (no iframe).
+  - **DOMPurify** for single-pass sanitized Markdown (including GitHub-style
+    sanitized bare inline HTML) with syntax-highlighted fenced code; **mermaid**
+    rendered inline as sanitized SVG (no iframe).
 - **jsonc-parser** + **yaml** for source-mapped structural folding of
   JSON/YAML in the content viewer's Rendered mode (both zero-runtime-dependency).
 - **Go** (`CGO_ENABLED=0` static cross-compile) for the remote helper binary.

@@ -39,6 +39,19 @@ panels never touch a real transport.
 - `RemoteProvider` result mapping: `mapGitStatus` porcelain/name-status codes,
   `assembleChangeset`, and `parseBeadsJsonl` against fixture inputs.
 - Renderer beads graph selectors/layout and content-mode selection.
+- Persisted-profile continuity: `electron/main/config.test.ts` loads a populated
+  prior profile and asserts the saved terminal backend, renderer, font size,
+  config bytes, and profile marker remain unchanged; the Electron-ABI
+  `electron/main/store/projects.test.ts` migration fixture verifies existing
+  local/remote project IDs, connection data, and ordering survive later schema
+  migrations. `scripts/test-dev-supervisor.mjs` protects normal development's
+  historical profile identity and absence of a `userData` override while
+  keeping packaged identity and explicit isolated launches distinct.
+- macOS dev-launcher lifecycle: `scripts/test-dev-supervisor.mjs` verifies the
+  generated launcher is a background-only Dock agent, normal dev keeps the
+  historical profile and persistent resources, isolated dev cleans only its
+  unique resources, and a simulated Electron-main exit reaps the Vite process
+  group and supervisor.
 - tmux control-mode shared protocol
   ([src/shared/tmux/parser.test.ts](../src/shared/tmux/parser.test.ts),
   [codec.test.ts](../src/shared/tmux/codec.test.ts),
@@ -47,6 +60,27 @@ panels never touch a real transport.
   raw-byte preservation through the `Uint8Array` path), notification typing,
   and window-layout-string → tree parsing for single/h-split/v-split/nested
   layouts. Pure; no tmux required.
+- Local PTY process ownership: production daemon launch omits the owner pipe and
+  survives Electron quit; `COCKPIT_MUX_EPHEMERAL=1` opts isolated tests/dev into
+  owner-pipe EOF shutdown. Owned-pane tests prove natural shell exit cleans
+  same-session helpers before `cmd.Wait()` reaps the leader, pinning its SID
+  during enumeration. Handoff transfers the original leader identity; the
+  adopter seeds member identities before ACK, then begins lifecycle mutation
+  only after ACK. After leader exit, adopted cleanup is fail-closed and signals
+  only recorded identities that still match. A direct launcher test verifies
+  `stopLocalMuxOwners()` leaves a production daemon serving `session.list` but
+  releases an ephemeral daemon. The packaged Playwright topology test covers
+  app quit/relaunch; the dedicated SIGKILL test verifies owner-pipe cleanup.
+  The adopted-pane race for a helper created after the last sample is
+  documented in [the process-lifecycle record](operations/process-lifecycle.md).
+- Mux lifecycle serialization: race natural pane exit against `Operations.Close()`;
+  attachment `Finalize()` and `Close()` must not overlap or run on an already
+  closed attachment. Multi-pane logical-session shutdown finalizes every pane
+  before reaping the shared catalog rows, so foreign-key dependencies remain
+  valid through final keyframe writes.
+- Real local tmux integration uses a per-test `-L ac-test-*` socket and kills
+  only that server during teardown. It must never connect to the developer's
+  default `agent-cockpit` socket.
 - Renderer control-mode reducer/UI
   ([src/renderer/tmux/tmuxStore.test.ts](../src/renderer/tmux/tmuxStore.test.ts),
   [controlTerminal.test.tsx](../src/renderer/tmux/controlTerminal.test.tsx),
@@ -130,7 +164,7 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   disallowed protocols) are stripped; the two deliberate protocol widenings
   (`href` gains `file:`, `img[src]` gains `data:image/*`) are scoped exactly
   — a non-image tag or a non-image `data:` MIME type is rejected; a
-  `` ```html `` fence still renders as a plain code listing, matching GitHub;
+  ` ```html ` fence still renders as a plain code listing, matching GitHub;
   `rehype-sanitize` runs before `rehype-highlight`/the safe-link/image
   transform. SECURITY: a forged `data-start-line`/`data-mermaid-id` on
   attacker-authored bare HTML resolves to the true re-derived value (or is
@@ -164,6 +198,28 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   `XTERM_THEMES` onto wterm CSS variables; `normalizeSettings` accepts the `wterm`
   `terminalRenderer` value (default `dom`). DOM glyph fidelity (powerline) is a
   runtime check.
+- **Cockpit-mux renderer/controller boundary:** terminal-registry tests prove a
+  Cockpit-mux terminal configured for `dom` instantiates `XtermPaneRenderer` and
+  receives the same daemon-owned scrollback hydration as WTerm. The packaged Playwright topology suite
+  runs the broad persistence/navigation path on that xterm adapter, then switches
+  to `wterm` for the retained-DOM-grid path. This keeps mux protocol/lifecycle
+  regressions independently testable from WTerm rendering behavior.
+- **Cockpit-mux backend:** focused Go tests cover the standalone daemon,
+  persistence/recovery, PTY handoff, protocol framing, and platform artifacts;
+  focused TypeScript tests cover manifest selection/checksums, local and remote
+  launchers/reattach, raw-byte terminal transport, copy-mode/broadcast/session
+  controls, and silent preservation of the saved backend for existing installs.
+  A staged macOS package was
+  verified after code signing by rechecking each embedded mux artifact checksum
+  and the outer-app signature. A Playwright-driven, isolated Electron run verifies
+  the manifest-selected local mux daemon, the private packaged `cockpit-wasm:`
+  asset endpoint, DOM WTerm initialization, and a real command input/output round
+  trip. Remaining remote-host and broader Electron scenarios remain tracked as an
+  open validation gate, rather than being counted as passed by focused tests.
+  The protocol path additionally splits a single producer read into ordered 1 MiB
+  chunks and caps an individual `pane.output` response at 8 MiB, leaving framing
+  headroom below the 16 MiB wire limit; its deterministic stream test covers both
+  bounds and sequence continuity.
 - Bounded file export (Download): `writeStreamToDest` temp-then-rename
   semantics (success renames into place; any failure unlinks the temp and
   leaves the destination untouched) in `exportWrite.test.ts`; `localExportFile`
@@ -276,6 +332,193 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   file sized genuinely above that cap still shows the too-large placeholder
   with no fold toggles offered); the script itself is the source of truth for
   its exact fixtures and assertions.
+- **Cockpit mux interaction-regression gate** (`tests/e2e/mux-topology.spec.ts`):
+  this is a serialized, packaged Electron Playwright suite run with an isolated
+  user-data directory and hidden renderer. It is the acceptance gate for the
+  mux terminal surface, not a smoke test. Each scenario must pass with the
+  real daemon through the xterm control adapter before the mux topology package
+  closes. WTerm renderer validation remains a separate renderer gate and must
+  not mask mux model defects:
+  - **MUX-E2E-01 Navigation and creation:** a focused pane accepts the
+    advertised keyboard operations for horizontal/vertical split, new/close
+    window, left/right/up/down pane traversal, previous/next window, and zoom;
+    the packaged keyboard contract is exercised under both xterm and WTerm and
+    moves
+    focus to the selected destination.
+  - **MUX-E2E-02 Input ownership:** input is delivered exactly once to the
+    active pane, never a stale or hidden pane; explicit Broadcast is the sole
+    exception and its window/session scope is visible in the UI.
+  - **MUX-E2E-03 Layout and close:** horizontal and vertical split trees plus
+    ratio changes survive selection; closing a pane/window normalizes active
+    identity and cannot reuse a disposed pane's renderer or contents. The
+    xterm path creates three windows and closes them in succession through the
+    visible controls, verifying the daemon snapshot and visible terminal never
+    resurrect a closed window. MUX-E2E-05 separately verifies the same xterm
+    topology through reload and clean relaunch.
+  - **MUX-E2E-04 Screen continuity:** first attach starts at the live tail and
+    follows output. Visiting a different pane/window and returning preserves
+    each terminal's live visible screen and deliberate scrollback position;
+    no blank or stale screen is acceptable.
+  - **MUX-E2E-05 Persistence:** renderer reload and clean app relaunch restore
+    topology, active window/pane, zoom, split ratio, daemon scrollback, and
+    visible live tail without duplicate panes or historical output replay.
+- **Process-leak acceptance** (`npm run test:e2e:mux`): the Node supervisor
+  gives each Playwright run its own process group, profile root, and tmux socket;
+  after normal completion or runner failure it terminates remaining children,
+  removes only that run's temporary root, kills only its tmux server, and asserts
+  no app/mux process still references the run root. The deliberate
+  `npm run test:e2e:mux:verify-cleanup` mode waits until the packaged app is
+  live, sends SIGKILL to Playwright's whole process group, and passes only if
+  the supervisor reaps the process group, scoped app/mux, and unique tmux
+  server. `npm run test:e2e:mux:guardian` separately SIGKILLs the public
+  supervisor while a packaged app, mux daemon, Playwright run, and isolated
+  tmux server are live, then verifies all are gone. The isolated launcher has
+  an equivalent cleanup regression at
+  `node scripts/test-isolated-run-guardian.mjs`. The supervisor self-test
+  separately exercises runner cleanup with a helper child without requiring a
+  packaged app.
+  - **MUX-E2E-06 Isolation and recovery:** topology, input, replies, geometry,
+    close, and history remain scoped to their project even when same-key panes
+    finish asynchronously in the background; a missing/failed terminal operation
+    leaves an inspectable recovery state instead of a blank region. The packaged
+    suite creates two live projects with the same key and verifies each daemon's
+    independent output. Remote adapter tests normalize the same topology events,
+    while live remote-host integration remains a separate transport gate.
+  - **MUX-E2E-07 Session-owned window placement:** window IDs are identities,
+    not order. Create windows whose IDs do not sort in creation order, select
+    them in a different order, then validate that tabs and previous/next
+    navigation use the logical session's durable placement relation. Closing the
+    first, middle, or last placement removes only that entry and preserves the
+    relative order, active-window fallback, each surviving window's selected
+    pane, and every marker through reload, clean relaunch, daemon recovery, and
+    handoff.
+
+  Historical regressions covered by this gate include initial-scroll following,
+  duplicate keystrokes after a split, left/up traversal failure, shortcuts
+  swallowed by a terminal, window-return blanking, closed-pane content being
+  shown in a new window, one-direction-only splits, and ambiguous mux action
+  labels. Direct Kitty PNG/RGB/RGBA graphics has a separate packaged-WTerm
+  acceptance path: it verifies the PTY/mux reply route plus deterministic overlay
+  dimensions and pixels. Its live-daemon lifecycle scenario reloads and reconnects
+  a graphics-bearing WTerm pane (including a PNG without an explicit grid span),
+  asserts text then quiet graphics-seed ordering and retained pixels, and proves
+  xterm receives no graphics seed. A newly launched
+  daemon must deliberately omit graphics. No other interaction exception is allowed.
+
+### Cockpit mux state-space acceptance plan
+
+The interaction-regression gate is generated from a bounded topology state
+space, not from an unbounded hand-written list of terminal examples. The
+generator must cover every valid combination of the following dimensions, with
+the listed reductions only where states are observationally equivalent.
+
+| Dimension                       | Values / equivalence classes                                                                                                         | Why it changes behavior                                                                                                                                                                                                |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Logical-session cardinality `S` | exactly one interactive logical session per project                                                                                  | Cockpit's project→interactive-session mapping is 1:1. The private Run TTY is transport-isolated and must never become a terminal window/session.                                                                       |
+| Window cardinality `W`          | one, two, three windows in the selected logical session                                                                              | Covers root, adjacent, and non-adjacent window traversal plus successive destruction.                                                                                                                                  |
+| Window placement `Q`            | creation order; non-creation active order; close first/middle/last; recovered order                                                  | Separates a window's opaque identity from its session-local position and catches lexical-ID sorting or placement resurrection.                                                                                         |
+| Per-window pane tree `P`        | root; horizontal pair; vertical pair; horizontal-then-vertical; vertical-then-horizontal; three-leaf same-axis tree                  | These are the minimum non-isomorphic shapes for directional navigation, nesting, and resize ownership. Trees are capped at three leaves for exhaustive transition coverage; deeper trees use the same recursive rules. |
+| Active leaf `A`                 | first, last, branch-adjacent, and every leaf with a valid directional neighbor                                                       | The active leaf determines which creation source, direction, and close survivor is legal.                                                                                                                              |
+| Transition `O`                  | split right, split below, new window, left/right/up/down, previous/next window, close pane, close window, zoom/restore, resize ratio | These are the user-visible topology mutations and navigation operations.                                                                                                                                               |
+| Trigger `G`                     | advertised keyboard shortcut                                                                                                         | The renderer-agnostic frontend command layer must produce the same daemon topology, visible selection, and input focus under xterm and WTerm.                                                                          |
+| Lifecycle boundary `R`          | steady state; immediately after mutation; delayed/out-of-order inspection; renderer reload; clean app relaunch; final-empty reload   | This catches stale snapshot, terminal-registry, and persistence failures that a steady-state assertion cannot.                                                                                                         |
+
+For a bounded topology `t = (S, W, Q, P, A)`, the required scenario family is:
+
+```text
+Scenario(t) = ValidTransitions(t, O) × {keyboard} × {xterm, WTerm} × R
+```
+
+`ValidTransitions` contains each directional edge that actually exists in `P`,
+each valid source leaf for creation, and each legal non-final/final deletion.
+Invalid combinations (for example `ArrowUp` from a horizontal-only tree or
+closing a window that is no longer in the selected session) are not silently
+omitted: they are negative cases that must leave topology and visible content
+unchanged with an inspectable error. Pairwise coverage is required across all
+remaining dimensions. In addition, the following higher-order paths are
+mandatory because pairwise generation cannot expose their historical races:
+
+1. Create three windows in a known placement order, select them in
+   non-creation order, and close them in first/middle/last placement order.
+   Verify that neither a closed window nor its panes return, that every survivor
+   retains its relative order and saved active pane, and that no lexical ordering
+   of window IDs replaces the stored placement after recovery.
+2. Create both split directions in one window, traverse every directional edge,
+   create a sibling window from each active-leaf class, then return through each
+   window edge.
+3. Start a create/split, a topology inspection, and a close in deliberately
+   overlapping order; only the daemon-authoritative post-mutation topology may
+   remain visible.
+4. Exercise every topology shape through reload and clean relaunch, including
+   the empty result after the final pane/window closes.
+5. Repeat the preceding paths with a second live project using a same-named
+   terminal key. Project boundaries, rather than multiple interactive sessions
+   within one project, are the isolation boundary.
+
+#### Bidirectional navigation and daemon-owned focus
+
+For every valid pane-layout edge `(source, direction, target)`, run both
+directions through both triggers: `source --direction--> target` and
+`target --opposite(direction)--> source`. Each leg must assert the
+daemon-reported `activePaneId`, the focused DOM textarea, and new marker output
+typed with `page.keyboard` without clicking the destination first. This makes
+left/up traversal as required as right/down traversal and proves focus moves
+with navigation rather than only the daemon selection changing.
+
+For every logical session with `W >= 2`, seed a distinct active pane and marker
+in each window. For each adjacent pair in both directions, require:
+
+```text
+Window A / Pane A2 → Window B / Pane B2 → Window A / Pane A2
+```
+
+The return leg must restore `A2`'s marker and real input focus, not merely any
+pane in Window A. Cover previous/next keyboard traversal, visible window tabs,
+and the three-window wraparound in both directions. Repeat this matrix for two
+live projects: focus state and markers from Project A must remain intact while
+Project B is selected, and vice versa.
+
+The mux daemon is the focus and placement authority: `activeWindowId` and the
+ordered window-placement relation are per project's interactive logical session,
+while `activePaneId` is per window. The renderer may restore browser focus only
+from that snapshot. Reload, clean relaunch, daemon recovery, and handoff must
+reproduce the same `(project, ordered windows, active window, active pane per
+window)` map before the next keyboard event is accepted. A private Run TTY must
+not replace that selection.
+
+#### Marker oracle for every created terminal panel
+
+Every root session, split pane, and new window must receive a unique,
+deterministic marker after it becomes focused. The Playwright fixture derives:
+
+```text
+mux:<project-id>:<logical-session-id>:<window-id>:<pane-id>:<creation-generation>
+```
+
+It must type a composed `printf`/`echo` command through the real terminal input
+and wait for the exact marker in that pane's rendered xterm DOM. The marker is
+the visible identity oracle; daemon IDs alone are insufficient.
+
+After every `O × G × R` transition, assert all of the following:
+
+1. The daemon snapshot contains exactly the expected session/window/pane IDs
+   and no retired identity.
+2. The visible window wrapper contains exactly the expected pane keys; hidden
+   wrappers do not steal focus or present active input.
+3. The expected pane's textarea is focused after keyboard navigation; use
+   `page.keyboard` to type a new marker without clicking it first, then require
+   that marker only in the selected pane.
+4. Every surviving pane still renders its own original marker and must not
+   render any retired pane's marker. A recreated pane gets a new generation,
+   never a reused marker.
+5. Reload/relaunch preserves every survivor's marker, selected identity, and
+   deliberate viewport state. Final-empty reload contains no terminal panel and
+   no failed-to-start placeholder.
+
+The implementation should expose the state-space generator's seed, selected
+dimension tuple, and marker map in Playwright failure output. A failing tuple
+is then reproducible as a compact scenario definition rather than a fragile
+recording of clicks.
 
 ## Test Data
 

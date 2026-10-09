@@ -17,6 +17,13 @@ import * as registry from './terminalRegistry';
 export async function switchTerminalBackend(next: TerminalBackend): Promise<void> {
   if (useSettingsStore.getState().settings.terminalBackend === next) return;
 
+  try {
+    const terminals = await agentCockpit.terminal.list();
+    await Promise.all(terminals.map((id) => agentCockpit.terminal.close(id, true).catch(() => {})));
+  } catch {
+    // Best effort: a disconnected provider has no active mux client to close.
+  }
+
   // Clean slate: kill every session on the cockpit socket.
   try {
     const sessions = await agentCockpit.sessions.list();

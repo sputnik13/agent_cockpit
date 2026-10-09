@@ -29,7 +29,7 @@ export function createDiagnosticsWindow(): BrowserWindow {
   });
 
   window.once('ready-to-show', () => {
-    window.show();
+    if (process.env['COCKPIT_PLAYWRIGHT_HEADLESS'] !== '1') window.show();
   });
 
   window.webContents.on('console-message', (_e, level, message, line, sourceId) => {
@@ -128,7 +128,7 @@ export function createMainWindow(): BrowserWindow {
   });
 
   window.once('ready-to-show', () => {
-    window.show();
+    if (process.env['COCKPIT_PLAYWRIGHT_HEADLESS'] !== '1') window.show();
   });
 
   window.webContents.on('console-message', (_e, level, message, line, sourceId) => {

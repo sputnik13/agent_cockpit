@@ -4,6 +4,7 @@ import { setupSecurity } from './security';
 import { closeDb, getDb } from './store/sqlite';
 import { registerIpc } from './ipc';
 import { sessionManager } from './providers';
+import { stopLocalMuxOwners } from './providers/local/mux';
 import { startSessionReaper, type SessionReaperHandle } from './providers/sessionReaper';
 import { loadSettings } from './config';
 import { installApplicationMenu } from './menu';
@@ -12,6 +13,12 @@ import { developmentAppIcon } from './appIcon';
 import { logger } from './logger';
 import { initLogFileSink } from './logFileSink';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { registerGhosttyWasmHandler, registerGhosttyWasmScheme } from './ghosttyWasm';
+import { tmuxSocket } from './instanceConfig';
+
+registerGhosttyWasmScheme();
 
 // Start the native crash reporter as the FIRST thing at module load — before
 // app.whenReady and before any significant work — so a native (non-JS)
@@ -28,6 +35,21 @@ let mainWindow: BrowserWindow | null = null;
 let diagnosticsWindow: BrowserWindow | null = null;
 let sessionReaper: SessionReaperHandle | null = null;
 
+// The dev launcher keeps electron-vite alive for hot reload. Let its process
+// guardian know when the Electron main process has actually exited so it can
+// stop the otherwise-idle Vite/supervisor processes too. The marker is in a
+// unique per-run temp directory and is not used by normal packaged launches.
+const devAppExitFile = process.env['AC_DEV_APP_EXIT_FILE'];
+if (devAppExitFile) {
+  process.once('exit', () => {
+    try {
+      writeFileSync(devAppExitFile, 'exited\n');
+    } catch (error) {
+      console.error('[dev-lifecycle] failed to notify launcher of app exit:', error);
+    }
+  });
+}
+
 // Defense in depth: a late async emit (e.g. a node-pty chunk arriving during
 // window teardown) must never take down the whole process. Route through the
 // logger (so it lands in the persisted on-disk log, not just the invisible
@@ -35,7 +57,10 @@ let sessionReaper: SessionReaperHandle | null = null;
 // CANNOT catch a native brk 0 — that limitation is inherent; crashReporter above
 // covers the native case.
 process.on('uncaughtException', (err) => {
-  logger.error(`uncaughtException: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`, 'main');
+  logger.error(
+    `uncaughtException: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    'main',
+  );
   console.error('[main:uncaughtException]', err);
 });
 
@@ -95,6 +120,7 @@ app.whenReady().then(() => {
     Boolean(process.env['ELECTRON_RENDERER_URL']),
   );
   if (developmentIcon) app.dock?.setIcon(developmentIcon);
+  registerGhosttyWasmHandler();
   // Start persisting the log to disk as early as possible (right after the PATH
   // bootstrap, before any other startup work) so everything from here survives a
   // crash. The sink flushes the current in-memory buffer first, so any entry
@@ -114,6 +140,10 @@ app.whenReady().then(() => {
   powerMonitor.on('resume', () => logger.info('system resume', 'power'));
   setupSecurity();
   installApplicationMenu();
+  // Resolve whether this is a fresh or established profile before getDb()
+  // creates store.db. Missing config + an older store.db means legacy tmux;
+  // a truly fresh profile persists its chosen default in config.json.
+  loadSettings();
   getDb(); // open + migrate app-local store
   registerIpc(() => mainWindow, openDiagnosticsWindow);
   // Start the idle session reaper (the single periodic main-process timer). It
@@ -151,6 +181,10 @@ app.on('will-quit', () => {
   // Stop the reaper BEFORE closeAll so no sweep runs during teardown (FR7).
   sessionReaper?.stop();
   sessionReaper = null;
+  stopLocalMuxOwners();
+  if (process.env['AC_TMUX_EPHEMERAL'] === '1' && tmuxSocket() !== 'agent-cockpit') {
+    spawnSync('tmux', ['-L', tmuxSocket(), 'kill-server'], { stdio: 'ignore', timeout: 2_000 });
+  }
   void sessionManager.closeAll();
   closeDb();
 });

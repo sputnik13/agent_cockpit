@@ -24,16 +24,25 @@ The durable architectural boundaries are:
   otherwise mutate the repository or git state.
 - **Agent-terminal as the primary write path.** All working-tree and git
   mutation happens through the CLI agent the user runs in the embedded terminal
-  (or the Run panel); the lone app-side exception is beads issue state via `br`. Both are backed by `tmux` on a dedicated `agent-cockpit` socket so
-  sessions persist across restarts and stay isolated from the user's own tmux.
-  Two backends coexist behind the `WorkspaceProvider` seam and are selected by
-  the `terminalBackend` setting in [src/shared/settings.ts](../src/shared/settings.ts):
+  (or the Run panel); the lone app-side exception is beads issue state via `br`.
+  Production tmux backends use the dedicated `agent-cockpit` socket so sessions
+  persist across restarts and stay isolated from the user's own tmux. Normal
+  development retains Electron's historical `agent-cockpit` `userData` profile
+  while using the default persistent tmux/mux resources. The packaged app's
+  `Agent Cockpit` profile remains separate by explicit user choice; no automatic
+  profile migration occurs. Test and explicitly isolated development launches
+  use unique profiles and sockets with scoped cleanup.
+  Three backends
+  coexist behind the `WorkspaceProvider` seam and are selected by the
+  `terminalBackend` setting in [src/shared/settings.ts](../src/shared/settings.ts):
   the default **session-per-tab** model namespaces sessions as
   `agent-cockpit-terminal-<projectId>-<key>` (terminal tabs) and a single
   `agent-cockpit-run-<projectId>` (Run panel); the **control-mode (`-CC`)**
   model drives one per-project session (`agent-cockpit-<projectId>`) where
-  tmux is the authority for windows and panes. Switching backends is a
-  clean-slate operation that kills every cockpit-socket tmux session. Every
+  tmux is the authority for windows and panes; and **Cockpit mux**, an
+  independently runnable Go daemon that owns PTYs and logical terminal topology
+  without tmux. Switching backends is a clean-slate operation that kills every
+  cockpit-socket tmux session when leaving a tmux backend. Every
   other surface (changes, content viewer, notes, sessions) is a read-only
   projection; beads navigation is read-only too, but **task detail** writes
   issue state via the `br` CLI (see NFR-2).
@@ -71,7 +80,7 @@ The durable architectural boundaries are:
   anchor — `clobberPrefix: ''` makes that second prefixing pass a no-op. This
   is an accepted trade-off, not a free fix: it also disables sanitize's own
   clobber-id-prefixing for any other (non-footnote) attacker-set
-  `id`/`name`/aria-* from raw inline HTML — a real, lower-confidence residual
+  `id`/`name`/aria-\* from raw inline HTML — a real, lower-confidence residual
   DOM-clobbering surface, not exhaustively audited in this codebase. See
   CLAUDE.md's "Inline-HTML sanitizer schema must never allowlist this app's
   own trusted attributes by name" for the full record of the `clobberPrefix`
@@ -130,7 +139,7 @@ The durable architectural boundaries are:
 | Shared tmux protocol (`src/shared/tmux/`) | shared      | Pure parser/codec/layout/command builders for tmux control mode — `%begin`/`%end`/`%error` reply correlation, `%output` decode, window-layout-string parsing, hex `send-keys` encoding. Consumed by both host managers. |
 | `ProviderRegistry`                        | main        | Builds a provider from `{ projectId, spec }`.                                                                                                                                                                           |
 | `SessionManager`                          | main        | At most one provider per project; one `activeId`. All live sessions stay fully active (background-live); owns the per-session watch lifecycle and the idle-activity tracker.                                            |
-| Provider IPC bridge                       | main        | Typed handlers routing renderer calls to the active provider + SQLite store; forwards push events; validates inputs.                                                                                                    |
+| Provider IPC bridge                       | main        | Typed handlers route ordinary active-project calls to the active provider, while retained terminal lifecycle calls carry an explicit project id; forwards push events and validates inputs.                             |
 | SQLite store                              | main        | App-local persistence (projects + order + run command, layouts, notes, since-seen, settings).                                                                                                                           |
 | tmux session inventory                    | main        | Lists/kills sessions on the `agent-cockpit` socket for the Sessions panel.                                                                                                                                              |
 | Remote helper                             | remote host | Go static binary serving read RPC + fs-watch over the SSH exec channel.                                                                                                                                                 |
@@ -485,8 +494,9 @@ empty-state flash, keyboard lag, and cross-project output bleed).
 - **Disposal is explicit or idle**: only an explicit close (tab/pane/window) or
   the registry idle reaper (detached + untouched past the threshold) disposes an
   instance; the underlying tmux session survives so a later return reattaches.
-- **Backend selection** lives in the `terminalBackend` setting; the two
-  registries are siblings, never active at the same time. Switching backends
+- **Backend selection** lives in the `terminalBackend` setting; the tmux
+  registries are siblings, never active at the same time. Switching tmux
+  backends
   ([src/renderer/terminal/backendSwitch.ts](../src/renderer/terminal/backendSwitch.ts))
   kills every cockpit-socket session, disposes both registries, and remounts
   the terminal panel so the chosen backend re-initializes from a clean slate.
@@ -501,6 +511,139 @@ empty-state flash, keyboard lag, and cross-project output bleed).
   non-ASCII glyph in a TUI (powerline, box-drawing, emoji). Regression check:
   open a control-mode terminal and run a glyph-rich TUI (`vim`, `htop`,
   `claude`); garbled glyphs mean the invariant is broken.
+
+### Cockpit-mux backend (macOS/Linux)
+
+`cockpit-mux` is a standalone Go component under
+[`cockpit-mux/`](../cockpit-mux/), not an Electron child implementation. One
+daemon per mux home owns PTYs, logical sessions/windows/panes, a libghostty-vt
+shadow, and private SQLite keyframes plus raw tails. Its Unix socket lives in a
+private `0700` home and validates peer credentials; attach is exclusive and
+seeded through a sequence barrier so a new client receives a coherent screen
+before live bytes resume. The Go binary remains usable through its terminal
+fallback independently of Cockpit.
+
+The daemon returns topology as an epoch-and-revision snapshot, rather than a
+bare window list. The epoch changes whenever a daemon starts; its revision is
+assigned while that daemon holds the topology lock. Cockpit's middle layer
+retains only the newest revision within the active epoch for the active project,
+so a late IPC read cannot resurrect a window or pane that a later lifecycle
+operation removed, while a recovered daemon's restarted counter is accepted.
+
+#### Cockpit mux topology and focus ownership
+
+The mux daemon, not a Cockpit renderer store, owns selected topology. Each
+logical session has exactly one selected window, an ordered window placement,
+and one selected pane for **each** of its windows. A window ID is opaque
+identity rather than position: `WindowRecord.idx` persists its session-local
+placement and the daemon holds that order as `windowOrder`. Switching from
+Window A to Window B changes the logical session's active window; returning to
+A restores A's saved active pane. Closing the active window selects its next
+placement, or the preceding final placement when no successor exists. The daemon
+persists this interaction state with the window layout catalog, so the same
+selection and order survive renderer reload, a new local/remote client, daemon
+recovery, and live handoff. Browser focus is necessarily ephemeral: when
+Cockpit makes a daemon-selected pane visible, the renderer focuses that pane's
+textarea/xterm; it must never choose a different pane from client-only history.
+
+```mermaid
+erDiagram
+  PROJECT ||--o{ LOGICAL_SESSION : scopes
+  LOGICAL_SESSION ||--o{ MUX_WINDOW : owns
+  MUX_WINDOW ||--o{ MUX_PANE : contains
+  LOGICAL_SESSION ||--|| TOPOLOGY_STATE : selects
+  MUX_WINDOW ||--|| WINDOW_INTERACTION : has
+  MUX_PANE ||--|| PTY_ATTACHMENT : runs
+
+  PROJECT {
+    string project_id
+  }
+  LOGICAL_SESSION {
+    string session_id
+    string project_id
+  }
+  MUX_WINDOW {
+    string window_id
+    string session_id
+    int placement_index
+  }
+  MUX_PANE {
+    string pane_id
+    string key
+    string window_id
+  }
+  TOPOLOGY_STATE {
+    string active_window_id
+  }
+  WINDOW_INTERACTION {
+    string active_pane_id
+    string zoomed_pane_id
+    json split_layout
+  }
+  PTY_ATTACHMENT {
+    string pty
+    string scrollback
+  }
+```
+
+`TopologyState` is represented in the daemon as `activeWindowID`, `windowOrder`,
+`activePaneByWindow`, `zoomedPaneByWindow`, and `layoutByWindow`; it is stored
+in the private mux catalog rather than in the renderer. The catalog's
+`SessionRecord`, `WindowRecord`, and `PaneRecord` preserve identities and
+recovery metadata; `WindowRecord.Index` is the durable position projection of
+`windowOrder`. The topology and handoff protocol repeat that order explicitly,
+and the middleware maps it into `MuxTopologySession.windowOrder`; the renderer
+uses it for tab display and previous/next navigation. Live
+`managedSession`/`Pane` objects own PTYs, attachments, and screen bytes.
+
+```mermaid
+flowchart LR
+  subgraph Backend["Mux daemon"]
+    Ops["Operations + topology state"]
+    Catalog["Private catalog"]
+    PTY["PTY / attachment"]
+    Ops --> Catalog
+    Ops --> PTY
+  end
+  subgraph Middleware["Provider and IPC"]
+    Manager["Mux terminal manager"]
+    Provider["WorkspaceProvider"]
+    Bridge["IPC + preload API"]
+    Manager --> Provider --> Bridge
+  end
+  subgraph Renderer["Cockpit renderer"]
+    Model["Topology model"]
+    Panel["TerminalPanel"]
+    Registry["Terminal registry / xterm"]
+    Model --> Panel --> Registry
+  end
+  Ops --> Manager
+  Bridge --> Model
+```
+
+Mux PTYs identify as `xterm-ghostty`. The exact pinned Ghostty terminfo entry is
+embedded in the daemon and installed in the private mux home under both macOS
+hexadecimal and Linux letter directory conventions, then passed through `TERMINFO`.
+This removes any dependency on a host-wide Ghostty installation.
+
+Local and remote providers use the same MessagePack client and terminal manager.
+The local launcher verifies a manifest-selected packaged binary before opening the
+Unix-socket bridge; the remote launcher detects its POSIX target, verifies the same
+artifact checksum before upload, then uses an SSH exec bridge. Release manifests
+are append-only and select the newest complete version. On macOS, the packaging sign
+hook refreshes manifest hashes after nested artifacts are signed and then re-seals
+the outer application.
+
+Fresh macOS/Linux configuration resolves to `cockpit-mux` with the wterm DOM
+renderer as its default; the xterm adapters remain independently selectable.
+Existing configurations retain their saved backend without a prompt or automatic
+migration; users change it explicitly in Preferences. Windows is explicitly
+normalized to a tmux backend. WTerm 0.5 supplies a bounded direct Kitty PNG/RGB/RGBA graphics
+subset through its DOM overlay. A live mux shadow retains supported direct
+graphics in native memory and composes a WTerm-only quiet replay seed under the
+attach sequence barrier. That capability negotiation also supplies renderer cell
+pixels for PNG placements that omit a grid span; non-direct transports and graphics recovery across a
+daemon restart, replacement, or handoff remain excluded.
 
 ## Major Data and State Model
 
@@ -521,6 +664,19 @@ empty-state flash, keyboard lag, and cross-project output bleed).
   Connection state specifically is a **derived** mirror (`sessionStore`, fed by
   `evt:status` from the main `ConnectionMachine`); the renderer holds no
   independent connection truth (see the Connection State Machine invariant).
+
+```mermaid
+flowchart LR
+  DB[(App SQLite)] --> Projects[Project registry]
+  DB --> Layouts[Layouts and settings]
+  DB --> Notes[Review notes]
+  Projects --> Main[SessionManager]
+  Main --> Status[ConnectionMachine]
+  Main --> IPC[Provider IPC]
+  IPC --> Stores[Project-keyed zustand stores]
+  Status --> Stores
+  Notes --> Stores
+```
 
 ### Workgraph Relationship & State Model (beads_rust) (invariant)
 
@@ -592,23 +748,33 @@ blocked(flag) > in_progress > dep_blocked > child_blocked > ready`:
 list-comments}`) carry these; the renderer store reloads the graph on a
   successful mutation and surfaces `br`'s own message inline on failure. This is
   the one app-IPC repository-mutation path (REQUIREMENTS NFR-2).
-- **Control-mode renderer boundary (`PaneRenderer`).** The control-mode pane
-  registry ([src/renderer/tmux/controlPaneRegistry.ts](../src/renderer/tmux/controlPaneRegistry.ts))
+- **Terminal renderer boundary (`PaneRenderer`).** The control-mode pane registry
+  ([src/renderer/tmux/controlPaneRegistry.ts](../src/renderer/tmux/controlPaneRegistry.ts))
   owns pane identity, the raw-byte `%output` sink, the capture-pane seed, the idle
-  reaper, and the cell-size cache; the concrete terminal lives behind a pluggable
+  reaper, and the cell-size cache. The Cockpit-mux terminal registry owns provider
+  lifecycle, input/reply routing, output, and geometry. Retained renderer calls
+  (`open`, input/reply write, resize, close, history, and broadcast) carry their
+  owning project id through preload and main IPC, so a background renderer can
+  never resolve a same-key terminal against the currently active provider. Both use the same pluggable
   **`PaneRenderer`** interface ([src/renderer/tmux/paneRenderer/](../src/renderer/tmux/paneRenderer/)),
   selected by the `terminalRenderer` setting. Two adapters implement it:
   **`XtermPaneRenderer`** (`dom`/`webgl`, the default + fallback) and
   **`WtermPaneRenderer`** (`wterm` — `@wterm/dom`'s DOM renderer driven by the
-  `@wterm/ghostty` libghostty VT core). The terminal invariants — raw-byte
-  `write(Uint8Array)`, scrollback single-source, non-destructive repaint-from-
-  buffer recover, font-derived cell metrics — are interface contracts each adapter
-  honors. DOM rendering (xterm DOM, wterm) shapes/snaps glyphs via the browser
+  `@wterm/ghostty` libghostty VT core). Its bounded, DOM-owned canvas overlay
+  renders the documented direct Kitty PNG/RGB/RGBA subset. The mux never
+  intercepts raw Kitty bytes: it reads libghostty's parsed in-memory registry only
+  while composing a WTerm attach seed, and never persists graphics. The terminal invariants — raw-byte
+  `ready()`, raw-byte `write(Uint8Array)`, input/reply routing, optional local
+  scrollback, non-destructive repaint-from-buffer recover, font-derived cell metrics —
+  are interface contracts each adapter honors. DOM rendering (xterm DOM, wterm) shapes/snaps glyphs via the browser
   font engine, so powerline/nerd glyphs align (a canvas reimplementation does not).
-  wterm's libghostty WASM is loaded same-origin via `new URL(import.meta.url)` and
-  packaged into the build by Vite (no network); the production CSP carries
-  `script-src 'self' 'wasm-unsafe-eval'` for it (a narrow directive — WASM
-  compilation only, not arbitrary eval — keeping the sandbox's defense-in-depth).
+  wterm's libghostty WASM is served from the dedicated, fetch-capable
+  `cockpit-wasm://ghostty-vt/ghostty-vt.wasm` endpoint. The main process maps that
+  one URL to the packaged binary (never arbitrary files or a network resource),
+  which avoids Electron `file:` fetch restrictions; the production CSP permits that
+  scheme and carries `script-src 'self' 'wasm-unsafe-eval'` for narrow WASM
+  compilation only. WTerm graphics never add renderer filesystem privilege: the
+  accepted direct subset excludes file-path, shared-memory, and URL media.
 - **Typed IPC contract** ([src/shared/ipc/](../src/shared/ipc/)) is the single
   source of truth for channels and the `RendererApi` shape; preload exposes it
   as `window.api`, the renderer wraps it as `cockpit`. The main IPC bridge owns
@@ -1055,7 +1221,7 @@ from this extra subscription, absent for the primary watch's events. Two
 consumers key off the tag:
 
 - **`diffCache`** (`electron/main/providers/diffCache.ts`) — `onWatch(projectId,
-  paths, worktreePath?)`: a tagged batch drops only entries whose OWN stored
+paths, worktreePath?)`: a tagged batch drops only entries whose OWN stored
   `worktreePath` equals the tag AND whose path is in the changed set; an
   untagged batch keeps its pre-existing behavior (path-only match, or a
   project-wide clear on a git-state signal) unchanged.
@@ -1843,7 +2009,7 @@ byte size) are only knowable once a real read has happened (see
    self-defeat: once the degrade fires, `view` switches `folding-view` →
    `raw-file`, and `effectiveCls` is ALREADY `'text'` by the time `RawFile`
    mounts for that degraded view — so a naive `effectiveCls === 'json' ||
-   effectiveCls === 'yaml'` guard would be false for that very mount, RawFile
+effectiveCls === 'yaml'` guard would be false for that very mount, RawFile
    would read at the DEFAULT (smaller) cap, refuse, report `'too-large'`,
    un-set `oversizedStructured` (which requires `kind === 'text'`), flip
    `effectiveCls` back to json/yaml, remount `FoldingView`, which reports
@@ -2151,6 +2317,18 @@ in `CockpitWorkspace.tsx`:
 the custom application menu removes the `reload` accelerator from the Electron menu (see
 Application Menu above).
 
+Cockpit mux terminal topology shortcuts are frontend commands, independent of
+the selected terminal renderer: Cmd/Ctrl+T creates a window; Cmd/Ctrl+D and
+Cmd/Ctrl+Shift+D split right/below; Cmd/Ctrl+Alt+Arrow moves pane focus;
+Cmd/Ctrl+Shift+[ / ] moves window focus; Cmd/Ctrl+W closes the selected window;
+and Cmd/Ctrl+Shift+Z toggles pane zoom. `muxKeyboard.ts` reduces these chords
+before xterm or WTerm can observe them, and `TerminalPanel` dispatches the same
+daemon operation for both renderer choices. `byobuKeybindings` is enabled by
+default (and can be explicitly disabled); with it enabled,
+Shift+Arrow moves panes and the two-second Ctrl+A prefix accepts z/n/p/a
+(zoom, next/previous window, literal Ctrl+A). The Cockpit mux header contains
+window identity tabs only, not topology-manipulation buttons.
+
 ## Panel Focus
 
 Activating a panel has **two distinct concerns** that are deliberately separated:
@@ -2195,6 +2373,46 @@ handlers. `focusMemory.ts` is unrelated — it is `localStorage` persistence of 
 was last active per project, not a focus mechanism.
 
 ## Configuration and Environment Contracts
+
+### Local Terminal Process Ownership
+
+Packaged Cockpit starts its local mux daemon detached and without an owner pipe
+by default, so active panes survive Electron quit/relaunch. The optional
+`COCKPIT_MUX_EPHEMERAL=1` mode adds an inherited owner pipe for isolated tests
+and development runs whose guardian owns teardown; EOF cancels that daemon's
+server context, including after parent SIGKILL. For panes launched by that daemon,
+teardown enumerates the private PTY session and signals its current members
+(TERM, bounded grace period, then KILL), not just the shell PID, so helpers such
+as `gitstatusd` are included. During live handoff, the session-leader ID and
+its original start-time identity are transferred, and the replacement records
+PID/start-time identities only while
+the original leader is verifiable. After that identity disappears, cleanup
+signals only recorded identities that still match; it does not discover targets
+from SID alone. For an owned pane, the daemon holds its exited shell unreaped
+until same-session cleanup completes, preventing numeric SID reuse during the
+scan. The adopted-pane fail-closed policy accepts a narrow race where a helper
+created after the last sample can survive. See
+[`docs/operations/process-lifecycle.md`](operations/process-lifecycle.md) for
+the evidence and accepted limitation.
+
+Cockpit-mux sessions are daemon-owned live processes, not Electron-owned child
+processes. Normal app quit only disconnects the client; it does not stop the
+daemon or reap session history. An explicit pane/session close reaps its catalog
+and history. Stopping the daemon itself terminates active process groups; daemon
+restart restoration is not required. Production tmux sessions follow a separate
+contract: they survive UI disconnects and app restarts and are removed only by
+explicit user action. No automatic TTL is applied to detached production tmux
+sessions, because a detached session may still contain a running agent.
+
+E2E, isolated development, and `bin/run-isolated` runs set `AC_TMUX_SOCKET` to a
+unique socket and `AC_TMUX_EPHEMERAL=1`. The latter sets `exit-empty on`; app
+shutdown and detached run guardians also kill only that exact socket. E2E
+guards reject direct Playwright invocation with a non-isolated socket. The default
+`agent-cockpit` tmux server is never targeted by automated teardown.
+
+For confirmed causes, unresolved historical evidence, and the cleanup
+acceptance commands, see
+[Process Lifecycle and Leak Findings](operations/process-lifecycle.md).
 
 - **Remote host prerequisites:** an SSH account, `tmux`, and the ability to run
   the uploaded static helper binary. No package manager, language runtime, or

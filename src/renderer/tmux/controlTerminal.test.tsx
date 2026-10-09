@@ -326,7 +326,9 @@ describe('post-split focus (FR4: new pane gets visual + keyboard focus)', () => 
 
     // ⌘D issues split-window -h with -P -F '#{pane_id}'; capture the new pane id.
     await act(async () => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true }));
+      container.querySelector('.ac-term')!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true }),
+      );
       await Promise.resolve();
     });
     expect(api.tmuxControl.command).toHaveBeenCalledWith(
@@ -357,6 +359,48 @@ describe('post-split focus (FR4: new pane gets visual + keyboard focus)', () => 
     // Keyboard focus: the new pane's xterm.focus() was invoked.
     await waitFor(() => expect(focusSpy).toHaveBeenCalled());
     focusSpy.mockRestore();
+  });
+
+  it('keeps terminal shortcuts out of other controls and disarms Byobu on focus exit', async () => {
+    const previousSettings = useSettingsStore.getState().settings;
+    useSettingsStore.setState({ settings: { ...previousSettings, byobuKeybindings: true } });
+    const { container } = render(<ControlTerminalPanel />);
+    await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
+    act(() => {
+      setActiveSlice({
+        windowOrder: ['@0'],
+        windows: { '@0': { windowId: '@0', name: 'shell', layout: leaf('%0') } },
+        activeWindowId: '@0',
+        activePaneId: '%0',
+        panes: { '%0': { paneId: '%0', windowId: '@0' } },
+      });
+    });
+    await waitFor(() => expect(container.querySelector('.ac-term')).not.toBeNull());
+    const terminal = container.querySelector('.ac-term')!;
+    expect(terminal).toBeInTheDocument();
+    const callsBefore = api.tmuxControl.command.mock.calls.length;
+    const prefix = new KeyboardEvent('keydown', {
+      key: 'a', code: 'KeyA', ctrlKey: true, bubbles: true, cancelable: true,
+    });
+    terminal.dispatchEvent(prefix);
+    expect(prefix.defaultPrevented).toBe(true);
+
+    const input = document.createElement('input');
+    document.body.append(input);
+    input.focus();
+    const move = new KeyboardEvent('keydown', {
+      key: 'ArrowLeft', shiftKey: true, bubbles: true, cancelable: true,
+    });
+    input.dispatchEvent(move);
+    const staleSuffix = new KeyboardEvent('keydown', {
+      key: 'z', bubbles: true, cancelable: true,
+    });
+    input.dispatchEvent(staleSuffix);
+    expect(move.defaultPrevented).toBe(false);
+    expect(staleSuffix.defaultPrevented).toBe(false);
+    expect(api.tmuxControl.command).toHaveBeenCalledTimes(callsBefore);
+    input.remove();
+    useSettingsStore.setState({ settings: previousSettings });
   });
 });
 

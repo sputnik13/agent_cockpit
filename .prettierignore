@@ -4,4 +4,6 @@ dist
 .vite
 coverage
 .beads
+.codegraph
+cockpit-mux/.build
 package-lock.json

@@ -3283,10 +3283,9 @@ describe('RenderedMarkdown — integration verification (local_repo_explorer-ren
     // decorates (docs/design/ui-rendered-markdown-diff.md's own
     // "Compatibility with Existing Note-Anchoring & Verification" section):
     // headings/paragraphs from every file; fenced code from DESIGN.md's
-    // directory-tree fence and ghostty-wterm-multiplexer.md's typescript/sql/
+    // directory-tree fence and the active ghostty/wterm proposal's typescript/sql/
     // sh fences; tables from ARCHITECTURE.md, ui-design-language.md, and
-    // ghostty-wterm-multiplexer.md; blockquotes from
-    // ghostty-wterm-multiplexer.md (verified via `grep -rn '^>' docs` before
+    // that proposal; blockquotes from the same proposal (verified via `grep -rn '^>' docs` before
     // picking this corpus — real blockquotes exist in docs/BUILD.md and
     // several docs/proposals/*.md, so no synthetic blockquote document was
     // needed).
@@ -3297,7 +3296,7 @@ describe('RenderedMarkdown — integration verification (local_repo_explorer-ren
       'docs/design/ui-design-language.md',
       'docs/design/ui-rendered-markdown-diff.md',
       'docs/TEST_PLAN.md',
-      'docs/proposals/ghostty-wterm-multiplexer.md',
+      'docs/proposals/_active_ghostty-wterm-multiplexer.md',
     ] as const;
 
     // Resolved from process.cwd() (repo root under every sanctioned
@@ -3772,6 +3771,20 @@ describe('RenderedMarkdown — GitHub-style inline HTML (docs/ARCHITECTURE.md "U
       'digraph { A -> B }',
       '```',
     ].join('\n');
+    const svgPrototype = window.SVGElement.prototype;
+    const originalTextLength = Object.getOwnPropertyDescriptor(
+      svgPrototype,
+      'getComputedTextLength',
+    );
+    const originalBox = Object.getOwnPropertyDescriptor(svgPrototype, 'getBBox');
+    Object.defineProperty(svgPrototype, 'getComputedTextLength', {
+      configurable: true,
+      value: () => 8,
+    });
+    Object.defineProperty(svgPrototype, 'getBBox', {
+      configurable: true,
+      value: () => ({ x: 0, y: 0, width: 8, height: 12 }),
+    });
     const { container } = setup(src);
     // Both fences route to their own DiagramFrame (toolbar label span), not a
     // <pre> code listing — proves data-mermaid-id/data-graphviz-id survived
@@ -3783,6 +3796,11 @@ describe('RenderedMarkdown — GitHub-style inline HTML (docs/ARCHITECTURE.md "U
       expect(labels).toContain('Graphviz');
     });
     expect(container.querySelector('pre')).toBeNull();
+    if (originalTextLength)
+      Object.defineProperty(svgPrototype, 'getComputedTextLength', originalTextLength);
+    else delete (svgPrototype as SVGElement & { getComputedTextLength?: () => number }).getComputedTextLength;
+    if (originalBox) Object.defineProperty(svgPrototype, 'getBBox', originalBox);
+    else delete (svgPrototype as SVGElement & { getBBox?: () => DOMRect }).getBBox;
   });
 
   it('SECURITY: a forged data-start-line/data-end-line on attacker-controlled bare HTML is replaced with the TRUE, re-derived line — not merely "not the forged value"', async () => {

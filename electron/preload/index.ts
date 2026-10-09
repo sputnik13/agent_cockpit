@@ -1,7 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { Channels } from '@shared/ipc/channels';
 import type { RendererApi } from '@shared/ipc/api';
-import type { FileBytesResult } from '@shared/providers/types';
+import type {
+  FileBytesResult,
+  MuxSessionInfo,
+  MuxTopologySnapshot,
+  TerminalScrollbackLine,
+} from '@shared/providers/types';
 
 const invoke = <T>(channel: string, payload?: unknown): Promise<T> =>
   ipcRenderer.invoke(channel, payload) as Promise<T>;
@@ -21,7 +26,8 @@ const api: RendererApi = {
     remove: (id) => invoke<{ ok: true }>(Channels.projectsRemove, { id }).then(() => undefined),
     update: (id, patch) =>
       invoke<{ project: never }>(Channels.projectsUpdate, { id, patch }).then((r) => r.project),
-    openDialog: () => invoke<{ path: string | null }>(Channels.projectsOpenDialog).then((r) => r.path),
+    openDialog: () =>
+      invoke<{ path: string | null }>(Channels.projectsOpenDialog).then((r) => r.path),
     activate: (id) => invoke<{ ok: true }>(Channels.projectsActivate, { id }).then(() => undefined),
     getActive: () => invoke<{ id: string | null }>(Channels.projectsGetActive).then((r) => r.id),
     reorder: (ids) => invoke<{ ok: true }>(Channels.projectsReorder, { ids }).then(() => undefined),
@@ -35,15 +41,22 @@ const api: RendererApi = {
 
   provider: {
     listWorktrees: (projectId) =>
-      invoke<{ worktrees: never }>(Channels.providerListWorktrees, { projectId }).then((r) => r.worktrees),
+      invoke<{ worktrees: never }>(Channels.providerListWorktrees, { projectId }).then(
+        (r) => r.worktrees,
+      ),
     getChangeset: (worktreePath, baseline, projectId) =>
-      invoke<{ changeset: never }>(Channels.providerGetChangeset, { worktreePath, baseline, projectId }).then(
-        (r) => r.changeset,
-      ),
+      invoke<{ changeset: never }>(Channels.providerGetChangeset, {
+        worktreePath,
+        baseline,
+        projectId,
+      }).then((r) => r.changeset),
     getFileDiff: (worktreePath, filePath, baseline, projectId) =>
-      invoke<{ patch: string }>(Channels.providerGetFileDiff, { worktreePath, filePath, baseline, projectId }).then(
-        (r) => r.patch,
-      ),
+      invoke<{ patch: string }>(Channels.providerGetFileDiff, {
+        worktreePath,
+        filePath,
+        baseline,
+        projectId,
+      }).then((r) => r.patch),
     getDiffBundle: (worktreePath, filePath, baseline, projectId) =>
       invoke<{ bundle: never }>(Channels.providerGetDiffBundle, {
         worktreePath,
@@ -52,17 +65,23 @@ const api: RendererApi = {
         projectId,
       }).then((r) => r.bundle),
     readFile: (path, opts, projectId) =>
-      invoke<{ file: never }>(Channels.providerReadFile, { path, opts, projectId }).then((r) => r.file),
-    readFileBytes: (path, opts, projectId) =>
-      invoke<{ bytes: FileBytesResult }>(Channels.providerReadFileBytes, { path, opts, projectId }).then(
-        (r) => r.bytes,
+      invoke<{ file: never }>(Channels.providerReadFile, { path, opts, projectId }).then(
+        (r) => r.file,
       ),
+    readFileBytes: (path, opts, projectId) =>
+      invoke<{ bytes: FileBytesResult }>(Channels.providerReadFileBytes, {
+        path,
+        opts,
+        projectId,
+      }).then((r) => r.bytes),
     stat: (path, projectId) =>
       invoke<{ stat: never }>(Channels.providerStat, { path, projectId }).then((r) => r.stat),
     listDir: (dirPath, worktreePath, projectId) =>
-      invoke<{ entries: never }>(Channels.providerListDir, { dirPath, worktreePath, projectId }).then(
-        (r) => r.entries,
-      ),
+      invoke<{ entries: never }>(Channels.providerListDir, {
+        dirPath,
+        worktreePath,
+        projectId,
+      }).then((r) => r.entries),
     resolvePath: (input, opts, projectId) =>
       invoke<{ resolved: never }>(Channels.providerResolvePath, {
         input,
@@ -70,17 +89,27 @@ const api: RendererApi = {
         projectId,
       }).then((r) => r.resolved),
     detectBeads: (projectId) =>
-      invoke<{ hasBeads: boolean }>(Channels.providerDetectBeads, { projectId }).then((r) => r.hasBeads),
+      invoke<{ hasBeads: boolean }>(Channels.providerDetectBeads, { projectId }).then(
+        (r) => r.hasBeads,
+      ),
     getTaskGraph: (projectId) =>
       invoke<{ graph: never }>(Channels.providerGetTaskGraph, { projectId }).then((r) => r.graph),
     getTask: (issueId, projectId) =>
-      invoke<{ issue: never }>(Channels.providerGetTask, { issueId, projectId }).then((r) => r.issue),
+      invoke<{ issue: never }>(Channels.providerGetTask, { issueId, projectId }).then(
+        (r) => r.issue,
+      ),
     beadsClose: (issueId, reason, projectId) =>
-      invoke<{ ok: true }>(Channels.providerBeadsClose, { issueId, reason, projectId }).then(() => undefined),
+      invoke<{ ok: true }>(Channels.providerBeadsClose, { issueId, reason, projectId }).then(
+        () => undefined,
+      ),
     beadsReopen: (issueId, projectId) =>
-      invoke<{ ok: true }>(Channels.providerBeadsReopen, { issueId, projectId }).then(() => undefined),
+      invoke<{ ok: true }>(Channels.providerBeadsReopen, { issueId, projectId }).then(
+        () => undefined,
+      ),
     beadsComment: (issueId, message, projectId) =>
-      invoke<{ ok: true }>(Channels.providerBeadsComment, { issueId, message, projectId }).then(() => undefined),
+      invoke<{ ok: true }>(Channels.providerBeadsComment, { issueId, message, projectId }).then(
+        () => undefined,
+      ),
     beadsCreate: (input, projectId) =>
       invoke<{ issueId: string | null }>(Channels.providerBeadsCreate, { input, projectId }).then(
         (r) => r.issueId,
@@ -113,38 +142,141 @@ const api: RendererApi = {
   },
 
   terminal: {
-    open: (opts) => invoke<{ terminalId: string }>(Channels.terminalOpen, { opts }).then((r) => r.terminalId),
-    write: (terminalId, data) =>
-      invoke<{ ok: true }>(Channels.terminalWrite, { terminalId, data }).then(() => undefined),
-    resize: (terminalId, cols, rows) =>
-      invoke<{ ok: true }>(Channels.terminalResize, { terminalId, cols, rows }).then(() => undefined),
-    close: (terminalId, kill) =>
-      invoke<{ ok: true }>(Channels.terminalClose, { terminalId, kill }).then(() => undefined),
-    list: () => invoke<{ keys: string[] }>(Channels.terminalList).then((r) => r.keys),
+    open: (opts, projectId) =>
+      invoke<{ terminalId: string }>(Channels.terminalOpen, { opts, projectId }).then(
+        (r) => r.terminalId,
+      ),
+    split: (sourceId, terminalId, direction, projectId) =>
+      invoke<{ terminalId: string }>(Channels.terminalSplit, {
+        sourceId,
+        terminalId,
+        direction,
+        projectId,
+      }).then((r) => r.terminalId),
+    newWindow: (sourceId, terminalId, projectId) =>
+      invoke<{ terminalId: string }>(Channels.terminalNewWindow, {
+        sourceId,
+        terminalId,
+        projectId,
+      }).then((r) => r.terminalId),
+    write: (terminalId, data, kind, projectId) =>
+      invoke<{ ok: true }>(Channels.terminalWrite, { terminalId, data, kind, projectId }).then(
+        () => undefined,
+      ),
+    resize: (terminalId, cols, rows, projectId) =>
+      invoke<{ ok: true }>(Channels.terminalResize, { terminalId, cols, rows, projectId }).then(
+        () => undefined,
+      ),
+    setBroadcast: (terminalId, enabled, projectId) =>
+      invoke<{ ok: true }>(Channels.terminalBroadcast, { terminalId, enabled, projectId }).then(
+        () => undefined,
+      ),
+    setBroadcastScope: (terminalId, scope, projectId) =>
+      invoke<{ ok: true }>(Channels.terminalBroadcastScope, { terminalId, scope, projectId }).then(
+        () => undefined,
+      ),
+    scrollback: (terminalId, before, count, projectId) =>
+      invoke<{ lines: TerminalScrollbackLine[] }>(Channels.terminalScrollback, {
+        terminalId,
+        before,
+        count,
+        projectId,
+      }).then((r) => r.lines),
+    close: (terminalId, kill, projectId) =>
+      invoke<{ ok: true }>(Channels.terminalClose, { terminalId, kill, projectId }).then(
+        () => undefined,
+      ),
+    list: (projectId) =>
+      invoke<{ keys: string[] }>(Channels.terminalList, { projectId }).then((r) => r.keys),
+  },
+
+  muxSessions: {
+    list: () =>
+      invoke<{ sessions: Array<MuxSessionInfo & { projectId: string }> }>(
+        Channels.muxSessionsList,
+      ).then((r) => r.sessions),
+    destroy: (projectId, sessionId) =>
+      invoke<{ ok: true }>(Channels.muxSessionsDestroy, { projectId, sessionId }).then(
+        () => undefined,
+      ),
+    pin: (projectId, sessionId, pinned) =>
+      invoke<{ ok: true }>(Channels.muxSessionsPin, { projectId, sessionId, pinned }).then(
+        () => undefined,
+      ),
+    shutdown: () =>
+      invoke<{ failedProjectIds: string[] }>(Channels.muxSessionsShutdown).then(
+        (r) => r.failedProjectIds,
+      ),
+    topology: (projectId) =>
+      invoke<MuxTopologySnapshot>(Channels.muxTopologyList, { projectId }),
+    selectWindow: (projectId, sessionId, windowId) =>
+      invoke<MuxTopologySnapshot>(Channels.muxTopologySelectWindow, {
+        projectId,
+        sessionId,
+        windowId,
+      }),
+    selectPane: (projectId, sessionId, windowId, paneId) =>
+      invoke<MuxTopologySnapshot>(Channels.muxTopologySelectPane, {
+        projectId,
+        sessionId,
+        windowId,
+        paneId,
+      }),
+    zoomPane: (projectId, sessionId, windowId, paneId) =>
+      invoke<MuxTopologySnapshot>(Channels.muxTopologyZoomPane, {
+        projectId,
+        sessionId,
+        windowId,
+        paneId,
+      }),
+    resizeSplit: (projectId, sessionId, windowId, paneId, ratio) =>
+      invoke<MuxTopologySnapshot>(Channels.muxTopologyResizeSplit, {
+        projectId,
+        sessionId,
+        windowId,
+        paneId,
+        ratio,
+      }),
+    destroyWindow: (projectId, sessionId, windowId) =>
+      invoke<MuxTopologySnapshot>(Channels.muxTopologyDestroyWindow, {
+        projectId,
+        sessionId,
+        windowId,
+      }),
   },
 
   tmuxControl: {
     open: (opts, projectId) =>
-      invoke<{ sessionName: string }>(Channels.tmuxControlOpen, { ...(opts ?? {}), projectId }).then(
-        (r) => r.sessionName,
-      ),
+      invoke<{ sessionName: string }>(Channels.tmuxControlOpen, {
+        ...(opts ?? {}),
+        projectId,
+      }).then((r) => r.sessionName),
     close: (kill, projectId) =>
       invoke<{ ok: true }>(Channels.tmuxControlClose, { kill, projectId }).then(() => undefined),
     command: (args, projectId) =>
-      invoke<{ reply: never }>(Channels.tmuxControlCommand, { args, projectId }).then((r) => r.reply),
-    input: (paneId, hex, projectId) =>
-      invoke<{ ok: true }>(Channels.tmuxControlInput, { paneId, hex, projectId }).then(() => undefined),
-    resize: (cols, rows, projectId) =>
-      invoke<{ ok: true }>(Channels.tmuxControlResize, { cols, rows, projectId }).then(() => undefined),
-    capturePane: (paneId, startLine, projectId) =>
-      invoke<{ lines: string[] }>(Channels.tmuxControlCapturePane, { paneId, startLine, projectId }).then(
-        (r) => r.lines,
+      invoke<{ reply: never }>(Channels.tmuxControlCommand, { args, projectId }).then(
+        (r) => r.reply,
       ),
+    input: (paneId, hex, projectId) =>
+      invoke<{ ok: true }>(Channels.tmuxControlInput, { paneId, hex, projectId }).then(
+        () => undefined,
+      ),
+    resize: (cols, rows, projectId) =>
+      invoke<{ ok: true }>(Channels.tmuxControlResize, { cols, rows, projectId }).then(
+        () => undefined,
+      ),
+    capturePane: (paneId, startLine, projectId) =>
+      invoke<{ lines: string[] }>(Channels.tmuxControlCapturePane, {
+        paneId,
+        startLine,
+        projectId,
+      }).then((r) => r.lines),
   },
 
   notes: {
     create: (input) => invoke<{ note: never }>(Channels.notesCreate, input).then((r) => r.note),
-    update: (id, body) => invoke<{ note: never }>(Channels.notesUpdate, { id, body }).then((r) => r.note),
+    update: (id, body) =>
+      invoke<{ note: never }>(Channels.notesUpdate, { id, body }).then((r) => r.note),
     remove: (id) => invoke<{ ok: true }>(Channels.notesDelete, { id }).then(() => undefined),
     list: (projectId, filter) =>
       invoke<{ notes: never }>(Channels.notesList, { projectId, ...filter }).then((r) => r.notes),
@@ -154,14 +286,16 @@ const api: RendererApi = {
 
   settings: {
     get: () => invoke<{ settings: never }>(Channels.settingsGet).then((r) => r.settings),
-    set: (patch) => invoke<{ settings: never }>(Channels.settingsSet, { patch }).then((r) => r.settings),
+    set: (patch) =>
+      invoke<{ settings: never }>(Channels.settingsSet, { patch }).then((r) => r.settings),
     listFonts: () => invoke<{ fonts: string[] }>(Channels.settingsFonts).then((r) => r.fonts),
   },
 
   sessions: {
     list: () => invoke<{ sessions: never }>(Channels.sessionsList).then((r) => r.sessions),
     kill: (name) => invoke<{ ok: true }>(Channels.sessionsKill, { name }).then(() => undefined),
-    killDetached: () => invoke<{ killed: string[] }>(Channels.sessionsKillDetached).then((r) => r.killed),
+    killDetached: () =>
+      invoke<{ killed: string[] }>(Channels.sessionsKillDetached).then((r) => r.killed),
   },
 
   logs: {

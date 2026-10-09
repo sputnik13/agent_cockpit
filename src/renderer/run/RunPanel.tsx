@@ -85,7 +85,7 @@ export function RunPanel(): JSX.Element {
     if (control) {
       if (runPaneId) void useTmuxStore.getState().sendInput(activeId, runPaneId, data);
     } else {
-      void agentCockpit.terminal.write(RUN_KEY, data);
+      void agentCockpit.terminal.write(RUN_KEY, data, undefined, activeId);
     }
   };
 

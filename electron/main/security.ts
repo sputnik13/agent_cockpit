@@ -15,7 +15,7 @@ function buildCsp(): string {
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
-      "connect-src 'self' ws://localhost:* http://localhost:*",
+      "connect-src 'self' cockpit-wasm: ws://localhost:* http://localhost:*",
       "frame-src 'self' data: blob:",
     ].join('; ');
   }
@@ -31,7 +31,7 @@ function buildCsp(): string {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    "connect-src 'self' cockpit-wasm:",
     "frame-src 'self' data: blob:",
   ].join('; ');
 }

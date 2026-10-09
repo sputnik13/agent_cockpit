@@ -50,6 +50,37 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     expect(p.status().state).toBe('connected');
   });
 
+  it('surfaces a local mux crash as reconnecting/failed and recovers on reattach', () => {
+    const provider = new LocalProvider('proj', repo);
+    const states: string[] = [];
+    provider.onStatusChange((status) => states.push(status.state));
+
+    // Constructing the mux terminal manager installs the local daemon's
+    // sub-resource lifecycle callbacks without starting a PTY.
+    (provider as unknown as { muxTerminalManager(): unknown }).muxTerminalManager();
+    const manager = (
+      provider as unknown as {
+        muxConnectionManager: {
+          onReconnecting?: () => void;
+          onReattached?: () => void;
+          onReattachExhausted?: () => void;
+        };
+      }
+    ).muxConnectionManager;
+
+    manager.onReconnecting?.();
+    expect(provider.status().state).toBe('reconnecting');
+    manager.onReattached?.();
+    expect(provider.status().state).toBe('connected');
+
+    manager.onReconnecting?.();
+    manager.onReattachExhausted?.();
+    expect(provider.status().state).toBe('failed');
+    manager.onReattached?.();
+    expect(provider.status().state).toBe('connected');
+    expect(states).toEqual(['reconnecting', 'connected', 'reconnecting', 'failed', 'connected']);
+  });
+
   it('lists the worktree and computes the changeset', async () => {
     const p = new LocalProvider('proj', repo);
     const wts = await p.listWorktrees();
@@ -159,7 +190,10 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
       // to-HEAD fix ever regressed explicit baselines to silently mean HEAD,
       // this would return the (wrong) second commit's content instead of the
       // first's.
-      const firstSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+      const firstSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repo,
+        encoding: 'utf8',
+      }).trim();
       git(repo, ['add', '.']);
       git(repo, ['commit', '-q', '-m', 'second']);
       writeFileSync(join(repo, 'README.md'), '# Title\n\nchanged again\n');
@@ -362,7 +396,10 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
         git(linked, ['commit', '-q', '-m', 'branch-only commit']);
 
         const p = new LocalProvider('proj', repo);
-        const inWt = await p.readFileBytes('branch-only.bin', { worktreePath: linked, ref: 'HEAD' });
+        const inWt = await p.readFileBytes('branch-only.bin', {
+          worktreePath: linked,
+          ref: 'HEAD',
+        });
         expect(inWt.reason).toBeNull();
         expect(Buffer.from(inWt.bytesBase64!, 'base64').equals(buf)).toBe(true);
 
@@ -414,7 +451,9 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     }
     expect(handle.id).toBe('tA');
     const chunks: string[] = [];
-    p.onTerminalData('tA', (d) => chunks.push(d));
+    p.onTerminalData('tA', (d) =>
+      chunks.push(typeof d === 'string' ? d : Buffer.from(d).toString('utf8')),
+    );
     await new Promise((r) => setTimeout(r, 400));
 
     // The terminal is listed for this project (tmux session, or in-memory fallback).
@@ -470,9 +509,7 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     // Event-driven: debounce (200ms) plus a generous safety window.
     await new Promise((r) => setTimeout(r, 800));
     await sub.unsubscribe();
-    const gitEvent = paths.some(
-      (pth) => pth.includes('.git/refs') || pth.includes('.git/HEAD'),
-    );
+    const gitEvent = paths.some((pth) => pth.includes('.git/refs') || pth.includes('.git/HEAD'));
     expect(gitEvent).toBe(true);
   });
 
@@ -505,7 +542,7 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     git(repo, ['worktree', 'remove', '--force', wt2]);
   });
 
-  it('does not refresh on churn inside an already-known worktree\'s own metadata (.git/worktrees/<name>/HEAD)', async () => {
+  it("does not refresh on churn inside an already-known worktree's own metadata (.git/worktrees/<name>/HEAD)", async () => {
     const wt1 = mkdtempSync(join(tmpdir(), 'cockpit-wt-noise-'));
     rmSync(wt1, { recursive: true, force: true });
     git(repo, ['worktree', 'add', '-q', '-b', 'wt-noise', wt1]);
@@ -524,10 +561,7 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
     // does (real shape verified against a throwaway repo: HEAD/ORIG_HEAD/
     // index/logs/HEAD all live under .git/worktrees/<name>/). Routine
     // per-commit churn, not a worktree-set change, must not wake the panel.
-    writeFileSync(
-      join(repo, '.git', 'worktrees', wtName, 'HEAD'),
-      'ref: refs/heads/wt-noise\n',
-    );
+    writeFileSync(join(repo, '.git', 'worktrees', wtName, 'HEAD'), 'ref: refs/heads/wt-noise\n');
     await new Promise((r) => setTimeout(r, 600));
     await sub.unsubscribe();
 
@@ -642,7 +676,7 @@ describe('LocalProvider reads (temp git repo + jsonl beads)', () => {
       expect(paths.some((pth) => pth.includes('node_modules'))).toBe(false);
     });
 
-    it('does not emit .git-signal-shaped events for the worktree (a linked worktree\'s .git is a pointer FILE, not a directory)', async () => {
+    it("does not emit .git-signal-shaped events for the worktree (a linked worktree's .git is a pointer FILE, not a directory)", async () => {
       // Sanity check on the design's stated property: a linked worktree's own
       // `.git` is a plain file (`gitdir: ...`), so there is no `.git/HEAD` or
       // `.git/refs` UNDER the worktree root to ever emit as git-state signal

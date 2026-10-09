@@ -4,6 +4,24 @@ Repo-specific lessons agents must apply without rediscovering. Keep entries
 short, actionable, and rooted in concrete code paths. Add an entry only when a
 non-obvious bug class was found that future changes could re-introduce.
 
+## Normal development preserves the historical development profile
+
+**Invariant:** `npm run dev` is the normal development launch and must use the
+historical persistent Electron `userData` profile derived from the package name
+`agent-cockpit`, plus the default persistent tmux/mux resources. This
+intentionally differs from the packaged app's `Agent Cockpit` profile because
+existing development projects are stored under the historical name. Do not
+pass a temporary `--user-data-dir` or redirect profile/session storage in the
+default dev command. Do not migrate, replace, or delete either profile without
+explicit authorization.
+
+Development and test launches that need isolation must use an explicit
+isolated command or option, with a temporary profile, tmux socket, and mux home
+owned only by that invocation. Process cleanup must be scoped to processes and
+temporary resources created by that isolated run; never remove or replace an
+existing user profile, `store.db`, settings file, or persistent session data
+during normal development startup or shutdown.
+
 ## GUI launches need an explicit PATH bootstrap (tmux/br by bare name)
 
 **Invariant:** The main process spawns local tools by **bare name** — `tmux`
@@ -1754,4 +1772,3 @@ is the best stable compromise.
 
 Mitigation: resizing the panel/window forces a clean `pushClientSize`
 through the host ResizeObserver and clears the ghost.
-

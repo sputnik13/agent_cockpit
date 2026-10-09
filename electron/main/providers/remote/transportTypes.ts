@@ -209,6 +209,8 @@ export interface ProvisionSession {
   mkdirp(dir: string): Promise<void>;
   /** Upload a local file then best-effort chmod it to `mode`. */
   uploadExecutable(localPath: string, remotePath: string, mode: number): Promise<void>;
+  /** Upload a new executable then atomically rename it over an existing path. */
+  replaceExecutable(localPath: string, remotePath: string, mode: number): Promise<void>;
   /** Release the session. Idempotent. */
   end(): void;
 }

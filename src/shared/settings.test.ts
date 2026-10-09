@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_SETTINGS,
+  MUX_SCROLLBACK_LINES_MAX,
   SESSION_IDLE_TIMEOUT_MAX_MIN,
   STRUCTURED_FOLD_MAX_MB_MAX,
   STRUCTURED_FOLD_MAX_MB_MIN,
@@ -8,6 +9,29 @@ import {
   normalizeSettings,
   structuredFoldReadMaxBytes,
 } from './settings';
+
+describe('normalizeSettings — muxPersistScrollback', () => {
+  it('defaults to durable recovery and accepts only an explicit false privacy choice', () => {
+    expect(normalizeSettings({}).muxPersistScrollback).toBe(true);
+    expect(DEFAULT_SETTINGS.muxPersistScrollback).toBe(true);
+    expect(normalizeSettings({ muxPersistScrollback: false }).muxPersistScrollback).toBe(false);
+    expect(
+      normalizeSettings({ muxPersistScrollback: 'false' as unknown as boolean })
+        .muxPersistScrollback,
+    ).toBe(true);
+  });
+});
+
+describe('normalizeSettings — muxScrollbackLines', () => {
+  it('defaults to 10,000 and keeps the live history target finite', () => {
+    expect(normalizeSettings({}).muxScrollbackLines).toBe(10_000);
+    expect(normalizeSettings({ muxScrollbackLines: 12_345.9 }).muxScrollbackLines).toBe(12_345);
+    expect(normalizeSettings({ muxScrollbackLines: 0 }).muxScrollbackLines).toBe(10_000);
+    expect(
+      normalizeSettings({ muxScrollbackLines: MUX_SCROLLBACK_LINES_MAX + 1 }).muxScrollbackLines,
+    ).toBe(MUX_SCROLLBACK_LINES_MAX);
+  });
+});
 
 describe('normalizeSettings — workgraphColumnsSoftCap bounds', () => {
   it('defaults to 2 when absent', () => {
@@ -24,7 +48,8 @@ describe('normalizeSettings — workgraphColumnsSoftCap bounds', () => {
     );
     expect(normalizeSettings({ workgraphColumnsSoftCap: 0 }).workgraphColumnsSoftCap).toBe(2);
     expect(
-      normalizeSettings({ workgraphColumnsSoftCap: '3' as unknown as number }).workgraphColumnsSoftCap,
+      normalizeSettings({ workgraphColumnsSoftCap: '3' as unknown as number })
+        .workgraphColumnsSoftCap,
     ).toBe(2);
   });
 });
@@ -52,7 +77,8 @@ describe('normalizeSettings — structuredFoldMaxMb bounds', () => {
   it('rejects < MIN -> default (deliberate asymmetry: NOT clamped up to MIN, unlike the above-MAX case)', () => {
     expect(normalizeSettings({ structuredFoldMaxMb: 0 }).structuredFoldMaxMb).toBe(10);
     expect(
-      normalizeSettings({ structuredFoldMaxMb: STRUCTURED_FOLD_MAX_MB_MIN - 1 }).structuredFoldMaxMb,
+      normalizeSettings({ structuredFoldMaxMb: STRUCTURED_FOLD_MAX_MB_MIN - 1 })
+        .structuredFoldMaxMb,
     ).toBe(10);
   });
 
@@ -123,7 +149,8 @@ describe('normalizeSettings — tmuxFormatSubscriptions', () => {
   it('is true only for an exact boolean true', () => {
     expect(normalizeSettings({ tmuxFormatSubscriptions: true }).tmuxFormatSubscriptions).toBe(true);
     expect(
-      normalizeSettings({ tmuxFormatSubscriptions: 1 as unknown as boolean }).tmuxFormatSubscriptions,
+      normalizeSettings({ tmuxFormatSubscriptions: 1 as unknown as boolean })
+        .tmuxFormatSubscriptions,
     ).toBe(false);
   });
 });
@@ -145,9 +172,12 @@ describe('normalizeSettings — renderedDiffHighlighting', () => {
     expect(DEFAULT_SETTINGS.renderedDiffHighlighting).toBe(true);
   });
   it('is false only for an exact boolean false', () => {
-    expect(normalizeSettings({ renderedDiffHighlighting: false }).renderedDiffHighlighting).toBe(false);
+    expect(normalizeSettings({ renderedDiffHighlighting: false }).renderedDiffHighlighting).toBe(
+      false,
+    );
     expect(
-      normalizeSettings({ renderedDiffHighlighting: 'off' as unknown as boolean }).renderedDiffHighlighting,
+      normalizeSettings({ renderedDiffHighlighting: 'off' as unknown as boolean })
+        .renderedDiffHighlighting,
     ).toBe(true);
   });
 });
@@ -181,7 +211,9 @@ describe('normalizeSettings — sessionIdleTimeoutMin bounds', () => {
   });
 
   it('rejects non-numbers -> default', () => {
-    expect(normalizeSettings({ sessionIdleTimeoutMin: '30' as unknown as number }).sessionIdleTimeoutMin).toBe(20);
+    expect(
+      normalizeSettings({ sessionIdleTimeoutMin: '30' as unknown as number }).sessionIdleTimeoutMin,
+    ).toBe(20);
     expect(normalizeSettings({ sessionIdleTimeoutMin: NaN }).sessionIdleTimeoutMin).toBe(20);
     expect(normalizeSettings({ sessionIdleTimeoutMin: Infinity }).sessionIdleTimeoutMin).toBe(20);
   });
@@ -200,23 +232,27 @@ describe('normalizeSettings — showRunPanel', () => {
   it('coerces non-true (incl. truthy non-boolean) to false', () => {
     expect(normalizeSettings({ showRunPanel: false }).showRunPanel).toBe(false);
     expect(normalizeSettings({ showRunPanel: 1 as unknown as boolean }).showRunPanel).toBe(false);
-    expect(normalizeSettings({ showRunPanel: 'yes' as unknown as boolean }).showRunPanel).toBe(false);
+    expect(normalizeSettings({ showRunPanel: 'yes' as unknown as boolean }).showRunPanel).toBe(
+      false,
+    );
   });
 });
 
 describe('normalizeSettings — byobuKeybindings', () => {
-  it('defaults to false when absent', () => {
-    expect(normalizeSettings({}).byobuKeybindings).toBe(false);
-    expect(DEFAULT_SETTINGS.byobuKeybindings).toBe(false);
+  it('defaults to true when absent', () => {
+    expect(normalizeSettings({}).byobuKeybindings).toBe(true);
+    expect(DEFAULT_SETTINGS.byobuKeybindings).toBe(true);
   });
 
   it('keeps true verbatim', () => {
     expect(normalizeSettings({ byobuKeybindings: true }).byobuKeybindings).toBe(true);
   });
 
-  it('coerces non-true (incl. truthy non-boolean) to false', () => {
+  it('keeps an explicit false and enables non-false legacy values', () => {
     expect(normalizeSettings({ byobuKeybindings: false }).byobuKeybindings).toBe(false);
-    expect(normalizeSettings({ byobuKeybindings: 1 as unknown as boolean }).byobuKeybindings).toBe(false);
+    expect(normalizeSettings({ byobuKeybindings: 1 as unknown as boolean }).byobuKeybindings).toBe(
+      true,
+    );
   });
 });
 
@@ -234,18 +270,28 @@ describe('normalizeSettings — devEnv', () => {
   });
 
   it('falls back the mode on an unknown value (incl. reserved devcontainer)', () => {
-    expect(normalizeSettings({ devEnv: { mode: 'devcontainer' } }).devEnv.mode).toBe('systemd-scope');
+    expect(normalizeSettings({ devEnv: { mode: 'devcontainer' } }).devEnv.mode).toBe(
+      'systemd-scope',
+    );
     expect(normalizeSettings({ devEnv: { mode: 'nonsense' } }).devEnv.mode).toBe('systemd-scope');
   });
 
   it('rejects an out-of-range / non-numeric memory cap and floors fractions', () => {
-    expect(normalizeSettings({ devEnv: { mode: 'systemd-scope', memoryMaxMb: 0 } }).devEnv.memoryMaxMb).toBe(16384);
-    expect(normalizeSettings({ devEnv: { mode: 'systemd-scope', memoryMaxMb: 10 } }).devEnv.memoryMaxMb).toBe(16384);
     expect(
-      normalizeSettings({ devEnv: { mode: 'systemd-scope', memoryMaxMb: 'lots' as unknown as number } }).devEnv
-        .memoryMaxMb,
+      normalizeSettings({ devEnv: { mode: 'systemd-scope', memoryMaxMb: 0 } }).devEnv.memoryMaxMb,
     ).toBe(16384);
-    expect(normalizeSettings({ devEnv: { mode: 'systemd-scope', memoryMaxMb: 4096.7 } }).devEnv.memoryMaxMb).toBe(4096);
+    expect(
+      normalizeSettings({ devEnv: { mode: 'systemd-scope', memoryMaxMb: 10 } }).devEnv.memoryMaxMb,
+    ).toBe(16384);
+    expect(
+      normalizeSettings({
+        devEnv: { mode: 'systemd-scope', memoryMaxMb: 'lots' as unknown as number },
+      }).devEnv.memoryMaxMb,
+    ).toBe(16384);
+    expect(
+      normalizeSettings({ devEnv: { mode: 'systemd-scope', memoryMaxMb: 4096.7 } }).devEnv
+        .memoryMaxMb,
+    ).toBe(4096);
   });
 });
 
@@ -259,6 +305,38 @@ describe('normalizeSettings — terminalRenderer', () => {
     expect(normalizeSettings({ terminalRenderer: 'dom' }).terminalRenderer).toBe('dom');
     expect(normalizeSettings({ terminalRenderer: 'webgl' }).terminalRenderer).toBe('webgl');
     expect(normalizeSettings({ terminalRenderer: 'wterm' }).terminalRenderer).toBe('wterm');
+  });
+  it('keeps renderer selection independent from the Cockpit mux backend', () => {
+    const normalized = normalizeSettings({
+      terminalBackend: 'cockpit-mux',
+      terminalRenderer: 'dom',
+    });
+    expect(normalized.terminalBackend).toBe('cockpit-mux');
+    expect(normalized.terminalRenderer).toBe('dom');
+  });
+});
+
+describe('normalizeSettings — Cockpit-mux default promotion', () => {
+  it('uses a caller-supplied backend default only when no explicit backend exists', () => {
+    expect(normalizeSettings({}, { defaultTerminalBackend: 'cockpit-mux' }).terminalBackend).toBe(
+      'cockpit-mux',
+    );
+    expect(
+      normalizeSettings(
+        { terminalBackend: 'control-mode' },
+        { defaultTerminalBackend: 'cockpit-mux' },
+      ).terminalBackend,
+    ).toBe('control-mode');
+  });
+
+  it('ignores the legacy migration flag without changing the selected backend', () => {
+    const normalized = normalizeSettings({
+      terminalBackend: 'session-per-tab',
+      terminalBackendMigration: 'pending',
+    });
+
+    expect(normalized.terminalBackend).toBe('session-per-tab');
+    expect(normalized).not.toHaveProperty('terminalBackendMigration');
   });
 });
 
@@ -275,7 +353,9 @@ describe('normalizeSettings — contentMode', () => {
   });
 
   it('falls back to null for an invalid/unrecognized string', () => {
-    expect(normalizeSettings({ contentMode: 'nonsense' as unknown as never }).contentMode).toBeNull();
+    expect(
+      normalizeSettings({ contentMode: 'nonsense' as unknown as never }).contentMode,
+    ).toBeNull();
     expect(normalizeSettings({ contentMode: 'image' as unknown as never }).contentMode).toBeNull();
   });
 
@@ -302,7 +382,11 @@ describe('normalizeSettings — followTerminalCwd', () => {
 
   it('coerces non-true (incl. truthy non-boolean) to false', () => {
     expect(normalizeSettings({ followTerminalCwd: false }).followTerminalCwd).toBe(false);
-    expect(normalizeSettings({ followTerminalCwd: 1 as unknown as boolean }).followTerminalCwd).toBe(false);
-    expect(normalizeSettings({ followTerminalCwd: 'yes' as unknown as boolean }).followTerminalCwd).toBe(false);
+    expect(
+      normalizeSettings({ followTerminalCwd: 1 as unknown as boolean }).followTerminalCwd,
+    ).toBe(false);
+    expect(
+      normalizeSettings({ followTerminalCwd: 'yes' as unknown as boolean }).followTerminalCwd,
+    ).toBe(false);
   });
 });

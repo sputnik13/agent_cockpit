@@ -24,6 +24,8 @@ import type {
   FileBytesResult,
   FileReadOptions,
   FileReadResult,
+  MuxSessionInfo,
+  MuxTopologySnapshot,
   ProjectKind,
   ResolvedPath,
   ResolvePathOptions,
@@ -32,6 +34,8 @@ import type {
   TerminalExitHandler,
   TerminalHandle,
   TerminalOpenOptions,
+  TerminalScrollbackLine,
+  TerminalWriteKind,
   WatchHandler,
   WatchSubscription,
   WorkspaceProvider,
@@ -52,6 +56,9 @@ import { localReadFileBytes } from './readFileBytes';
 import { localExportFile } from './export';
 import { LocalWatchManager } from './watch';
 import { LocalTerminalManager } from './terminal';
+import { LocalMuxLauncher } from './mux';
+import { RemoteMuxConnectionManager } from '../remote/muxConnection';
+import { RemoteMuxTerminalManager } from '../remote/muxTerminal';
 import { sessionNameToken } from '../sessionKey';
 import { loadSettings } from '../../config';
 import { createConnectionMachine, type ConnectionMachine } from '../connectionMachine';
@@ -69,6 +76,8 @@ export class LocalProvider implements WorkspaceProvider {
   private readonly machine: ConnectionMachine;
   private readonly watch: LocalWatchManager;
   private readonly terminals: LocalTerminalManager;
+  private muxConnectionManager: RemoteMuxConnectionManager | null = null;
+  private muxTerminals: RemoteMuxTerminalManager | null = null;
 
   constructor(projectId: string, rootPath: string) {
     this.projectId = projectId;
@@ -83,6 +92,31 @@ export class LocalProvider implements WorkspaceProvider {
     return isAbsolute(path) ? path : join(this.rootPath, path);
   }
 
+  private muxTerminalManager(): RemoteMuxTerminalManager {
+    if (!this.muxTerminals) {
+      const launcher = new LocalMuxLauncher();
+      this.muxConnectionManager = new RemoteMuxConnectionManager(
+        () => launcher.launch(),
+        this.projectId,
+      );
+      // The local project has no transport lifecycle, but its mux daemon can
+      // still disappear. Surface that sub-resource outage through the shared
+      // machine without ever treating the project itself as disconnected.
+      this.muxConnectionManager.onReconnecting = () => this.machine.toReconnecting();
+      this.muxConnectionManager.onReattached = () => this.machine.shortCircuitConnected();
+      this.muxConnectionManager.onReattachExhausted = () =>
+        this.machine.toFailed('local cockpit-mux daemon lost');
+      this.muxTerminals = new RemoteMuxTerminalManager(
+        this.muxConnectionManager,
+        this.rootPath,
+        this.projectId,
+        () => loadSettings().muxPersistScrollback,
+        () => loadSettings().muxScrollbackLines,
+      );
+    }
+    return this.muxTerminals;
+  }
+
   // Lifecycle — local access has no transport; always connected.
   async connect(): Promise<void> {
     // Local is always connected; machine was initialized to 'connected'.
@@ -91,6 +125,10 @@ export class LocalProvider implements WorkspaceProvider {
   }
   async disconnect(): Promise<void> {
     this.terminals.closeAll();
+    this.muxTerminals?.closeAll();
+    this.muxTerminals = null;
+    this.muxConnectionManager?.close();
+    this.muxConnectionManager = null;
     await this.watch.closeAll();
     // Local disconnect/reconnect intents are no-ops at the machine level
     // (connected->disconnected is a legal transition but local should not flow
@@ -115,7 +153,11 @@ export class LocalProvider implements WorkspaceProvider {
   getFileDiff(worktreePath: string, filePath: string, baseline?: string): Promise<string> {
     return localFileDiff(worktreePath || this.rootPath, filePath, baseline);
   }
-  async getDiffBundle(worktreePath: string, filePath: string, baseline?: string): Promise<DiffBundle> {
+  async getDiffBundle(
+    worktreePath: string,
+    filePath: string,
+    baseline?: string,
+  ): Promise<DiffBundle> {
     // Local reads are free, so just compose the existing primitives behind the
     // shared one-call contract (the bundle exists to save round trips on remote).
     const cwd = worktreePath || this.rootPath;
@@ -160,7 +202,11 @@ export class LocalProvider implements WorkspaceProvider {
   }
 
   // Filesystem (bounded export — the one write, OUT of the repo only)
-  async exportFile(path: string, destAbsPath: string, opts?: { worktreePath?: string }): Promise<void> {
+  async exportFile(
+    path: string,
+    destAbsPath: string,
+    opts?: { worktreePath?: string },
+  ): Promise<void> {
     return localExportFile(this.rootPath, path, destAbsPath, opts);
   }
 
@@ -194,32 +240,128 @@ export class LocalProvider implements WorkspaceProvider {
 
   // Terminal (node-pty)
   async openTerminal(opts: TerminalOpenOptions): Promise<TerminalHandle> {
+    if (loadSettings().terminalBackend === 'cockpit-mux') {
+      return this.muxTerminalManager().open({ ...opts, cwd: opts.cwd ?? this.rootPath });
+    }
     return this.terminals.open(opts);
   }
-  async writeTerminal(id: string, data: string): Promise<void> {
+  async splitMuxTerminal(
+    sourceId: string,
+    id: string,
+    direction?: 'horizontal' | 'vertical',
+  ): Promise<TerminalHandle> {
+    return this.muxTerminalManager().split(sourceId, id, direction);
+  }
+  async newMuxWindow(sourceId: string, id: string): Promise<TerminalHandle> {
+    return this.muxTerminalManager().newWindow(sourceId, id);
+  }
+  async writeTerminal(id: string, data: string, kind?: TerminalWriteKind): Promise<void> {
+    if (this.muxTerminals?.has(id)) {
+      await this.muxTerminals.write(id, data, kind);
+      return;
+    }
     this.terminals.write(id, data);
   }
   async resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
+    if (this.muxTerminals?.has(id)) {
+      await this.muxTerminals.resize(id, cols, rows);
+      return;
+    }
     this.terminals.resize(id, cols, rows);
   }
+  async scrollbackTerminal(
+    id: string,
+    before: number,
+    count: number,
+  ): Promise<TerminalScrollbackLine[]> {
+    if (loadSettings().terminalBackend !== 'cockpit-mux') return [];
+    return this.muxTerminalManager().scrollback(id, before, count);
+  }
+  async setTerminalBroadcast(id: string, enabled: boolean): Promise<void> {
+    if (this.muxTerminals?.has(id)) await this.muxTerminals.setBroadcast(id, enabled);
+  }
+  async setTerminalBroadcastScope(id: string, scope: 'window' | 'session'): Promise<void> {
+    if (this.muxTerminals?.has(id)) await this.muxTerminals.setBroadcastScope(id, scope);
+  }
   onTerminalData(id: string, handler: TerminalDataHandler): () => void {
+    if (this.muxTerminals?.has(id)) return this.muxTerminals.onData(id, handler);
     return this.terminals.onData(id, handler);
   }
   onTerminalExit(id: string, handler: TerminalExitHandler): () => void {
+    if (this.muxTerminals?.has(id)) return this.muxTerminals.onExit(id, handler);
     return this.terminals.onExit(id, handler);
   }
   async closeTerminal(id: string, opts?: { kill?: boolean }): Promise<void> {
+    if (
+      loadSettings().terminalBackend === 'cockpit-mux' ||
+      this.muxTerminals?.has(id) ||
+      this.muxTerminals?.hasDetached(id)
+    ) {
+      await this.muxTerminalManager().close(id, opts);
+      return;
+    }
     this.terminals.close(id, opts);
   }
   async listTerminals(): Promise<string[]> {
+    if (loadSettings().terminalBackend === 'cockpit-mux')
+      return this.muxTerminalManager().listSessions();
     return this.terminals.listSessions();
+  }
+  async listMuxSessions(): Promise<MuxSessionInfo[]> {
+    return this.muxTerminals?.listMuxSessions() ?? [];
+  }
+  async listMuxTopology(): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().listMuxTopology();
+  }
+  async selectMuxWindow(sessionId: string, windowId: string): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().selectMuxWindow(sessionId, windowId);
+  }
+  async selectMuxPane(
+    sessionId: string,
+    windowId: string,
+    paneId: string,
+  ): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().selectMuxPane(sessionId, windowId, paneId);
+  }
+  async zoomMuxPane(
+    sessionId: string,
+    windowId: string,
+    paneId: string | null,
+  ): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().zoomMuxPane(sessionId, windowId, paneId);
+  }
+  async resizeMuxSplit(
+    sessionId: string,
+    windowId: string,
+    paneId: string,
+    ratio: number,
+  ): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().resizeMuxSplit(sessionId, windowId, paneId, ratio);
+  }
+  async destroyMuxWindow(sessionId: string, windowId: string): Promise<MuxTopologySnapshot> {
+    return this.muxTerminalManager().destroyWindow(sessionId, windowId);
+  }
+  async destroyMuxSession(sessionId: string): Promise<void> {
+    await this.muxTerminalManager().destroySession(sessionId);
+  }
+  async pinMuxSession(sessionId: string, pinned: boolean): Promise<void> {
+    await this.muxTerminalManager().pinSession(sessionId, pinned);
+  }
+  async shutdownMux(): Promise<void> {
+    if (!this.muxTerminals) return;
+    await this.muxTerminals.shutdown();
+    this.muxTerminals = null;
+    this.muxConnectionManager = null;
   }
 
   // Watch (chokidar, debounced)
   async subscribeWatch(globs: string[], handler: WatchHandler): Promise<WatchSubscription> {
     return this.watch.subscribe(globs, handler);
   }
-  async subscribeWorktreeWatch(worktreePath: string, handler: WatchHandler): Promise<WatchSubscription> {
+  async subscribeWorktreeWatch(
+    worktreePath: string,
+    handler: WatchHandler,
+  ): Promise<WatchSubscription> {
     return this.watch.subscribeWorktree(worktreePath, handler);
   }
 }

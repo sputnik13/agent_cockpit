@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Cockpit</title>
+  <desc id="desc">The letters AC above a connected agent lattice, enclosed by code braces.</desc>
+  <defs>
+    <linearGradient id="brace" x1="60" y1="60" x2="452" y2="452" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5b9bd0"/>
+      <stop offset=".52" stop-color="#268bd2"/>
+      <stop offset="1" stop-color="#376f9e"/>
+    </linearGradient>
+    <linearGradient id="command" x1="173" y1="64" x2="341" y2="205" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#173d58"/>
+      <stop offset="1" stop-color="#002b36"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Cockpit shell: code braces hold the command and its agent network. -->
+  <path fill="url(#brace)" d="M126 52H99c-40 0-58 25-58 70v66c0 37-13 58-41 68 28 10 41 31 41 68v66c0 45 18 70 58 70h27v-68h-17c-13 0-19-9-19-25v-73c0-42-17-69-51-78 34-9 51-36 51-78v-73c0-16 6-25 19-25h17V52Z"/>
+  <path fill="url(#brace)" d="M386 52h27c40 0 58 25 58 70v66c0 37 13 58 41 68-28 10-41 31-41 68v66c0 45-18 70-58 70h-27v-68h17c13 0 19-9 19-25v-73c0-42 17-69 51-78-34-9-51-36-51-78v-73c0-16-6-25-19-25h-17V52Z"/>
+
+  <!-- AC command. Geometric forms remain clear at small icon sizes. -->
+  <path fill="url(#command)" d="M164 205 193 66h59l31 139h-42l-5-27h-30l-5 27h-39Zm67-105-9 48h27l-10-48h-8Z"/>
+  <path fill="url(#command)" d="M371 102c-9-8-20-12-33-12-23 0-37 15-37 45 0 29 14 44 37 44 13 0 24-4 33-12v31c-11 7-24 10-40 10-47 0-76-28-76-73 0-46 29-74 76-74 16 0 29 3 40 10v31Z"/>
+
+  <!-- Agent lattice: visible, directional relationships without a background. -->
+  <g fill="none" stroke="#2aa198" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m127 254 16 44 71-28 61 48 75-14 33 38M143 298l44 78 76-22 51 43 36-93M187 376l55-50 21 28 51-36M143 298l99 28 72-52M214 270l28 56 72-52M127 254l87 16 28 56M242 326l72-8 36-14M187 376l127 21M263 354l87-50M242 326l21 28M214 270l28 4M263 354l-21-28" stroke-width="4"/>
+    <path d="m112 221 15 33m97-21-10 37m57-43-57 43m57-43 30 28m0 0 49-4m-49 4 49 50m-177-50 64-21m-64 21 44 78m33-106 21 48" stroke-width="3" opacity=".82"/>
+  </g>
+  <g fill="#2aa198">
+    <circle cx="112" cy="221" r="8"/><circle cx="127" cy="254" r="10"/><circle cx="143" cy="298" r="7"/>
+    <circle cx="173" cy="254" r="10"/><circle cx="187" cy="376" r="9"/><circle cx="214" cy="270" r="9"/>
+    <circle cx="224" cy="233" r="6"/><circle cx="242" cy="326" r="10"/><circle cx="263" cy="354" r="8"/>
+    <circle cx="271" cy="227" r="7"/><circle cx="301" cy="255" r="9"/><circle cx="314" cy="318" r="10"/>
+    <circle cx="314" cy="397" r="8"/><circle cx="350" cy="304" r="7"/><circle cx="383" cy="342" r="8"/>
+    <circle cx="399" cy="251" r="7"/>
+  </g>
+</svg>

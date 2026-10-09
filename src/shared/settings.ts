@@ -9,7 +9,7 @@ export type ThemeId = 'solarized-dark' | 'solarized-light';
  * (the original model); `control-mode` drives a single per-project `tmux -CC`
  * control session mapping tmux windows->tabs and panes->splits.
  */
-export type TerminalBackend = 'session-per-tab' | 'control-mode';
+export type TerminalBackend = 'session-per-tab' | 'control-mode' | 'cockpit-mux';
 
 /**
  * xterm renderer for control-mode panes. `dom` is xterm's built-in renderer
@@ -25,6 +25,10 @@ export type TerminalBackend = 'session-per-tab' | 'control-mode';
  * rendering + the libghostty VT core). Default `dom`.
  */
 export type TerminalRenderer = 'dom' | 'webgl' | 'wterm';
+
+/** Finite live Ghostty history target. The daemon prunes page-by-page. */
+export const MUX_SCROLLBACK_LINES_MIN = 1;
+export const MUX_SCROLLBACK_LINES_MAX = 1_000_000;
 
 /**
  * How a project's dev environment (its control-mode tmux server and therefore
@@ -61,6 +65,10 @@ export interface AppSettings {
   fontSize: number;
   /** Which terminal backend the workbench uses. */
   terminalBackend: TerminalBackend;
+  /** Persist Cockpit-mux screen content and scrollback for crash recovery. */
+  muxPersistScrollback: boolean;
+  /** Target number of physical lines retained in each live Cockpit-mux pane. */
+  muxScrollbackLines: number;
   /** xterm renderer for control-mode panes. */
   terminalRenderer: TerminalRenderer;
   /**
@@ -93,9 +101,10 @@ export interface AppSettings {
   /**
    * Enable byobu/screen-style keybindings in the control-mode terminal: a
    * `Ctrl+a` prefix (z=zoom, n/p=next/prev tab, a=literal Ctrl+a) plus
-   * Shift+Arrow pane navigation. Off by default — `Ctrl+a` is otherwise
-   * readline beginning-of-line, so this is opt-in. The existing ⌘-based
-   * shortcuts are unaffected and coexist.
+   * Shift+Arrow pane navigation. On by default so Cockpit mux follows the
+   * established Byobu contract; `Ctrl+a,a` forwards a literal Ctrl+a to the
+   * shell. Set false to retain readline beginning-of-line. The existing
+   * ⌘-based shortcuts are unaffected and coexist.
    */
   byobuKeybindings: boolean;
   /**
@@ -183,12 +192,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fontFamily: 'SF Mono',
   fontSize: 13,
   terminalBackend: 'control-mode',
+  muxPersistScrollback: true,
+  muxScrollbackLines: 10_000,
   terminalRenderer: 'dom',
   showAllChanges: false,
   showRunPanel: false,
   sessionIdleTimeoutMin: 20,
   devEnv: { mode: 'systemd-scope', memoryMaxMb: 16384 },
-  byobuKeybindings: false,
+  byobuKeybindings: true,
   followTerminalCwd: false,
   deterministicSessionNames: false,
   tmuxPauseMode: false,
@@ -278,14 +289,17 @@ export const FONT_FAMILY_OPTIONS: SelectOptionDef[] = [
   'monospace',
 ].map((f) => ({ value: f, label: f }));
 
-export const FONT_SIZE_OPTIONS: SelectOptionDef[] = [10, 11, 12, 13, 14, 15, 16, 18, 20].map((n) => ({
-  value: String(n),
-  label: `${n}px`,
-}));
+export const FONT_SIZE_OPTIONS: SelectOptionDef[] = [10, 11, 12, 13, 14, 15, 16, 18, 20].map(
+  (n) => ({
+    value: String(n),
+    label: `${n}px`,
+  }),
+);
 
 export const TERMINAL_BACKEND_OPTIONS: SelectOptionDef[] = [
   { value: 'session-per-tab', label: 'Session per tab' },
   { value: 'control-mode', label: 'tmux control mode (-CC)' },
+  { value: 'cockpit-mux', label: 'Cockpit mux (experimental)' },
 ];
 
 export const TERMINAL_RENDERER_OPTIONS: SelectOptionDef[] = [
@@ -304,23 +318,62 @@ export function fontStack(family: string): string {
   return family === 'monospace' ? 'monospace' : `'${family}', ui-monospace, monospace`;
 }
 
+export interface NormalizeSettingsOptions {
+  /**
+   * Backend used only when the supplied settings do not name one. The Electron
+   * main process supplies the platform- and install-aware default; shared and
+   * renderer callers retain the conservative control-mode baseline.
+   */
+  defaultTerminalBackend?: TerminalBackend;
+}
+
 /** Merge a partial/untrusted config object onto defaults with light validation. */
-export function normalizeSettings(input: unknown): AppSettings {
+export function normalizeSettings(
+  input: unknown,
+  options: NormalizeSettingsOptions = {},
+): AppSettings {
   const o = (input && typeof input === 'object' ? input : {}) as Partial<AppSettings>;
   const theme: ThemeId = o.theme === 'solarized-light' ? 'solarized-light' : 'solarized-dark';
   const fontFamily =
-    typeof o.fontFamily === 'string' && o.fontFamily.length > 0 ? o.fontFamily : DEFAULT_SETTINGS.fontFamily;
+    typeof o.fontFamily === 'string' && o.fontFamily.length > 0
+      ? o.fontFamily
+      : DEFAULT_SETTINGS.fontFamily;
   const fontSize =
     typeof o.fontSize === 'number' && o.fontSize >= 8 && o.fontSize <= 32
       ? o.fontSize
       : DEFAULT_SETTINGS.fontSize;
+  const defaultTerminalBackend =
+    options.defaultTerminalBackend === 'session-per-tab' ||
+    options.defaultTerminalBackend === 'cockpit-mux'
+      ? options.defaultTerminalBackend
+      : 'control-mode';
   const terminalBackend: TerminalBackend =
-    o.terminalBackend === 'session-per-tab' ? 'session-per-tab' : 'control-mode';
-  const terminalRenderer: TerminalRenderer =
+    o.terminalBackend === 'session-per-tab' ||
+    o.terminalBackend === 'control-mode' ||
+    o.terminalBackend === 'cockpit-mux'
+      ? o.terminalBackend
+      : defaultTerminalBackend;
+  // Mux recovery is useful by default, but a strict false is a privacy choice.
+  // Missing or malformed values retain the backwards-compatible durable default.
+  const muxPersistScrollback = o.muxPersistScrollback !== false;
+  const rawMuxScrollbackLines = o.muxScrollbackLines;
+  const muxScrollbackLines =
+    typeof rawMuxScrollbackLines === 'number' &&
+    Number.isFinite(rawMuxScrollbackLines) &&
+    rawMuxScrollbackLines >= MUX_SCROLLBACK_LINES_MIN
+      ? Math.min(Math.floor(rawMuxScrollbackLines), MUX_SCROLLBACK_LINES_MAX)
+      : DEFAULT_SETTINGS.muxScrollbackLines;
+  const selectedTerminalRenderer: TerminalRenderer =
     o.terminalRenderer === 'webgl' ? 'webgl' : o.terminalRenderer === 'wterm' ? 'wterm' : 'dom';
+  // Renderer and PTY/multiplexing backend are independent axes. The mux owns
+  // protocol/lifecycle/history; every supported renderer consumes the same raw
+  // byte stream and participates in the same controller contract.
+  const terminalRenderer: TerminalRenderer = selectedTerminalRenderer;
   const showAllChanges = o.showAllChanges === true;
   const showRunPanel = o.showRunPanel === true;
-  const byobuKeybindings = o.byobuKeybindings === true;
+  // Cockpit mux is keyboard-first and follows Byobu by default. Preserve an
+  // explicit false for users who need Ctrl+A as readline's beginning-of-line.
+  const byobuKeybindings = o.byobuKeybindings !== false;
   const followTerminalCwd = o.followTerminalCwd === true;
   const deterministicSessionNames = o.deterministicSessionNames === true;
   const tmuxPauseMode = o.tmuxPauseMode === true;
@@ -360,7 +413,9 @@ export function normalizeSettings(input: unknown): AppSettings {
   // Columns soft cap: finite integer clamped to [MIN, MAX]; else default.
   const rawCap = o.workgraphColumnsSoftCap;
   const workgraphColumnsSoftCap =
-    typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap >= WORKGRAPH_COLUMNS_SOFT_CAP_MIN
+    typeof rawCap === 'number' &&
+    Number.isFinite(rawCap) &&
+    rawCap >= WORKGRAPH_COLUMNS_SOFT_CAP_MIN
       ? Math.min(Math.floor(rawCap), WORKGRAPH_COLUMNS_SOFT_CAP_MAX)
       : DEFAULT_SETTINGS.workgraphColumnsSoftCap;
   // Structural-fold max size (MB): same clamp shape as the columns soft cap
@@ -380,6 +435,8 @@ export function normalizeSettings(input: unknown): AppSettings {
     fontFamily,
     fontSize,
     terminalBackend,
+    muxPersistScrollback,
+    muxScrollbackLines,
     terminalRenderer,
     showAllChanges,
     showRunPanel,

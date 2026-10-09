@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Cockpit control loop</title>
+  <desc id="desc">A compact AC monogram inside an open cockpit control loop with an agent network beneath.</desc>
+  <defs>
+    <linearGradient id="ring" x1="105" y1="86" x2="412" y2="407" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#268bd2"/><stop offset="1" stop-color="#2aa198"/>
+    </linearGradient>
+  </defs>
+
+  <circle cx="256" cy="256" r="186" fill="none" stroke="#0f3e4b" stroke-width="24"/>
+  <path d="M126 124a186 186 0 0 1 262 0M386 388a186 186 0 0 1-262 0" fill="none" stroke="url(#ring)" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="126" cy="124" r="12" fill="#268bd2"/><circle cx="386" cy="388" r="12" fill="#2aa198"/>
+
+  <path d="M151 260 176 137h57l28 123h-40l-4-23h-27l-4 23h-39Zm51-94-8 44h19l-8-44h-3Z" fill="#002b36"/>
+  <path d="M362 167c-9-7-19-11-31-11-22 0-36 15-36 44s14 44 36 44c12 0 22-3 31-10v27c-10 6-23 9-38 9-43 0-70-26-70-70 0-45 27-71 70-71 15 0 28 3 38 9v29Z" fill="#002b36"/>
+
+  <g fill="none" stroke="#2aa198" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m149 322 56-22 52 40 65-37 39 45M149 322l50 74 58-56 47 69 18-106M199 396l105 13 47-61M205 300l52 40 47-37M257 340l47-37 42 39" stroke-width="5"/>
+    <path d="m111 338 38-16m50 74 35 26m70-13 35 26m12-87 50 14" stroke-width="3" opacity=".8"/>
+  </g>
+  <g fill="#2aa198">
+    <circle cx="111" cy="338" r="7"/><circle cx="149" cy="322" r="10"/><circle cx="199" cy="396" r="9"/>
+    <circle cx="205" cy="300" r="10"/><circle cx="234" cy="422" r="7"/><circle cx="257" cy="340" r="11"/>
+    <circle cx="304" cy="303" r="10"/><circle cx="304" cy="409" r="9"/><circle cx="339" cy="435" r="7"/>
+    <circle cx="346" cy="348" r="10"/><circle cx="401" cy="362" r="8"/>
+  </g>
+</svg>

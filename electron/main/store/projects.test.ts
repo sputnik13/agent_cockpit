@@ -195,6 +195,72 @@ describeDb('cockpit projects store', () => {
   });
 });
 
+describeDb('populated project profile migration continuity', () => {
+  it('preserves existing project identity, connection data, and ordering through later migrations', () => {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    try {
+      db.exec(migration('0008_agent_cockpit_projects'));
+      db.prepare(
+        `INSERT INTO agent_cockpit_projects
+           (id, label, kind, connection_json, created_at, last_active_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        'project-legacy-first',
+        'Legacy first',
+        'local',
+        JSON.stringify({ kind: 'local', rootPath: '/repos/first' }),
+        '2025-01-01T00:00:00.000Z',
+        '2025-01-02T00:00:00.000Z',
+      );
+      db.prepare(
+        `INSERT INTO agent_cockpit_projects
+           (id, label, kind, connection_json, created_at, last_active_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        'project-legacy-second',
+        'Legacy second',
+        'remote',
+        JSON.stringify({
+          kind: 'remote',
+          host: 'build.example',
+          user: 'dev',
+          port: 22,
+          remotePath: '/srv/second',
+        }),
+        '2025-01-01T00:00:00.000Z',
+        '2025-01-01T00:00:00.000Z',
+      );
+
+      db.exec(migration('0010_agent_cockpit_project_order'));
+      db.exec(migration('0011_agent_cockpit_run_command'));
+
+      expect(listProjectsOn(db)).toEqual([
+        expect.objectContaining({
+          id: 'project-legacy-first',
+          label: 'Legacy first',
+          connection: { kind: 'local', rootPath: '/repos/first' },
+          runCommand: null,
+        }),
+        expect.objectContaining({
+          id: 'project-legacy-second',
+          label: 'Legacy second',
+          connection: {
+            kind: 'remote',
+            host: 'build.example',
+            user: 'dev',
+            port: 22,
+            remotePath: '/srv/second',
+          },
+          runCommand: null,
+        }),
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 // ---- computeRemoteLabel (pure logic — no DB needed) ------------------------
 
 describe('computeRemoteLabel', () => {

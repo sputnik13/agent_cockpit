@@ -92,6 +92,9 @@ interface FakeStats {
  *  lifecycle (opened fresh per operation, released exactly once). */
 class FakeSftp {
   endCallCount = 0;
+  fastPutCalls: Array<{ localPath: string; remotePath: string }> = [];
+  chmodCalls: Array<{ path: string; mode: number | string }> = [];
+  renameCalls: Array<{ source: string; destination: string }> = [];
   /** Options passed to the most recent createReadStream() call on this
    *  session — lets a test assert NO range was requested. */
   lastReadStreamOpts: { start?: number; end?: number } | undefined;
@@ -120,6 +123,21 @@ class FakeSftp {
     const start = opts?.start ?? 0;
     const end = opts?.end ?? this.data.length - 1;
     return new FakeSftpReadStream(this.data.subarray(start, end + 1), this.streamFails);
+  }
+
+  fastPut(localPath: string, remotePath: string, cb: (err?: Error) => void): void {
+    this.fastPutCalls.push({ localPath, remotePath });
+    queueMicrotask(() => cb());
+  }
+
+  chmod(path: string, mode: number | string, cb: (err?: Error) => void): void {
+    this.chmodCalls.push({ path, mode });
+    queueMicrotask(() => cb());
+  }
+
+  ext_openssh_rename(source: string, destination: string, cb: (err?: Error) => void): void {
+    this.renameCalls.push({ source, destination });
+    queueMicrotask(() => cb());
   }
 
   end(): void {
@@ -478,6 +496,23 @@ describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
       expect(Buffer.concat(received).equals(err)).toBe(true);
     });
 
+    it('replaces an executable through a unique temporary path and OpenSSH atomic rename', async () => {
+      const session = await t.beginProvision();
+      const sftp = t.fake.sftpInstances.at(-1)!;
+
+      await session.replaceExecutable('/local/cockpit-mux', './.agent-cockpit/cockpit-mux', 0o755);
+
+      expect(sftp.fastPutCalls).toHaveLength(1);
+      expect(sftp.fastPutCalls[0]!.localPath).toBe('/local/cockpit-mux');
+      expect(sftp.fastPutCalls[0]!.remotePath).toMatch(
+        /^\.\/\.agent-cockpit\/cockpit-mux\.incoming-/,
+      );
+      expect(sftp.chmodCalls).toEqual([{ path: sftp.fastPutCalls[0]!.remotePath, mode: 0o755 }]);
+      expect(sftp.renameCalls).toEqual([
+        { source: sftp.fastPutCalls[0]!.remotePath, destination: './.agent-cockpit/cockpit-mux' },
+      ]);
+    });
+
     it('openPty delivers raw >0x7E bytes undecoded (FR4)', async () => {
       const pty = await t.openPty('tmux -CC', { cols: 80, rows: 24 });
       const call = t.fake.execCalls.at(-1)!;
@@ -518,9 +553,13 @@ describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
 
     it('resolves HostName/Port/User/IdentityFile from an alias block (FR1/FR2)', async () => {
       const home = writeSshConfig(
-        ['Host prod', '  HostName 10.0.0.5', '  Port 2200', '  User deploy', `  IdentityFile ${join(tmp, 'id_prod')}`].join(
-          '\n',
-        ),
+        [
+          'Host prod',
+          '  HostName 10.0.0.5',
+          '  Port 2200',
+          '  User deploy',
+          `  IdentityFile ${join(tmp, 'id_prod')}`,
+        ].join('\n'),
       );
       writeFileSync(join(tmp, 'id_prod'), USABLE_KEY_PEM);
       const khPath = join(home, '.ssh', 'known_hosts');
@@ -692,7 +731,9 @@ describe('SFTP read primitive (stat + createReadStream) — Download capability'
     t.fake.failNextSftpOpen = new Error('channel open refused');
     await expect(t.stat('/srv/repo/file.bin')).rejects.toBeInstanceOf(RemoteTransportError);
     t.fake.failNextSftpOpen = new Error('channel open refused');
-    await expect(t.createReadStream('/srv/repo/file.bin')).rejects.toBeInstanceOf(RemoteTransportError);
+    await expect(t.createReadStream('/srv/repo/file.bin')).rejects.toBeInstanceOf(
+      RemoteTransportError,
+    );
   });
 
   it('stat and createReadStream both reject with RemoteTransportError when not connected', async () => {

@@ -8,7 +8,12 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import { Channels } from '@shared/ipc/channels';
 import type { BeadsCreateInput, ProjectInfo } from '@shared/ipc/channels';
-import type { ConnectionStatus, FileReadOptions, WorkspaceProvider } from '../providers/types';
+import type {
+  ConnectionStatus,
+  FileReadOptions,
+  TerminalWriteKind,
+  WorkspaceProvider,
+} from '../providers/types';
 import { sessionManager } from '../providers';
 import { diffCache } from '../providers/diffCache';
 import {
@@ -85,6 +90,12 @@ function requireString(v: unknown, name: string): string {
   return v;
 }
 
+function optionalTerminalWriteKind(v: unknown): TerminalWriteKind | undefined {
+  if (v === undefined) return undefined;
+  if (v === 'input' || v === 'reply') return v;
+  throw new Error('invalid terminal write kind');
+}
+
 /**
  * Opt-in tmux flow control: query the server version and, on tmux >= 3.2, enable
  * pause-mode (`refresh-client -fpause-after`). Works on both transports via the
@@ -147,7 +158,8 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   const termDisposers = new Map<string, Array<() => void>>();
   const termKey = (projectId: string, terminalId: string): string => `${projectId} ${terminalId}`;
 
-  const notifyProjects = (): void => send(Channels.evtProjectsChanged, { at: new Date().toISOString() });
+  const notifyProjects = (): void =>
+    send(Channels.evtProjectsChanged, { at: new Date().toISOString() });
 
   // Forward provider status changes to the renderer. Wired into the
   // SessionManager so subscription happens at provider creation, BEFORE
@@ -225,7 +237,10 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   // ---- Projects ----
   ipcMain.handle(Channels.projectsList, () => ({ projects: listProjects() as ProjectInfo[] }));
   ipcMain.handle(Channels.projectsAdd, (_e, req: { label: string; connection: never }) => {
-    const project = addProject({ label: requireString(req?.label, 'label'), connection: req.connection });
+    const project = addProject({
+      label: requireString(req?.label, 'label'),
+      connection: req.connection,
+    });
     notifyProjects();
     return { project: project as ProjectInfo };
   });
@@ -307,12 +322,16 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     // Status forwarding is wired in SessionManager.setStatusListener.
     return { ok: true as const };
   });
-  ipcMain.handle(Channels.projectsSetRunCommand, (_e, req: { id: string; command: string | null }) => {
-    const command = typeof req?.command === 'string' && req.command.length > 0 ? req.command : null;
-    setProjectRunCommand(requireString(req?.id, 'id'), command);
-    notifyProjects();
-    return { ok: true as const };
-  });
+  ipcMain.handle(
+    Channels.projectsSetRunCommand,
+    (_e, req: { id: string; command: string | null }) => {
+      const command =
+        typeof req?.command === 'string' && req.command.length > 0 ? req.command : null;
+      setProjectRunCommand(requireString(req?.id, 'id'), command);
+      notifyProjects();
+      return { ok: true as const };
+    },
+  );
   // Returns the *live* active session id. On cold boot, lazily restore the
   // persisted active project's session so the renderer never sees an active id
   // without a backing session (which would make every provider call fail).
@@ -352,13 +371,23 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   );
   ipcMain.handle(
     Channels.providerGetFileDiff,
-    async (_e, req: { worktreePath: string; filePath: string; baseline?: string; projectId?: string }) => ({
-      patch: await providerFor(req?.projectId).getFileDiff(req.worktreePath, req.filePath, req.baseline),
+    async (
+      _e,
+      req: { worktreePath: string; filePath: string; baseline?: string; projectId?: string },
+    ) => ({
+      patch: await providerFor(req?.projectId).getFileDiff(
+        req.worktreePath,
+        req.filePath,
+        req.baseline,
+      ),
     }),
   );
   ipcMain.handle(
     Channels.providerGetDiffBundle,
-    async (_e, req: { worktreePath: string; filePath: string; baseline?: string; projectId?: string }) => {
+    async (
+      _e,
+      req: { worktreePath: string; filePath: string; baseline?: string; projectId?: string },
+    ) => {
       // Cache by the RESOLVED project id (req.projectId may be undefined → active
       // project) so re-opens / mode toggles hit the cache; the watch invalidates.
       const provider = providerFor(req?.projectId);
@@ -394,7 +423,10 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   // ever cross this boundary.
   ipcMain.handle(
     Channels.providerReadFileBytes,
-    async (_e, req: { path: string; opts?: { worktreePath?: string; ref?: string }; projectId?: string }) => ({
+    async (
+      _e,
+      req: { path: string; opts?: { worktreePath?: string; ref?: string }; projectId?: string },
+    ) => ({
       bytes: await providerFor(req?.projectId).readFileBytes(requireString(req?.path, 'path'), {
         worktreePath: req?.opts?.worktreePath,
         ref: req?.opts?.ref,
@@ -424,16 +456,22 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   ipcMain.handle(Channels.providerGetTaskGraph, async (_e, req?: { projectId?: string }) => ({
     graph: await providerFor(req?.projectId).getTaskGraph(),
   }));
-  ipcMain.handle(Channels.providerGetTask, async (_e, req: { issueId: string; projectId?: string }) => ({
-    issue: await providerFor(req?.projectId).getTask(requireString(req?.issueId, 'issueId')),
-  }));
+  ipcMain.handle(
+    Channels.providerGetTask,
+    async (_e, req: { issueId: string; projectId?: string }) => ({
+      issue: await providerFor(req?.projectId).getTask(requireString(req?.issueId, 'issueId')),
+    }),
+  );
   // Beads writes — all route through the provider's `br` CLI seam (local
   // spawnSync / remote helper exec). A br failure rejects; the renderer store
   // surfaces the message inline.
   ipcMain.handle(
     Channels.providerBeadsClose,
     async (_e, req: { issueId: string; reason?: string; projectId?: string }) => {
-      await providerFor(req?.projectId).beadsClose(requireString(req?.issueId, 'issueId'), req?.reason);
+      await providerFor(req?.projectId).beadsClose(
+        requireString(req?.issueId, 'issueId'),
+        req?.reason,
+      );
       return { ok: true as const };
     },
   );
@@ -468,7 +506,9 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   ipcMain.handle(
     Channels.providerBeadsListComments,
     async (_e, req: { issueId: string; projectId?: string }) => ({
-      comments: await providerFor(req?.projectId).beadsListComments(requireString(req?.issueId, 'issueId')),
+      comments: await providerFor(req?.projectId).beadsListComments(
+        requireString(req?.issueId, 'issueId'),
+      ),
     }),
   );
   // Snapshot of every live session's current connection status. The renderer
@@ -524,9 +564,7 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   );
 
   // ---- Terminal (active project) ----
-  ipcMain.handle(Channels.terminalOpen, async (_e, req: { opts: never }) => {
-    const provider = activeProvider();
-    const { id } = await provider.openTerminal(req.opts);
+  const bindTerminal = (provider: WorkspaceProvider, id: string): void => {
     const pid = provider.projectId;
     const offData = provider.onTerminalData(id, (data) =>
       send(Channels.evtTerminalData, { projectId: pid, terminalId: id, data }),
@@ -535,29 +573,126 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       send(Channels.evtTerminalExit, { projectId: pid, terminalId: id, info }),
     );
     const dkey = termKey(pid, id);
-    // Re-open of the same (project, id) replaces its subscriptions cleanly.
     termDisposers.get(dkey)?.forEach((off) => off());
     termDisposers.set(dkey, [offData, offExit]);
+  };
+  ipcMain.handle(Channels.terminalOpen, async (_e, req: { opts: never; projectId?: string }) => {
+    const provider = providerFor(req?.projectId);
+    // A renderer reload re-opens a named mux terminal while its main-process
+    // manager survives. Drop the stale renderer binding before the manager
+    // re-attaches and produces its fresh screen seed; the new binding below
+    // drains that buffered seed into the reloaded renderer.
+    const requestedId = (req?.opts as { key?: unknown } | undefined)?.key;
+    if (typeof requestedId === 'string') {
+      const dkey = termKey(provider.projectId, requestedId);
+      termDisposers.get(dkey)?.forEach((off) => off());
+      termDisposers.delete(dkey);
+    }
+    const { id } = await provider.openTerminal(req.opts);
+    bindTerminal(provider, id);
     return { terminalId: id };
   });
-  ipcMain.handle(Channels.terminalWrite, async (_e, req: { terminalId: string; data: string }) => {
-    await activeProvider().writeTerminal(requireString(req?.terminalId, 'terminalId'), req.data ?? '');
-    return { ok: true as const };
-  });
-  ipcMain.handle(Channels.terminalResize, async (_e, req: { terminalId: string; cols: number; rows: number }) => {
-    await activeProvider().resizeTerminal(requireString(req?.terminalId, 'terminalId'), req.cols, req.rows);
-    return { ok: true as const };
-  });
-  ipcMain.handle(Channels.terminalClose, async (_e, req: { terminalId: string; kill?: boolean }) => {
-    const id = requireString(req?.terminalId, 'terminalId');
-    const provider = activeProvider();
-    const dkey = termKey(provider.projectId, id);
-    await provider.closeTerminal(id, { kill: req?.kill ?? false });
-    termDisposers.get(dkey)?.forEach((off) => off());
-    termDisposers.delete(dkey);
-    return { ok: true as const };
-  });
-  ipcMain.handle(Channels.terminalList, async () => ({ keys: await activeProvider().listTerminals() }));
+  ipcMain.handle(
+    Channels.terminalSplit,
+    async (
+      _e,
+      req: { sourceId: string; terminalId: string; direction?: unknown; projectId?: string },
+    ) => {
+      const direction = req?.direction;
+      if (direction !== undefined && direction !== 'horizontal' && direction !== 'vertical')
+        throw new Error('direction must be horizontal or vertical');
+      const provider = providerFor(req?.projectId);
+      const { id } = await provider.splitMuxTerminal(
+        requireString(req?.sourceId, 'sourceId'),
+        requireString(req?.terminalId, 'terminalId'),
+        direction,
+      );
+      bindTerminal(provider, id);
+      return { terminalId: id };
+    },
+  );
+  ipcMain.handle(
+    Channels.terminalNewWindow,
+    async (_e, req: { sourceId: string; terminalId: string; projectId?: string }) => {
+      const provider = providerFor(req?.projectId);
+      const { id } = await provider.newMuxWindow(
+        requireString(req?.sourceId, 'sourceId'),
+        requireString(req?.terminalId, 'terminalId'),
+      );
+      bindTerminal(provider, id);
+      return { terminalId: id };
+    },
+  );
+  ipcMain.handle(
+    Channels.terminalWrite,
+    async (_e, req: { terminalId: string; data: string; kind?: unknown; projectId?: string }) => {
+      await providerFor(req?.projectId).writeTerminal(
+        requireString(req?.terminalId, 'terminalId'),
+        req.data ?? '',
+        optionalTerminalWriteKind(req?.kind),
+      );
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(
+    Channels.terminalResize,
+    async (_e, req: { terminalId: string; cols: number; rows: number; projectId?: string }) => {
+      await providerFor(req?.projectId).resizeTerminal(
+        requireString(req?.terminalId, 'terminalId'),
+        req.cols,
+        req.rows,
+      );
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(
+    Channels.terminalBroadcast,
+    async (_e, req: { terminalId: string; enabled: boolean; projectId?: string }) => {
+      await providerFor(req?.projectId).setTerminalBroadcast(
+        requireString(req?.terminalId, 'terminalId'),
+        req?.enabled === true,
+      );
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(
+    Channels.terminalBroadcastScope,
+    async (_e, req: { terminalId: string; scope: 'window' | 'session'; projectId?: string }) => {
+      const scope = req?.scope;
+      if (scope !== 'window' && scope !== 'session')
+        throw new Error('scope must be window or session');
+      await providerFor(req?.projectId).setTerminalBroadcastScope(
+        requireString(req?.terminalId, 'terminalId'),
+        scope,
+      );
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(
+    Channels.terminalScrollback,
+    async (_e, req: { terminalId: string; before: number; count: number; projectId?: string }) => ({
+      lines: await providerFor(req?.projectId).scrollbackTerminal(
+        requireString(req?.terminalId, 'terminalId'),
+        Math.max(0, Math.floor(req?.before ?? 0)),
+        Math.max(1, Math.min(1_000, Math.floor(req?.count ?? 200))),
+      ),
+    }),
+  );
+  ipcMain.handle(
+    Channels.terminalClose,
+    async (_e, req: { terminalId: string; kill?: boolean; projectId?: string }) => {
+      const id = requireString(req?.terminalId, 'terminalId');
+      const provider = providerFor(req?.projectId);
+      const dkey = termKey(provider.projectId, id);
+      await provider.closeTerminal(id, { kill: req?.kill ?? false });
+      termDisposers.get(dkey)?.forEach((off) => off());
+      termDisposers.delete(dkey);
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(Channels.terminalList, async (_e, req: { projectId?: string } | undefined) => ({
+    keys: await providerFor(req?.projectId).listTerminals(),
+  }));
 
   // ---- tmux control-mode (-CC) — local and remote projects ----
   // Per-project control-session managers, kept alongside (not replacing) the
@@ -613,7 +748,9 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       if (!mgr) {
         const project = getProject(pid);
         const rootPath =
-          project && project.connection.kind === 'local' ? project.connection.rootPath : process.cwd();
+          project && project.connection.kind === 'local'
+            ? project.connection.rootPath
+            : process.cwd();
         const token = sessionNameToken(loadSettings().deterministicSessionNames, pid, rootPath);
         mgr = new LocalTmuxControlManager(token, rootPath);
         // Background %output counts as session activity (idle aging-out).
@@ -627,7 +764,10 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
           );
         tmuxControl.set(pid, mgr);
         const off = mgr.onNotification((notification) =>
-          send(Channels.evtTmux, { projectId: pid, notification: toWireNotification(notification) }),
+          send(Channels.evtTmux, {
+            projectId: pid,
+            notification: toWireNotification(notification),
+          }),
         );
         tmuxDisposers.set(pid, off);
       }
@@ -666,7 +806,10 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
             'tmux-control',
           );
         const off = remoteCtrl.onNotification((notification) =>
-          send(Channels.evtTmux, { projectId: pid, notification: toWireNotification(notification) }),
+          send(Channels.evtTmux, {
+            projectId: pid,
+            notification: toWireNotification(notification),
+          }),
         );
         tmuxDisposers.set(pid, off);
         remoteControlWired.set(pid, remoteCtrl);
@@ -702,38 +845,44 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       return { sessionName };
     },
   );
-  ipcMain.handle(Channels.tmuxControlClose, async (_e, req: { kill?: boolean; projectId?: string }) => {
-    const { mgr, projectId } = activeControl(req?.projectId);
-    const provider = providerFor(req?.projectId);
-    if (req?.kill && provider.kind === 'local') {
-      // Local: killSession() detaches and kills the tmux session in one call.
-      (mgr as LocalTmuxControlManager).killSession();
-    } else if (req?.kill && provider instanceof RemoteProvider) {
-      // Remote: detach the control channel, then kill the host session (a
-      // one-shot kill-session over the SSH transport). Mirrors local's kill so
-      // remote honors `kill` exactly like local.
-      mgr.close();
-      await provider.killControlSession();
-    } else {
-      mgr.close();
-    }
-    tmuxDisposers.get(projectId)?.();
-    tmuxDisposers.delete(projectId);
-    tmuxControl.delete(projectId);
-    return { ok: true as const };
-  });
-  ipcMain.handle(Channels.tmuxControlCommand, async (_e, req: { args: string; projectId?: string }) => {
-    // `req.projectId`, when the caller supplied it, EXPLICITLY addresses this
-    // command at that live session (any live session, active or
-    // backgrounded) instead of implicitly targeting whichever project main
-    // currently considers active — see the request type's doc comment in
-    // channels.ts (local_repo_explorer-0255). `pid` (the project the command
-    // ACTUALLY ran against) is echoed on the reply either way, so even an
-    // unaddressed caller can detect a mismatch if it cares to.
-    const { mgr, projectId: pid } = activeControl(req?.projectId);
-    const reply = await mgr.command(requireString(req?.args, 'args'));
-    return { reply: { ...reply, projectId: pid } };
-  });
+  ipcMain.handle(
+    Channels.tmuxControlClose,
+    async (_e, req: { kill?: boolean; projectId?: string }) => {
+      const { mgr, projectId } = activeControl(req?.projectId);
+      const provider = providerFor(req?.projectId);
+      if (req?.kill && provider.kind === 'local') {
+        // Local: killSession() detaches and kills the tmux session in one call.
+        (mgr as LocalTmuxControlManager).killSession();
+      } else if (req?.kill && provider instanceof RemoteProvider) {
+        // Remote: detach the control channel, then kill the host session (a
+        // one-shot kill-session over the SSH transport). Mirrors local's kill so
+        // remote honors `kill` exactly like local.
+        mgr.close();
+        await provider.killControlSession();
+      } else {
+        mgr.close();
+      }
+      tmuxDisposers.get(projectId)?.();
+      tmuxDisposers.delete(projectId);
+      tmuxControl.delete(projectId);
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(
+    Channels.tmuxControlCommand,
+    async (_e, req: { args: string; projectId?: string }) => {
+      // `req.projectId`, when the caller supplied it, EXPLICITLY addresses this
+      // command at that live session (any live session, active or
+      // backgrounded) instead of implicitly targeting whichever project main
+      // currently considers active — see the request type's doc comment in
+      // channels.ts (local_repo_explorer-0255). `pid` (the project the command
+      // ACTUALLY ran against) is echoed on the reply either way, so even an
+      // unaddressed caller can detect a mismatch if it cares to.
+      const { mgr, projectId: pid } = activeControl(req?.projectId);
+      const reply = await mgr.command(requireString(req?.args, 'args'));
+      return { reply: { ...reply, projectId: pid } };
+    },
+  );
   ipcMain.handle(
     Channels.tmuxControlInput,
     async (_e, req: { paneId: string; hex: string; projectId?: string }) => {
@@ -844,6 +993,127 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     return { ok: true as const };
   });
   ipcMain.handle(Channels.sessionsKillDetached, () => ({ killed: killDetachedCockpitSessions() }));
+  ipcMain.handle(Channels.muxSessionsList, async () => {
+    const sessions = await Promise.all(
+      sessionManager.listOpen().map(async (projectId) => {
+        const provider = sessionManager.get(projectId);
+        if (!provider) return [];
+        // Mux inventory is supplementary to the legacy tmux inventory. A
+        // provider without a started mux daemon must not make the complete
+        // Sessions dialog unavailable.
+        try {
+          return (await provider.listMuxSessions()).map((session) => ({ ...session, projectId }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+    return { sessions: sessions.flat() };
+  });
+  ipcMain.handle(
+    Channels.muxSessionsDestroy,
+    async (_e, req: { projectId: string; sessionId: string }) => {
+      await providerFor(requireString(req?.projectId, 'projectId')).destroyMuxSession(
+        requireString(req?.sessionId, 'sessionId'),
+      );
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(
+    Channels.muxSessionsPin,
+    async (_e, req: { projectId: string; sessionId: string; pinned: boolean }) => {
+      await providerFor(requireString(req?.projectId, 'projectId')).pinMuxSession(
+        requireString(req?.sessionId, 'sessionId'),
+        Boolean(req?.pinned),
+      );
+      return { ok: true as const };
+    },
+  );
+  ipcMain.handle(Channels.muxSessionsShutdown, async () => {
+    const settled = await Promise.all(
+      sessionManager.listOpen().map(async (projectId) => {
+        const provider = sessionManager.get(projectId);
+        if (!provider) return null;
+        try {
+          await provider.shutdownMux();
+          return null;
+        } catch {
+          return projectId;
+        }
+      }),
+    );
+    return {
+      failedProjectIds: settled.filter((projectId): projectId is string => projectId !== null),
+    };
+  });
+  ipcMain.handle(Channels.muxTopologyList, async (_e, req: { projectId?: string }) =>
+    providerFor(req?.projectId).listMuxTopology(),
+  );
+  ipcMain.handle(
+    Channels.muxTopologySelectWindow,
+    async (_e, req: { projectId: string; sessionId: string; windowId: string }) =>
+      providerFor(requireString(req?.projectId, 'projectId')).selectMuxWindow(
+        requireString(req?.sessionId, 'sessionId'),
+        requireString(req?.windowId, 'windowId'),
+      ),
+  );
+  ipcMain.handle(
+    Channels.muxTopologySelectPane,
+    async (
+      _e,
+      req: { projectId: string; sessionId: string; windowId: string; paneId: string },
+    ) =>
+      providerFor(requireString(req?.projectId, 'projectId')).selectMuxPane(
+        requireString(req?.sessionId, 'sessionId'),
+        requireString(req?.windowId, 'windowId'),
+        requireString(req?.paneId, 'paneId'),
+      ),
+  );
+  ipcMain.handle(
+    Channels.muxTopologyZoomPane,
+    async (
+      _e,
+      req: { projectId: string; sessionId: string; windowId: string; paneId: string | null },
+    ) => {
+      if (req?.paneId !== null && typeof req?.paneId !== 'string')
+        throw new Error('invalid paneId');
+      return providerFor(requireString(req?.projectId, 'projectId')).zoomMuxPane(
+          requireString(req?.sessionId, 'sessionId'),
+          requireString(req?.windowId, 'windowId'),
+          req.paneId,
+      );
+    },
+  );
+  ipcMain.handle(
+    Channels.muxTopologyResizeSplit,
+    async (
+      _e,
+      req: {
+        projectId: string;
+        sessionId: string;
+        windowId: string;
+        paneId: string;
+        ratio: number;
+      },
+    ) => {
+      if (typeof req?.ratio !== 'number' || !Number.isFinite(req.ratio))
+        throw new Error('invalid ratio');
+      return providerFor(requireString(req?.projectId, 'projectId')).resizeMuxSplit(
+          requireString(req?.sessionId, 'sessionId'),
+          requireString(req?.windowId, 'windowId'),
+          requireString(req?.paneId, 'paneId'),
+          req.ratio,
+      );
+    },
+  );
+  ipcMain.handle(
+    Channels.muxTopologyDestroyWindow,
+    async (_e, req: { projectId: string; sessionId: string; windowId: string }) =>
+      providerFor(requireString(req?.projectId, 'projectId')).destroyMuxWindow(
+        requireString(req?.sessionId, 'sessionId'),
+        requireString(req?.windowId, 'windowId'),
+      ),
+  );
 
   void setActiveProjectId; // reserved for future explicit active persistence paths
 }

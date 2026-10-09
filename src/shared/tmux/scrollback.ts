@@ -10,7 +10,9 @@
  *   - the renderer xterm `scrollback` buffer (how much the user can scroll
  *     back through).
  *
- * Kept here (alongside `commands.ts`) so both the main-process openers and the
- * renderer registry import one symbol.
+ * The embedded daemon policy is the cross-language source of truth; this module
+ * exposes it to the main process and renderer alongside `commands.ts`.
  */
-export const TERMINAL_SCROLLBACK = 5000;
+import muxScrollbackPolicy from '../../../cockpit-mux/daemon/scrollback-policy.json';
+
+export const TERMINAL_SCROLLBACK = muxScrollbackPolicy.max_lines;

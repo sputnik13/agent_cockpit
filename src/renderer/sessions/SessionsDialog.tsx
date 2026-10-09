@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { TmuxSessionInfo } from '@shared/ipc/channels';
+import type { MuxSessionInfo } from '@shared/providers/types';
 import { agentCockpit } from '../providerClient';
 import { Badge, Button, Dialog, EmptyState, IconButton, Spinner, Tooltip } from '../ui';
 
@@ -18,13 +19,19 @@ export function SessionsDialog({
   onOpenChange: (open: boolean) => void;
 }): JSX.Element {
   const [sessions, setSessions] = useState<TmuxSessionInfo[]>([]);
+  const [muxSessions, setMuxSessions] = useState<Array<MuxSessionInfo & { projectId: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      setSessions(await agentCockpit.sessions.list());
+      const [tmux, mux] = await Promise.all([
+        agentCockpit.sessions.list(),
+        agentCockpit.muxSessions.list(),
+      ]);
+      setSessions(tmux);
+      setMuxSessions(mux);
     } finally {
       setLoading(false);
     }
@@ -52,7 +59,7 @@ export function SessionsDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="Sessions"
-      description={`${sessions.length} session(s) · ${detached} detached`}
+      description={`${sessions.length} tmux session(s) · ${muxSessions.length} mux session(s) · ${detached} detached`}
       className="w-[min(92vw,560px)]"
       footer={
         <>
@@ -78,15 +85,21 @@ export function SessionsDialog({
           <div className="flex items-center gap-2 px-2 py-2 text-xs text-dim">
             <Spinner /> loading…
           </div>
-        ) : sessions.length === 0 ? (
+        ) : sessions.length === 0 && muxSessions.length === 0 ? (
           <EmptyState title="No terminal sessions" hint="Open a terminal to start one." />
         ) : (
           sessions.map((s) => (
-            <div key={s.name} className="flex items-center gap-2 border-b border-edge px-2 py-1.5 last:border-b-0">
+            <div
+              key={s.name}
+              className="flex items-center gap-2 border-b border-edge px-2 py-1.5 last:border-b-0"
+            >
               <Badge tone={s.attached ? 'added' : 'neutral'}>
                 {s.attached ? 'attached' : 'detached'}
               </Badge>
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg" title={s.name}>
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg"
+                title={s.name}
+              >
                 {s.name}
               </span>
               <span className="text-[10px] text-dim">{s.windows}w</span>
@@ -106,6 +119,51 @@ export function SessionsDialog({
             </div>
           ))
         )}
+        {muxSessions.map((s) => (
+          <div
+            key={`${s.projectId}:${s.sessionId}`}
+            className="flex items-center gap-2 border-b border-edge px-2 py-1.5 last:border-b-0"
+          >
+            <Badge tone={s.exited ? 'neutral' : 'added'}>{s.exited ? 'exited' : 'live'}</Badge>
+            {s.attachedKind === 'tty' && <Badge tone="neutral">attached from terminal</Badge>}
+            {s.recoveryDiagnostic && (
+              <Badge tone="warn" title={s.recoveryDiagnostic}>
+                cold restart required
+              </Badge>
+            )}
+            {s.broadcast && <Badge tone="neutral">broadcast</Badge>}
+            {s.broadcast && <Badge tone="neutral">{s.broadcastScope}</Badge>}
+            {s.pinned && <Badge tone="neutral">pinned</Badge>}
+            <span
+              className="min-w-0 flex-1 truncate font-mono text-[12px] text-fg"
+              title={s.sessionId}
+            >
+              {s.key || s.sessionId}
+            </span>
+            <span className="text-[10px] text-dim" title={s.windowId}>
+              {s.projectId.slice(0, 8)} · {s.windowId}
+            </span>
+            <IconButton
+              label={`${s.pinned ? 'Unpin' : 'Pin'} mux session ${s.sessionId}`}
+              size="sm"
+              onClick={() =>
+                void agentCockpit.muxSessions.pin(s.projectId, s.sessionId, !s.pinned).then(refresh)
+              }
+            >
+              {s.pinned ? '★' : '☆'}
+            </IconButton>
+            <IconButton
+              label={`Destroy mux session ${s.sessionId}`}
+              size="sm"
+              variant="danger"
+              onClick={() =>
+                void agentCockpit.muxSessions.destroy(s.projectId, s.sessionId).then(refresh)
+              }
+            >
+              ×
+            </IconButton>
+          </div>
+        ))}
       </div>
     </Dialog>
   );

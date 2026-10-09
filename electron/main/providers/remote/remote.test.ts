@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { RemoteConnectionSpec } from '../types';
 import { RemoteProvider } from './index';
 import { Ssh2Transport } from './transport';
+import { RemoteMuxConnectionManager } from './muxConnection';
 import { RemoteTransportError, type RemoteTransport } from './transportTypes';
 import { createRemoteTransport } from './transportFactory';
 
@@ -24,6 +25,11 @@ describe('RemoteProvider (no live SSH server)', () => {
   it('starts disconnected', () => {
     const p = new RemoteProvider('proj-1', SPEC);
     expect(p.status().state).toBe('disconnected');
+  });
+
+  it('exposes a lazy mux manager without starting a remote channel', () => {
+    const p = new RemoteProvider('proj-1', SPEC);
+    expect(p.muxConnection()).toBeInstanceOf(RemoteMuxConnectionManager);
   });
 
   it('rejects read methods before connect (no live helper RPC)', async () => {

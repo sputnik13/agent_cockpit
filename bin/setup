@@ -12,7 +12,7 @@ set -euo pipefail
 #      extract-zip can fail to settle under newer Node, leaving a partial dist/
 #      and no path.txt (the "Electron uninstall" error). We re-extract the
 #      cached zip with the system `unzip`.
-#   2. Native modules (better-sqlite3 / node-pty / cpu-features). node-gyp builds
+#   2. Required native modules (better-sqlite3 / node-pty). node-gyp builds
 #      them against the system Node ABI, but the main process loads them under
 #      Electron's bundled Node (a different NODE_MODULE_VERSION → "compiled
 #      against a different Node.js version"). We rebuild them against Electron.
@@ -77,6 +77,6 @@ ensure_electron
 
 # --- 2. Rebuild native modules against Electron's ABI ------------------------
 echo "Rebuilding native modules against Electron's ABI…"
-./node_modules/.bin/electron-rebuild -f -w better-sqlite3,node-pty,cpu-features
+./node_modules/.bin/electron-rebuild -f --only better-sqlite3,node-pty
 
 echo "Setup complete: Electron binary + native modules ready. Run 'npm run dev'."

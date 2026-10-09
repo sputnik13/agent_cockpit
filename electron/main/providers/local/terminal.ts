@@ -88,11 +88,19 @@ export class LocalTerminalManager {
     // options, so wrap whichever target applies and spawn once.
     const { file, args } = hasTmux()
       ? withNativeArch('tmux', [
-          '-L', SOCKET,
+          '-L',
+          SOCKET,
           // Apply the shared server options before the session (single source),
           // so the session-per-tab backend gets history-limit/mouse/color too.
-          'start-server', ...tmuxServerOptionArgs(),
-          ';', 'new-session', '-A', '-s', name, '-c', cwd,
+          'start-server',
+          ...tmuxServerOptionArgs({ exitEmpty: process.env['AC_TMUX_EPHEMERAL'] === '1' }),
+          ';',
+          'new-session',
+          '-A',
+          '-s',
+          name,
+          '-c',
+          cwd,
         ])
       : withNativeArch(defaultShell(), []);
     const proc = pty.spawn(file, args, {
@@ -170,7 +178,9 @@ export class LocalTerminalManager {
    */
   listSessions(): string[] {
     if (!hasTmux()) return [...this.sessions.keys()];
-    const res = spawnSync('tmux', ['-L', SOCKET, 'ls', '-F', '#{session_name}'], { encoding: 'utf8' });
+    const res = spawnSync('tmux', ['-L', SOCKET, 'ls', '-F', '#{session_name}'], {
+      encoding: 'utf8',
+    });
     if (res.status !== 0 || !res.stdout) return [];
     const prefix = this.terminalPrefix();
     return res.stdout

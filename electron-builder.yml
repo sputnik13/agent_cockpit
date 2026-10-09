@@ -8,6 +8,17 @@ directories:
   output: release
   buildResources: build # optional icons live here (build/icon.icns, build/icon.png)
 
+# `cpu-features` is ssh2's optional accelerator and does not compile against
+# Electron 42's V8. Package scripts rebuild the two required modules explicitly
+# before invoking electron-builder; do not ask electron-builder to rediscover and
+# rebuild optional dependencies.
+npmRebuild: false
+
+# electron-builder can skip its `mac.sign` callback for a `--dir` package when
+# no certificate is discoverable. This hook seals that package with the same
+# controlled ad-hoc signer used by the normal macOS build.
+afterPack: scripts/sign-macos-after-pack.mjs
+
 # Ship the compiled app + manifest. Production `dependencies` (including the
 # native better-sqlite3 / node-pty / ssh2) are bundled and rebuilt against
 # Electron's ABI automatically; unpack their .node binaries from the asar so
@@ -28,11 +39,21 @@ extraResources:
     to: remote-helper/dist
     filter:
       - '**/*'
+  - from: cockpit-mux/package-dist
+    to: cockpit-mux/dist
+    filter:
+      - '**/*'
+  - from: node_modules/@wterm/ghostty/wasm/ghostty-vt.wasm
+    to: ghostty-wasm/ghostty-vt.wasm
 
 mac:
   # electron-builder derives the macOS icon bundle from this square, alpha-preserving PNG.
   icon: build/icon.png
   category: public.app-category.developer-tools
+  # The custom signer signs embedded code, refreshes the mux manifest hashes,
+  # then seals the completed app bundle in one synchronous Builder hook.
+  identity: '-'
+  sign: scripts/sign-macos.mjs
   target:
     - target: dmg
       arch: arm64
@@ -40,12 +61,10 @@ mac:
       arch: arm64
   # Ad-hoc signed (no Apple Developer cert). Apple Silicon refuses to run a
   # fully unsigned arm64 app, so we DON'T set `identity: null` (that skips
-  # signing entirely); instead the package scripts export
-  # CSC_IDENTITY_AUTO_DISCOVERY=false, which makes electron-builder ad-hoc sign
-  # so the app launches locally. To enable real signing + notarization later,
-  # drop that env (or set a Developer ID via CSC_LINK / CSC_KEY_PASSWORD or the
-  # keychain), set `hardenedRuntime: true`, and add a `notarize` block with
-  # APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID. See docs/BUILD.md.
+  # signing entirely). To enable real signing + notarization later, replace
+  # this identity with a Developer ID identity, set `hardenedRuntime: true`,
+  # and add a `notarize` block with APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
+  # APPLE_TEAM_ID. See docs/BUILD.md.
 
 linux:
   icon: build/icon.png

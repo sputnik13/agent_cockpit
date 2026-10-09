@@ -110,11 +110,18 @@ function normalizeArch(unameM: string): string {
 }
 
 export class RemoteHelperLauncher {
-  constructor(private readonly transport: RemoteTransport) {}
+  constructor(
+    private readonly transport: RemoteTransport,
+    private readonly artifacts?: string,
+  ) {}
+
+  private artifactDir(): string {
+    return this.artifacts ?? distDir();
+  }
 
   /** Read and parse the local dist manifest. */
   private async loadManifest(): Promise<HelperManifest> {
-    const manifestPath = join(distDir(), 'manifest.json');
+    const manifestPath = join(this.artifactDir(), 'manifest.json');
     let raw: string;
     try {
       raw = await readFile(manifestPath, 'utf8');
@@ -201,7 +208,7 @@ export class RemoteHelperLauncher {
       );
     }
 
-    const localPath = join(distDir(), binary.filename);
+    const localPath = join(this.artifactDir(), binary.filename);
     try {
       await access(localPath);
     } catch (err) {

@@ -11,6 +11,7 @@ import { selectActiveView, useTmuxStore } from './tmuxStore';
 import { PaneTree, firstPaneId, paneIds } from './PaneXterm';
 import * as paneRegistry from './controlPaneRegistry';
 import { FOCUS_TERMINAL_EVENT } from '../terminal/terminalRegistry';
+import { isTerminalKeyboardTarget } from '../terminal/keyboardScope';
 import { readFocus, writeFocus } from '../workspace/focusMemory';
 import {
   acquireControlSession,
@@ -552,6 +553,7 @@ export function ControlTerminalPanel(): JSX.Element {
       }
     };
     const onKey = (e: KeyboardEvent): void => {
+      if (!isTerminalKeyboardTarget(e.target)) return;
       if (!e.metaKey) return;
       const tgt = activePaneIdRef.current ?? '';
       if (e.altKey) {
@@ -620,6 +622,10 @@ export function ControlTerminalPanel(): JSX.Element {
       }
     };
     const onByobuKey = (e: KeyboardEvent): void => {
+      if (!isTerminalKeyboardTarget(e.target)) {
+        disarm();
+        return;
+      }
       if (!byobuRef.current) return;
       const projectId = activeIdRef.current;
       if (!projectId) return;
@@ -659,9 +665,14 @@ export function ControlTerminalPanel(): JSX.Element {
         arm();
       }
     };
+    const onFocusIn = (e: FocusEvent): void => {
+      if (!isTerminalKeyboardTarget(e.target)) disarm();
+    };
     window.addEventListener('keydown', onByobuKey, true);
+    window.addEventListener('focusin', onFocusIn, true);
     return () => {
       window.removeEventListener('keydown', onByobuKey, true);
+      window.removeEventListener('focusin', onFocusIn, true);
       disarm();
     };
   }, []);
@@ -704,7 +715,7 @@ export function ControlTerminalPanel(): JSX.Element {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-bg">
+    <div className="flex h-full min-h-0 flex-col bg-bg" data-terminal-shortcut-scope>
       <TabbedPanelHeader
         tabs={
           <>
@@ -743,7 +754,7 @@ export function ControlTerminalPanel(): JSX.Element {
                     else if (e.key === 'Escape') setEditingWindow(null);
                     e.stopPropagation();
                   }}
-                  className="w-24 border-t-2 border-accent bg-bg px-2.5 py-1 text-xs text-fg outline-none"
+                  className="w-24 border-t-2 border-accent bg-bg px-2.5 py-1 text-[13px] text-fg outline-none"
                 />
               ) : (
                 <div
@@ -759,7 +770,7 @@ export function ControlTerminalPanel(): JSX.Element {
                     setEditingWindow(id);
                   }}
                   className={cn(
-                    'group flex cursor-pointer items-center gap-1 border-t-2 py-1 pl-2.5 pr-1 text-xs',
+                    'group flex cursor-pointer items-center gap-1 border-t-2 py-1 pl-2.5 pr-1 text-[13px]',
                     id === currentWindow
                       ? 'border-accent bg-bg text-fg'
                       : 'border-transparent text-dim hover:bg-elev hover:text-fg',

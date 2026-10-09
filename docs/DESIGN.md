@@ -257,6 +257,36 @@ The earlier v1 tables (`projects`, `review_state`, `notes`, `review_passes`,
 `agent_cockpit_*` tables; migrations never mutate a repository or beads
 database.
 
+```mermaid
+erDiagram
+  AGENT_COCKPIT_PROJECTS ||--o{ AGENT_COCKPIT_NOTES : owns
+  AGENT_COCKPIT_PROJECTS ||--o| AGENT_COCKPIT_ACTIVE_PROJECT : selected
+  AGENT_COCKPIT_PROJECTS {
+    text id PK
+    text kind
+    text connection_json
+    text run_command
+  }
+  AGENT_COCKPIT_NOTES {
+    text id PK
+    text project_id FK
+    text target_kind
+    text target_id
+  }
+  AGENT_COCKPIT_ACTIVE_PROJECT {
+    int singleton PK
+    text id FK
+  }
+  LAYOUTS {
+    text scope PK
+    text json
+  }
+  SETTINGS {
+    text key PK
+    text value
+  }
+```
+
 Renderer zustand stores (selector-consumed so background-project changes do not
 re-render the active view, the mechanism behind FR-3/NFR-5):
 
@@ -454,6 +484,44 @@ resize|capture-pane` request channels and forwards parsed notifications on
     socket session and disposes both registries so the new backend starts from
     a clean slate. The terminal panel remounts and re-initializes for the
     chosen backend.
+  - **Cockpit-mux backend.** The local and remote providers route terminal
+    opens through one MessagePack terminal-manager contract when
+    `terminalBackend` is `cockpit-mux`; the local side opens the daemon's Unix
+    socket and the remote side provisions a manifest-verified binary then opens
+    its SSH exec bridge. Terminal output stays as `Uint8Array` through provider,
+    IPC, and the selected terminal-renderer adapter. The mux controller owns
+    provider open/close, input/reply routing, output, geometry, and persistence;
+    the adapter owns only the grid. `terminalRenderer=dom`/`webgl` uses xterm and
+    `terminalRenderer=wterm` uses the Ghostty-backed DOM adapter. The renderer owns tab/copy-overlay state, while
+    the daemon owns session/window/pane topology, attached-client ownership,
+    persisted Ghostty snapshots/tails, and broadcast scope. Fresh macOS/Linux
+    config resolves to this backend; existing installations silently retain their
+    saved backend without a migration prompt or automatic change. Windows is
+    normalized to a tmux backend. WTerm 0.5 renders the direct Kitty PNG/RGB/RGBA
+    subset through Ghostty's public graphics state and a pointer-transparent DOM
+    canvas overlay. The live mux shadow exports only its current visible direct
+    resources and placements under the attach barrier, then emits a quiet WTerm-only
+    seed after the normal text seed. Its feature-gated attach carries WTerm's
+    physical cell geometry so PNG placements without an explicit cell span resolve
+    identically after reload. Other Kitty transports, Sixel, iTerm2, and
+    graphics recovery after daemon exit/restart/replacement/handoff remain unsupported.
+    Mux-created PTYs set `TERM=xterm-ghostty` and `TERMINFO` to a cache generated
+    from the pinned Ghostty source, under both macOS and Linux ncurses layouts.
+    Topology transport uses an epoch-and-revision daemon snapshot; the renderer's
+    `muxTopologyModel` rejects older IPC snapshots within an epoch and accepts a
+    recovered daemon's new epoch, keeping the rendered window list and selected
+    pane converged with atomic close/create responses.
+    The mux-topology delivery extends that authority with a session-owned
+    window-placement relation. A `windowId` remains an opaque identity; its
+    placement is an ordered relation owned by the logical session, alongside
+    `activeWindowId`. This prevents lexical ID order from becoming an accidental
+    tab/navigation contract. Creation appends a placement, close removes exactly
+    that placement and selects a deterministic survivor, and recovery/handoff
+    restore the same order before the renderer accepts keyboard navigation. The
+    existing per-window split tree remains keyed by pane IDs and is deliberately
+    independent of window placement. If a later feature permits one window in
+    several logical sessions, the relation becomes a first-class `WindowLink` or
+    `WindowPlacement` record instead of being overloaded onto `WindowRecord`.
   - **Known issue.** At very tight split widths (one pane roughly prompt-
     wide), three independent layers (tmux's layout math, xterm's FitAddon
     floor, React's flex rounding) can disagree by one cell and zsh's `%`
@@ -663,7 +731,7 @@ resize|capture-pane` request channels and forwards parsed notifications on
   `rehype-highlight` → `rehypeHeadingIds` → a local safe-link/image transform
   → `rehype-stringify` — so reference link definitions, footnotes, and reference images resolve
   across blocks, and bare/inline HTML written directly in Markdown prose
-  renders (GitHub-style sanitized; a fenced `` ```html `` block still renders
+  renders (GitHub-style sanitized; a fenced ` ```html ` block still renders
   as a plain code listing, matching GitHub). Top-level mdast nodes and the
   Mermaid/Graphviz placeholder nodes below are recorded, by source-offset
   range, into an `annotations` map built from the **original mdast tree**
@@ -992,11 +1060,21 @@ existing seams without new architecture (except the beads write surface, below).
   `visibleLayout ?? layout` — so a zoom driven from inside or outside the app is
   reflected with no extra round-trip. A per-pane hover button (placed clear of the
   xterm scrollbar lane) issues `resize-pane -Z`.
-- **Byobu/screen keybindings.** A `byobuKeybindings` setting (default off) gates a
+- **Byobu/screen keybindings.** A default-on `byobuKeybindings` setting (with an
+  explicit false opt-out) gates a
   capture-phase `keydown` listener on the control-terminal host that arms a 2 s
   `Ctrl+a` prefix (`stopImmediatePropagation` so the byte never reaches the pane)
   for z/n/p/a, plus `Shift+Arrow` pane nav. The handler reads the setting through a
   ref so toggling needs no re-bind; the ⌘ shortcuts are untouched.
+- **Cockpit mux keyboard command layer.** `muxKeyboard.ts` is a pure frontend
+  reducer from key events to mux intentions (`pane.split`, `pane.move`,
+  `window.new`, `window.move`, `window.close`, and zoom). `TerminalPanel` is
+  the sole command dispatcher; it consumes owned events at capture phase before
+  either xterm or WTerm receives input, then invokes the same daemon-backed
+  operations. The terminal header displays window identity only—topology
+  manipulation buttons are deliberately absent. When the daemon reports no
+  interactive pane after an exit/close, the panel reserves and opens a new root
+  key, preserving tmux's non-empty terminal-workspace behavior.
 - **Native arm64 spawn.** `withNativeArch`
   ([nativeArch.ts](../electron/main/providers/local/nativeArch.ts)) detects
   `sysctl.proc_translated`, probes `arch -arm64`, and (memoized) prefixes the three
@@ -1023,28 +1101,47 @@ hops)`. A shared banner lives in `BeadsPanel`; the state filter persists per
   `br`'s message inline on failure, and the TaskDetail comments/add-child/lifecycle
   UI.
 
-### Control-mode renderer (`PaneRenderer`)
+### Terminal renderer (`PaneRenderer`)
 
-The concrete control-mode terminal is pluggable behind a `PaneRenderer` interface
-(see ARCHITECTURE → _Control-mode renderer boundary_); `controlPaneRegistry` keeps
-identity, the raw-byte sink, the seed, the reaper, and the cell cache, while the
-adapter owns only the terminal (byte write, input, fit/measure, repaint, theming,
-disposal). Two adapters:
+The concrete terminal grid is pluggable behind a `PaneRenderer` interface (see
+ARCHITECTURE → _Terminal renderer boundary_). `controlPaneRegistry` keeps control-mode
+identity, the raw-byte sink, the seed, the reaper, and the cell cache. The Cockpit-mux
+terminal registry independently keeps provider open/close, input/reply routing, output,
+and resize state. Both use the same adapter contract for readiness, byte write, input,
+reply, fit/measure, appearance, local-scrollback fallback, and disposal; adapters own
+only presentation. Its provider operations are explicitly project-addressed from the
+registry through preload and main IPC; no retained pane is routed by the app's changing
+active-project pointer. A disposed renderer never closes a late, reusable daemon key:
+explicit close/reset owns daemon teardown, preventing an old asynchronous open from
+destroying a replacement. Two adapters:
 
 - **`XtermPaneRenderer`** (`dom`/`webgl`, default + fallback) wraps the xterm
   `Terminal`/`FitAddon`/optional `WebglAddon`, the atlas-rebuild + `refresh`
   repaint, and the `_renderService` cell metric — the original behavior, lifted
-  verbatim behind the interface.
+  verbatim behind the interface. Its narrow xterm core-service bridge observes
+  xterm's synchronous `onUserInput` provenance event before `onData` to route
+  parser-generated device replies only when the mux subscribes; it does not guess
+  from CSI/DCS bytes, which would confuse modified keyboard input with a terminal
+  reply.
 - **`WtermPaneRenderer`** (`wterm`) uses `@wterm/dom`'s `WTerm` driven by a
   `@wterm/ghostty` `GhosttyCore` (real upstream libghostty). DOM rendering, so the
   browser font engine aligns powerline/nerd glyphs. The crux is async WASM init:
   the container is created synchronously while `GhosttyCore.load()` + `WTerm.init()`
   boot, with writes/onData/focus buffered and flushed in order once ready. Theme is
-  the `XTERM_THEMES` palette mapped onto wterm CSS variables; sizing is left to
-  wterm's `autoResize` tracking the tmux-driven container. Switching renderers
+  the `XTERM_THEMES` palette mapped onto wterm CSS variables. Cockpit owns WTerm
+  sizing: it disables WTerm's zero-size detached-host observer, waits for WASM
+  initialization and a measurable visible host before the daemon attach, then
+  propagates refits through the existing registry so attach seeds and the DOM grid
+  share one geometry. `GhosttyCore` loads from Cockpit's private packaged
+  `cockpit-wasm:` endpoint rather than Electron's
+  unfetchable `file:` asset URL. Switching renderers
   rebuilds the active project's control panes on the new adapter without killing
-  tmux (`switchTerminalRenderer`, the reconnect teardown). Known wterm 0.3.x gaps:
-  no OSC-8 link API and no scrollback-limit setter (libghostty default).
+  tmux (`switchTerminalRenderer`, the reconnect teardown). WTerm 0.5 renders
+  Ghostty-provided OSC-8 metadata as native HTTP(S) anchors and its documented
+  direct Kitty PNG/RGB/RGBA subset through a bounded canvas overlay. The adapter
+  retains its raw-byte/reply provenance boundary; it only advertises the typed
+  `direct_graphics_v1` attach capability and writes the daemon-produced quiet seed.
+  It does not parse, persist, or source image protocols itself.
 
 ## Observability and Recovery
 

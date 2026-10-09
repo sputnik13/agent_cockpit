@@ -66,8 +66,11 @@ export const TMUX_SERVER_OPTIONS: readonly TmuxServerOption[] = [
  * Option args to chain after a tmux command (e.g. `start-server`), using `';'`
  * as the literal tmux command separator (for argv-based spawns).
  */
-export function tmuxServerOptionArgs(): string[] {
-  return TMUX_SERVER_OPTIONS.flatMap((o) => [';', 'set', o.append ? '-ga' : '-g', o.name, o.value]);
+export function tmuxServerOptionArgs(options: { exitEmpty?: boolean } = {}): string[] {
+  return TMUX_SERVER_OPTIONS.flatMap((o) => {
+    const value = o.name === 'exit-empty' && options.exitEmpty ? 'on' : o.value;
+    return [';', 'set', o.append ? '-ga' : '-g', o.name, value];
+  });
 }
 
 /**

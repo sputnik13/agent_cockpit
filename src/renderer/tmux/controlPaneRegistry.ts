@@ -92,6 +92,10 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
     renderer.write(filtered);
   });
   const inputSub = renderer.onData((data) => void useTmuxStore.getState().sendInput(projectId, paneId, data));
+  // xterm preserves parser replies on onData when no reply subscriber exists,
+  // while WTerm exposes them separately. Forward both through the control pane's
+  // private input path; control mode has no broadcast semantics to protect.
+  const replySub = renderer.onReply((data) => void useTmuxStore.getState().sendInput(projectId, paneId, data));
 
   // Mouse-wheel forwarding (control mode). tmux does NOT put the `-CC` control
   // client into mouse mode, so the renderer would just scroll its own buffer and
@@ -213,6 +217,7 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
       disposed = true;
       unbind();
       inputSub.dispose();
+      replySub.dispose();
       container.removeEventListener('wheel', onWheel, true);
       // Drop this pane's mouse subscription (title sub is per-window; left for
       // window-close to reap — a stale sub for a gone pane just stops pushing).

@@ -1,6 +1,6 @@
 /**
  * Real-tmux integration tests for the local control-mode manager. Each test
- * spawns an actual `tmux -L agent-cockpit -CC` session on the dedicated socket
+ * spawns an actual `tmux -L ac-test-* -CC` session on a per-run socket
  * and asserts that commands produce the expected control-protocol
  * notifications. Gated like local.test.ts: if node-pty's native binding or tmux
  * is unavailable in this runtime, the test returns early (skips) rather than
@@ -20,21 +20,31 @@ import { LocalTmuxControlManager, hasTmux } from './tmuxControl';
 import { parseLayout, TERMINAL_SCROLLBACK } from '@shared/tmux';
 import type { LayoutChangeNotification, TmuxNotification } from '@shared/tmux';
 
-const SOCKET = 'agent-cockpit';
+const newTestSocket = (): string =>
+  `ac-test-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
 
 /** Spawn a manager on a fresh project id + temp cwd; null when unspawnable. */
-function spawnManager(): { mgr: LocalTmuxControlManager; cwd: string } | null {
+function spawnManager(): { mgr: LocalTmuxControlManager; cwd: string; socket: string } | null {
   if (!hasTmux()) return null;
   const cwd = mkdtempSync(join(tmpdir(), 'cockpit-tmuxctl-'));
+  const socket = newTestSocket();
   const pid = `test-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const mgr = new LocalTmuxControlManager(pid, cwd);
+  const mgr = new LocalTmuxControlManager(pid, cwd, socket, '/dev/null');
   try {
     mgr.open({ cols: 80, rows: 24 });
   } catch {
+    // open() starts the per-test tmux server before node-pty can fail. Reap it
+    // explicitly even though the fixture will be reported as unavailable.
+    mgr.close();
+    try {
+      execFileSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' });
+    } catch {
+      /* server never started */
+    }
     rmSync(cwd, { recursive: true, force: true });
     return null; // node-pty native binding unavailable (e.g. Electron-ABI)
   }
-  return { mgr, cwd };
+  return { mgr, cwd, socket };
 }
 
 /** Wait until `predicate` sees a matching notification, or time out. */
@@ -68,21 +78,27 @@ async function firstPaneId(mgr: LocalTmuxControlManager): Promise<string> {
 }
 
 describe('LocalTmuxControlManager (real tmux -CC)', () => {
-  let active: { mgr: LocalTmuxControlManager; cwd: string } | null = null;
+  let active: { mgr: LocalTmuxControlManager; cwd: string; socket: string } | null = null;
 
   afterEach(() => {
     if (active) {
+      active.mgr.close();
       try {
         active.mgr.killSession();
       } catch {
         /* ignore */
       }
       try {
-        execFileSync('tmux', ['-L', SOCKET, 'kill-session', '-t', active.mgr.sessionName()], {
+        execFileSync('tmux', ['-L', active.socket, 'kill-session', '-t', active.mgr.sessionName()], {
           stdio: 'ignore',
         });
       } catch {
         /* already gone */
+      }
+      try {
+        execFileSync('tmux', ['-L', active.socket, 'kill-server'], { stdio: 'ignore' });
+      } catch {
+        /* server is already gone */
       }
       rmSync(active.cwd, { recursive: true, force: true });
       active = null;
@@ -132,8 +148,7 @@ describe('LocalTmuxControlManager (real tmux -CC)', () => {
     const splitLayout = waitFor(
       active.mgr,
       (n) =>
-        n.type === 'layout-change' &&
-        (n as LayoutChangeNotification).layout.root.type === 'split',
+        n.type === 'layout-change' && (n as LayoutChangeNotification).layout.root.type === 'split',
     );
     const splitReply = await active.mgr.splitWindow(paneId, 'lr');
     expect(splitReply.error).toBe(false);
@@ -163,9 +178,7 @@ describe('LocalTmuxControlManager (real tmux -CC)', () => {
     const paneId = await firstPaneId(active.mgr);
     // FR3: the auto-created initial pane must report the configured limit,
     // proving set -g history-limit ran before new-session created the pane.
-    const reply = await active.mgr.command(
-      `display-message -p -t ${paneId} '#{history_limit}'`,
-    );
+    const reply = await active.mgr.command(`display-message -p -t ${paneId} '#{history_limit}'`);
     expect(reply.error).toBe(false);
     expect(reply.lines[0]?.trim()).toBe(String(TERMINAL_SCROLLBACK));
   });
@@ -200,7 +213,7 @@ describe('LocalTmuxControlManager (real tmux -CC)', () => {
     const name = active.mgr.sessionName();
     active.mgr.close();
     await delay(250);
-    const ls = execFileSync('tmux', ['-L', SOCKET, 'ls', '-F', '#{session_name}'], {
+    const ls = execFileSync('tmux', ['-L', active.socket, 'ls', '-F', '#{session_name}'], {
       encoding: 'utf8',
     });
     expect(ls).toContain(name);

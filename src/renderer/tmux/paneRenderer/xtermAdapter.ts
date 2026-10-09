@@ -14,7 +14,7 @@ import '@xterm/xterm/css/xterm.css';
 import { fontStack, type AppSettings } from '@shared/settings';
 import { TERMINAL_SCROLLBACK } from '@shared/tmux';
 import { useSettingsStore } from '../../settings';
-import { XTERM_THEMES } from '../../terminal/terminalRegistry';
+import { XTERM_THEMES } from '../../terminal/xtermThemes';
 import { createOscLinkHandler } from '../oscLinkHandler';
 import { decodeOsc52Write } from '../osc52';
 import type { CellMetrics, PaneRenderer, PaneRendererOptions, RendererDisposable } from './index';
@@ -23,6 +23,11 @@ export class XtermPaneRenderer implements PaneRenderer {
   readonly container: HTMLDivElement;
   private readonly term: Terminal;
   private readonly fitAddon: FitAddon;
+  /** xterm keeps terminal-generated replies and keyboard input on one public
+   * event. Its core marks the former with `wasUserInput === false`; retain that
+   * provenance at the narrow boundary where xterm has it so reply bytes do not
+   * become broadcastable keyboard input. */
+  private readonly replyHandlers = new Set<(data: string) => void>();
   /** GPU (WebGL) renderer, loaded only while attached/visible and disposed on
    *  detach so live GL contexts track the visible pane count, never the
    *  accumulated registry size (the browser caps simultaneous contexts). */
@@ -44,6 +49,7 @@ export class XtermPaneRenderer implements PaneRenderer {
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
+    this.routeTerminalReplies();
 
     // OSC 52 → system clipboard. tmux emits OSC 52 to the client on copy when
     // `set-clipboard on` + the `Ms` cap are set (see terminalConfig), so a
@@ -72,8 +78,17 @@ export class XtermPaneRenderer implements PaneRenderer {
     this.term.write(bytes);
   }
 
+  ready(): Promise<void> {
+    return Promise.resolve();
+  }
+
   onData(handler: (data: string) => void): RendererDisposable {
     return this.term.onData(handler);
+  }
+
+  onReply(handler: (data: string) => void): RendererDisposable {
+    this.replyHandlers.add(handler);
+    return { dispose: () => this.replyHandlers.delete(handler) };
   }
 
   focus(): void {
@@ -82,6 +97,11 @@ export class XtermPaneRenderer implements PaneRenderer {
 
   onAttach(): void {
     this.ensureWebgl();
+    // Reparenting an xterm host can leave its DOM rows stale even though the
+    // terminal buffer (including its deliberate viewport position) is intact.
+    // Repaint only that retained buffer; moving between panes or windows must
+    // never force a reader back to the live tail.
+    this.repaintFromBuffer();
   }
 
   onDetach(): void {
@@ -100,9 +120,15 @@ export class XtermPaneRenderer implements PaneRenderer {
     // measured against the rendered font, excluding xterm's internal padding and
     // the scrollbar gutter. Returns null if the private surface ever moves; the
     // registry then falls back to container/cols.
-    const dims = (this.term as unknown as {
-      _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } };
-    })._core?._renderService?.dimensions?.css?.cell;
+    const dims = (
+      this.term as unknown as {
+        _core?: {
+          _renderService?: {
+            dimensions?: { css?: { cell?: { width?: number; height?: number } } };
+          };
+        };
+      }
+    )._core?._renderService?.dimensions?.css?.cell;
     return dims && dims.width && dims.height ? { w: dims.width, h: dims.height } : null;
   }
 
@@ -156,5 +182,33 @@ export class XtermPaneRenderer implements PaneRenderer {
       /* already gone */
     }
     this.webgl = null;
+  }
+
+  /**
+   * `Terminal.onData` intentionally combines browser input with parser replies.
+   * The core service's boolean is the only provenance supplied by xterm: true
+   * for keyboard input, false for a terminal-generated reply. Intercept only
+   * that false path before it reaches the public combined event; preserving the
+   * original function for true keeps normal and rapid keyboard delivery on
+   * xterm's own path.
+   */
+  private routeTerminalReplies(): void {
+    const core = this.term as unknown as {
+      _core?: {
+        coreService?: {
+          triggerDataEvent?: (data: string, wasUserInput?: boolean) => void;
+        };
+      };
+    };
+    const service = core._core?.coreService;
+    const original = service?.triggerDataEvent;
+    if (!service || !original) return;
+    service.triggerDataEvent = (data: string, wasUserInput = false): void => {
+      if (!wasUserInput) {
+        for (const handler of this.replyHandlers) handler(data);
+        return;
+      }
+      original.call(service, data, wasUserInput);
+    };
   }
 }

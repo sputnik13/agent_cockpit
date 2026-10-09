@@ -7,7 +7,7 @@ import globals from 'globals';
 
 export default [
   {
-    ignores: ['node_modules', 'out', 'dist', '.vite', 'coverage'],
+    ignores: ['node_modules', 'out', 'dist', '.vite', 'coverage', 'cockpit-mux/.build'],
   },
   js.configs.recommended,
   {

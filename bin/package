@@ -19,7 +19,23 @@ if [ ! -d node_modules ]; then
   bin/setup
 fi
 
-if [ "$#" -gt 0 ]; then
-  exec npm run package -- "$@"
+if [ "$#" -eq 0 ]; then
+  exec npm run package
 fi
-exec npm run package
+
+target="$1"
+shift
+case "$target" in
+  --mac)
+    exec npm run package:mac -- "$@"
+    ;;
+  --linux)
+    exec npm run package:linux -- "$@"
+    ;;
+  --dir)
+    exec npm run package:dir -- "$@"
+    ;;
+  *)
+    exec npm run package -- "$target" "$@"
+    ;;
+esac

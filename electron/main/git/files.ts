@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 
 const DEFAULT_MAX_BYTES = 1024 * 256; // 256 KiB
 

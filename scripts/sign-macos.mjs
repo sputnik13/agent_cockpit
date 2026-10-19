@@ -18,7 +18,7 @@ function refreshMuxManifest(appPath) {
   if (manifests.length === 0) throw new Error(`Missing Cockpit-mux manifest in ${dist}`);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  if (!Array.isArray(manifest.binaries) || manifest.binaries.length !== 4) {
+  if (!Array.isArray(manifest.binaries) || manifest.binaries.length !== 3) {
     throw new Error(`Malformed Cockpit-mux manifest at ${manifestPath}`);
   }
   for (const binary of manifest.binaries) {

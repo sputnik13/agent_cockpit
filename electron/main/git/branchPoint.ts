@@ -1,4 +1,4 @@
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 import type { BranchPoint } from '@shared/ipc/channels';
 
 /**

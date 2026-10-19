@@ -46,7 +46,7 @@ stage_package_artifacts() {
     cp "${dist_dir}/${artifact}" "${stage_dir}/${artifact}"
     ((staged_count += 1))
   done < <(grep -o '"filename":"[^"]*"' "${source_manifest}" | sed 's/^"filename":"//; s/"$//')
-  if (( staged_count != 4 )); then
+  if (( staged_count != 3 )); then
     echo "refusing to stage malformed mux manifest: ${source_manifest}" >&2
     exit 1
   fi
@@ -110,7 +110,7 @@ cleanup_artifact_stage() {
 }
 trap cleanup_artifact_stage EXIT
 
-targets=("darwin arm64 native" "darwin amd64 x86_64-macos" "linux amd64 x86_64-linux-musl" "linux arm64 aarch64-linux-musl")
+targets=("darwin arm64 native" "linux amd64 x86_64-linux-musl" "linux arm64 aarch64-linux-musl")
 entries=()
 for target in "${targets[@]}"; do
   read -r os arch ghostty_target <<<"${target}"

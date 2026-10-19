@@ -1,4 +1,4 @@
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 import type { WorktreeRecord } from '@shared/ipc/channels';
 
 export async function listWorktrees(repoPath: string): Promise<WorktreeRecord[]> {

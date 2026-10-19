@@ -2,7 +2,7 @@
  * macOS after-sign hook for the separately versioned Cockpit-mux artifacts.
  *
  * electron-builder signs Mach-O files below extraResources before it seals the
- * enclosing .app. That changes the bytes of the two macOS mux binaries after
+ * enclosing .app. That changes the bytes of the macOS mux binary after
  * their release manifest is made. Sign first, refresh only the staged
  * manifest's SHA-256 values, then re-sign the enclosing app (not recursively)
  * so its resource seal covers the final manifest. This runs after
@@ -40,7 +40,7 @@ async function refreshManifest(appPath) {
   if (manifests.length === 0) throw new Error(`Missing Cockpit-mux manifest in ${dist}`);
 
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
-  if (!Array.isArray(manifest.binaries) || manifest.binaries.length !== 4) {
+  if (!Array.isArray(manifest.binaries) || manifest.binaries.length !== 3) {
     throw new Error(`Malformed Cockpit-mux manifest at ${manifestPath}`);
   }
   for (const binary of manifest.binaries) {

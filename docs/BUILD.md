@@ -58,15 +58,20 @@ temporary profile, tmux socket, and mux home and cleans only those resources.
 ```sh
 bin/package          # package for the current platform -> release/
 bin/package --mac    # macOS .dmg + .zip (arm64)
-bin/package --linux  # Linux AppImage
+bin/package --linux  # Linux AppImage for the current host architecture
 bin/package --dir    # unpacked app only (fast; no installers)
 ```
 
 Equivalent npm scripts: `npm run package`, `package:mac`, `package:linux`,
-`package:dir`. Each first runs `npm run mux:build`, which reuses a manifest only
+`package:dir`. The macOS target is arm64 only. Linux packages must be built on
+their matching native hosts because the app's native modules are rebuilt for the
+host architecture; run the Linux package command on both arm64 and amd64 Linux
+hosts. Other architectures are optional. Each first runs
+`npm run mux:build`, which reuses a manifest only
 when its source hash matches the current mux source and otherwise builds the next
-additive artifact revision. A generated staging directory gives electron-builder
-only that manifest and its four verified binaries; the full append-only build
+additive artifact revision. The mux artifact set is macOS/arm64 plus
+Linux/arm64 and Linux/amd64. A generated staging directory gives electron-builder
+only that manifest and its three verified binaries; the full append-only build
 archive is not copied into the app. It then runs `npm run build` and
 electron-builder. Artifacts are written to `release/` (gitignored).
 
@@ -86,7 +91,8 @@ Output:
 
 - **macOS:** `release/Agent Cockpit-<version>-arm64.dmg` and `...-arm64-mac.zip`,
   plus the unpacked `release/mac-arm64/Agent Cockpit.app`.
-- **Linux:** `release/Agent Cockpit-<version>.AppImage`.
+- **Linux:** an AppImage for the host architecture in `release/` (arm64 and x64
+  are the supported release architectures).
 
 The two required native modules (`better-sqlite3`, `node-pty`) are rebuilt
 against Electron's ABI before packaging; their `.node` binaries are unpacked from

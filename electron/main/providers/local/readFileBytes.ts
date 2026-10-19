@@ -23,7 +23,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 import { FILE_BYTES_CAP } from '@shared/providers/fileBytesCap';
 import type { FileBytesResult } from '../types';
 import { localStat } from './reads';

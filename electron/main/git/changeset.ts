@@ -1,4 +1,4 @@
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Changeset, FileChange, FileChangeStatus } from '@shared/ipc/channels';

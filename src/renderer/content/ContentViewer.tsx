@@ -21,6 +21,8 @@ import { changedLinesFromPatch } from './hunkMap';
 import { DiffView } from './DiffView';
 import { RawFile, type RawFileConfirmation } from './RawFile';
 import { FoldingView } from './FoldingView';
+import { CsvView } from './CsvView';
+import { readHeapStats, tabularMaxBytes } from './tabular/tabularCap';
 import { ImageCompare } from './ImageCompare';
 import { ImageView } from './ImageView';
 import { HtmlPreview } from './HtmlPreview';
@@ -29,6 +31,7 @@ import {
   ModeSwitcher,
   classOf,
   defaultModeFor,
+  delimiterFor,
   modesFor,
   viewFor,
   type ContentClass,
@@ -117,6 +120,14 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
   // discipline as `structuredFoldMaxMb` above.
   const structuredReadMaxBytes =
     cls === 'json' || cls === 'yaml' ? structuredFoldReadMaxBytes(structuredFoldMaxMb) : undefined;
+  // Memory budget (bytes) for loading a csv/tsv into the sortable table,
+  // derived from remaining heap and evaluated ONCE per opened file (state
+  // initializer; FileContent remounts per selection) so the read cap CsvView
+  // uses is stable for the file's lifetime. Unlike the json/yaml size degrade
+  // below there is deliberately NO effectiveCls reclassification for an
+  // over-budget table: CsvView shows its own notice and Diff/Raw stay fully
+  // available, so there is no mount-loop hazard to design around.
+  const [tabularCap] = useState(() => (cls === 'csv' ? tabularMaxBytes(readHeapStats()) : 0));
   // An over-threshold json/yaml file whose bytes are CONFIRMED text degrades
   // to 'text'. This mirrors `confirmedBinary` above and is why it lives HERE
   // rather than in `classOf` (modeSwitcher.tsx): `classOf` is pure and
@@ -623,6 +634,18 @@ function FileContent({ selection }: { selection: ContentSelection }): JSX.Elemen
                 {...(structuredReadMaxBytes !== undefined
                   ? { maxBytes: structuredReadMaxBytes }
                   : {})}
+              />
+            )}
+
+            {view === 'csv-view' && (
+              <CsvView
+                key={refreshToken}
+                worktreePath={worktreePath}
+                filePath={path}
+                delimiter={delimiterFor(path)}
+                maxBytes={tabularCap}
+                onBinaryConfirmed={setRawConfirmation}
+                {...(baseline !== undefined ? { gitRef: baseline } : {})}
               />
             )}
 

@@ -1531,7 +1531,9 @@ structural-folding view below builds on — natively tolerates
 JSON-with-comments and trailing commas, so there is no grammar mismatch to
 hide); `.json5` deliberately does NOT — its grammar is materially richer than
 jsonc-parser handles, so it falls through to `text`, unchanged. `.yaml`/`.yml`
-both classify as `yaml` (`isYamlPath`). Shipped matrix (`ImageView` and `BinaryPlaceholder`
+both classify as `yaml` (`isYamlPath`); `.csv`/`.tsv` both classify as `csv`
+(`isCsvPath`; the delimiter comes from the extension via `delimiterFor`).
+Shipped matrix (`ImageView` and `BinaryPlaceholder`
 were new with the content-mode epic; `FoldingView` is a later addition — see
 "Content Panel Structural Folding (JSON/YAML)" below — every other cell
 reuses a pre-existing component):
@@ -1543,6 +1545,7 @@ reuses a pre-existing component):
 | `text`           | `DiffView`                        | `RawFile` (Shiki-highlighted)                    | `RawFile` (plain) |
 | `json`           | `DiffView`                        | `FoldingView` (source-mapped structural folding) | `RawFile` (plain) |
 | `yaml`           | `DiffView`                        | `FoldingView` (source-mapped structural folding) | `RawFile` (plain) |
+| `csv`            | `DiffView`                        | `CsvView` (sortable/filterable table)            | `RawFile` (plain) |
 | `image`          | `ImageCompare` (before/after)     | `ImageView` (working-tree image)                 | —                 |
 | `generic-binary` | `DiffView` (graceful placeholder) | `RawFile` (graceful placeholder)                 | —                 |
 
@@ -1550,7 +1553,7 @@ An `external-file` selection (out-of-project, no git baseline) never offers
 Diff; its image/generic-binary classes fall back to Raw only (a deliberate
 carve-out preserved from the pre-epic behavior — see `modesFor`'s doc
 comment). Defaults: markdown/html → Rendered; image/generic-binary → Diff
-(the type-appropriate comparison); text-like (`text`/`json`/`yaml`) → Diff for
+(the type-appropriate comparison); text-like (`text`/`json`/`yaml`/`csv`) → Diff for
 a Changes row, Raw for an Explorer file; external files → Raw.
 
 ### What Diff / Rendered / Raw mean
@@ -2112,6 +2115,67 @@ Unit/component coverage: `foldModel.test.ts`, `jsonFold.test.ts`,
 extended by `npm run verify:content-modes`
 ([scripts/screenshots/verify-content-modes.mjs](../scripts/screenshots/verify-content-modes.mjs))
 — see its own Regression Check entry above for the harness's general shape.
+
+## Content Panel CSV/TSV Table View
+
+For the `csv` class, **Rendered** (`VIEW_DISPATCH`'s `'csv-view'` cell, rendered
+by [src/renderer/content/CsvView.tsx](../src/renderer/content/CsvView.tsx)) is a
+read-only, sortable, filterable table. Diff and Raw reuse `DiffView`/`RawFile`
+unchanged.
+
+```mermaid
+flowchart LR
+  CV[ContentViewer] -->|"maxBytes = tabularMaxBytes(heap), once per file"| V[CsvView]
+  V -->|"readFile(maxBytes)"| P[Provider]
+  V -->|"text"| C[tabularClient]
+  C -->|"postMessage"| W["tabularWorker (TabularEngine)"]
+  V -->|"query(sort, filter) / rows(start, end)"| C
+  W -->|"count / visible rows only"| V
+```
+
+**Ownership.** The parsed table lives in exactly one place: a per-file Web
+Worker (`tabularWorker.ts`, created and terminated by `tabularClient.ts`, with
+an inline fallback under test or if the worker cannot start — the same shape as
+`foldClient.ts`). `TabularEngine` (`tabular/tabularCore.ts`, pure) parses RFC-4180
+records once; sort and filter never copy rows or cells — they build a
+`Uint32Array` of body-row indices (4 bytes/row), and the view fetches only the
+window of rows in its viewport (fixed row height, windowed rendering). The main
+thread therefore never holds the parsed table and never blocks on it.
+
+**Memory budget — one definition.** `tabularMaxBytes(heapStats)`
+(`tabular/tabularCap.ts`) is the single source of "how large a file may be
+loaded into the table": `clamp(heapHeadroom × 0.25 ÷ 8, 1 MiB, 32 MiB)`, where
+`heapHeadroom` is the renderer's `jsHeapSizeLimit − usedJSHeapSize`
+(`performance.memory`) and 8 is a conservative bytes-of-heap-per-file-byte
+expansion factor for per-cell JS strings. A roomier heap is bounded by the hard
+ceiling so sort/filter stay interactive; a pressured heap shrinks the budget but
+never below the floor, so small files always work. When heap stats are
+unavailable a fixed 8 MiB fallback applies. `ContentViewer` evaluates it **once
+per opened file** (state initializer — `FileContent` remounts per selection)
+and passes it to `CsvView` as the read cap, so the cap is stable for the file's
+lifetime. The budget is an estimate of the renderer's own headroom, not of
+system RAM.
+
+**Over-budget behavior (deliberately NOT a reclassification).** `CsvView` reads
+with `maxBytes = budget`; a file over it comes back `truncated`, and the view
+shows a notice (size and budget) instead of parsing. Unlike the json/yaml
+oversize degrade, `effectiveCls` is NOT changed, and `CsvView` does **not**
+report `too-large` through `onBinaryConfirmed`: that budget is a memory
+decision, not the file-read cap, and reporting it would make Diff claim the
+file is too large to diff. It reports only `text`, `binary` and `missing`, so a
+binary `.csv` still reclassifies to the generic-binary placeholder. Raw uses
+the default read cap, unchanged. Because nothing flips `effectiveCls` on this
+outcome, none of the json/yaml mount-loop hazard (see that section) applies.
+
+**Known limits.** Remote `readFile` is hard-capped at 2 MiB by the helper RPC,
+so a remote CSV above that shows the over-budget notice even when it is under
+the local budget. Rows are fixed-height with truncated cells (the full value is
+the tooltip), so the view is not wrappable and is excluded from find-in-file.
+The first record is always treated as the header.
+
+Unit/component coverage: `tabularCore.test.ts`, `tabularCap.test.ts`,
+`csvView.test.tsx`, plus the csv cases in `modeSwitcher.test.ts` and
+`content.test.tsx`.
 
 ## Content Panel Highlighting
 

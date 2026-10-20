@@ -271,6 +271,29 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   toggle; the degrade notice for an unavailable/errored fold model; grouped
   multi-document rendering (labelled regions and separators) versus the flat
   single-document path; and anchor/alias badge rendering with tooltip text.
+- **CSV/TSV table view** (`src/renderer/content/tabular/`, `CsvView.tsx`):
+  the pure engine (`tabularCore.test.ts`) — RFC-4180 parsing (quoted
+  delimiters/newlines/doubled quotes, CRLF/lone CR, BOM, ragged rows, blank
+  lines, lenient unterminated quotes), numeric vs natural-order text sorting,
+  empty cells last in both directions, stable ties with original row numbers,
+  case-insensitive filter then sort, restoring source order, header-only and
+  empty files; the memory budget (`tabularCap.test.ts`) — fallback without heap
+  stats, hard ceiling, proportional shrink with headroom, floor under pressure
+  or used > limit, `performance.memory` parsing; the component
+  (`csvView.test.tsx`, jsdom, inline engine) — header/rows/counts, the cap
+  passed as the read's `maxBytes`, tab delimiter, three-state header sort,
+  debounced filter with "N of M rows" and the empty-result message, windowed
+  rendering of a 5,000-row file, the over-budget notice that parses nothing and
+  does NOT report `too-large` upward, `text`/`binary`/`missing` reporting,
+  `gitRef` passthrough, and an error state for a failed read; and
+  `ContentViewer` integration (`content.test.tsx`) — Raw keeps the default read
+  cap, Rendered mounts the table with a finite budget, no Wrap checkbox, `.tsv`
+  delimiter, and an over-budget file leaving Diff/Raw available. The worker
+  path itself (bundling, protocol, termination) cannot run under vitest and was
+  verified in the real built app with an isolated profile: table and worker
+  start, virtualized DOM, sort/filter correctness, a 200,000-row sort verified
+  against the true maximum with no long frame gaps, and a 40 MiB file hitting
+  the notice with no worker spawned.
 
 ## Integration Scope
 

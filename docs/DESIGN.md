@@ -1035,6 +1035,34 @@ See ARCHITECTURE "Content Panel Structural Folding (JSON/YAML)" for the fold
 model, the worker/cache delivery, the view dispatch, and the runtime
 reclassification rule these decisions produced.
 
+### CSV/TSV table view (sortable/filterable, memory-capped)
+
+**Why a table over source-mapped folding.** CSV has no nesting to fold; the
+useful operations are ordering and narrowing rows, so Rendered is a real table
+(`CsvView`) rather than a variant of the folding view. Diff and Raw keep the
+literal text, so nothing is lost by the table being a presentation only.
+
+**Why a worker plus an index array.** The requirement is that a large file must
+not cause a slowdown. Parsing a file into cell strings costs several times its
+byte size and sorting a million rows on the UI thread would visibly freeze it,
+so the table is parsed once in a per-file worker, sort/filter produce only a
+`Uint32Array` of row indices, and the view asks for just its viewport. Copying
+rows per sort or per filter keystroke was rejected as the dominant memory cost.
+
+**Why the budget is derived from heap headroom, not a fixed number of MB.** A
+fixed threshold is wrong at both ends: too high on a memory-pressured renderer,
+needlessly low on a roomy one. The cap is computed from remaining heap, then
+bounded by a hard ceiling (interactivity) and a floor (small files always
+work); see ARCHITECTURE "Content Panel CSV/TSV Table View" for the formula,
+once-per-file evaluation, and why over-budget is a notice rather than a
+reclassification. It is intentionally a constant ceiling, not a Preference: a
+setting would add a persisted-settings field and migration surface for a value
+users should not need to tune.
+
+**Rejected/deferred.** Delimiter sniffing and a header-row toggle (extension
+decides the delimiter; first record is the header); column resize/reorder;
+editing; JSON Lines.
+
 ### Rendered-markdown diff highlighting (design breakout)
 
 The Content panel's rendered-markdown preview highlights a changed list by

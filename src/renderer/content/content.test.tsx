@@ -909,6 +909,75 @@ describe('ContentViewer', () => {
     });
   });
 
+  describe('csv/tsv class (csv-view dispatch + memory-derived cap)', () => {
+    const csv = 'name,age\nbob,30\nalice,4\n';
+    const csvFile = (): void =>
+      readFile.mockResolvedValue({
+        content: csv,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: csv.length,
+      });
+
+    it('Rendered shows the sortable table; Raw and Diff do not; the table read carries a finite memory-derived maxBytes', async () => {
+      csvFile();
+      render(<ContentViewer selection={sel('data.csv', { kind: 'file' })} />);
+      // Explorer file defaults to Raw (same as json/yaml): plain RawFile, no table.
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+      expect(screen.getByRole('tab', { name: 'Raw' })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.queryByTestId('csv-row-count')).not.toBeInTheDocument();
+      // Raw keeps the DEFAULT read cap — only the table opts into the budget.
+      expect(readFile.mock.calls[0]![1]).not.toHaveProperty('maxBytes');
+
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      expect(await screen.findByTestId('csv-row-count')).toHaveTextContent('2 rows · 2 columns');
+      const tableRead = readFile.mock.calls.at(-1)![1] as { maxBytes?: number };
+      expect(Number.isFinite(tableRead.maxBytes)).toBe(true);
+      expect(tableRead.maxBytes).toBeGreaterThan(0);
+      // The table is not wrappable and has no find-in-file: no Wrap checkbox.
+      expect(screen.queryByRole('checkbox', { name: 'Wrap' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('columnheader', { name: /age/ }));
+      await waitFor(() =>
+        expect(screen.getByRole('columnheader', { name: /age/ })).toHaveAttribute(
+          'aria-sort',
+          'ascending',
+        ),
+      );
+    });
+
+    it('a .tsv is parsed with tab delimiters', async () => {
+      const tsv = 'a\tb\nx\ty\n';
+      readFile.mockResolvedValue({
+        content: tsv,
+        truncated: false,
+        isBinary: false,
+        sizeBytes: tsv.length,
+      });
+      render(<ContentViewer selection={sel('data.tsv', { kind: 'file' })} />);
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      expect(await screen.findByTestId('csv-row-count')).toHaveTextContent('1 rows · 2 columns');
+    });
+
+    it('an over-budget file shows the table notice but Diff/Raw stay available and are not told the file is too large', async () => {
+      readFile.mockImplementation((_p: string, o: { maxBytes?: number }) =>
+        Promise.resolve(
+          o.maxBytes !== undefined
+            ? { content: null, truncated: true, isBinary: false, sizeBytes: 99_000_000 }
+            : { content: csv, truncated: false, isBinary: false, sizeBytes: csv.length },
+        ),
+      );
+      render(<ContentViewer selection={sel('big.csv', { kind: 'file' })} />);
+      await waitFor(() => expect(readFile).toHaveBeenCalledTimes(1));
+      fireEvent.click(screen.getByRole('tab', { name: 'Rendered' }));
+      expect(await screen.findByText('Too large for the table view')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
+      await waitFor(() => expect(document.body.textContent).toContain('bob,30'));
+      expect(screen.getByRole('tab', { name: 'Diff' })).toBeInTheDocument();
+    });
+  });
+
   describe('structural-fold size degrade (structuredFoldMaxMb — local_repo_explorer-jp2f.4)', () => {
     const JSON_CONTENT = '{ "a": 1 }';
 

@@ -300,6 +300,22 @@ noreferrer"`; relative links route through the local-file resolver, while
   other text-like files; Raw for json/yaml also reads at the same raised cap
   as Rendered (so the two never disagree about whether a given file is
   available to preview at all).
+- **FR-14 Sortable, filterable table for CSV/TSV.** CSV (`.csv`) and TSV
+  (`.tsv`) files offer a **Rendered** view that is a read-only table: the first
+  record is the header, columns sort ascending/descending/off by clicking the
+  header (all-numeric columns sort numerically, other columns in
+  case-insensitive natural order, empty cells always last), and a text filter
+  matches case-insensitively across every cell and reports "N of M rows".
+  Quoted fields (embedded delimiters, newlines, doubled quotes), CRLF/LF line
+  endings, a BOM, and ragged rows parse correctly. Responsiveness and memory
+  are bounded: parsing, sorting and filtering run off the main thread, only
+  the visible rows are rendered, and a file larger than a **memory budget
+  derived from the renderer's remaining heap** (hard ceiling 32 MB, floor
+  1 MB) is not loaded into the table at all — the view shows a notice naming
+  the file size and the budget, and Diff and Raw remain fully available. The
+  table is not wrappable and is not covered by find-in-file (the filter is its
+  search); on a remote project the table is additionally limited to the remote
+  helper's file-read cap.
 
 ## Non-Functional Requirements
 

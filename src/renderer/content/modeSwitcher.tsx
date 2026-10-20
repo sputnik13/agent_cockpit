@@ -61,8 +61,24 @@ import type { ContentKind } from './selectionStore';
  * before this class existed; extending that grammar mapping is a later,
  * independent change.) `.yaml`/`.yml` both classify as `'yaml'` — no
  * comparable variant-extension question there.
+ *
+ * CSV/TSV classification (`isCsvPath`): `.csv` and `.tsv` both
+ * classify as `'csv'` (one class, delimiter chosen from the extension by
+ * {@link delimiterFor}). Like json/yaml it is text-like (Diff/Rendered/Raw all
+ * offered; Diff and Raw reuse the existing components); Rendered is a sortable,
+ * filterable table (CsvView). Whether a file is small enough to load into that
+ * table is a MEMORY-derived runtime decision made by CsvView (see
+ * tabular/tabularCap.ts), never by this pure, path-only classifier.
  */
-export type ContentClass = 'markdown' | 'html' | 'image' | 'text' | 'json' | 'yaml' | 'generic-binary';
+export type ContentClass =
+  | 'markdown'
+  | 'html'
+  | 'image'
+  | 'text'
+  | 'json'
+  | 'yaml'
+  | 'csv'
+  | 'generic-binary';
 
 /** The three uniform modes every class projects into (availability varies by
  *  class; see {@link modesFor}). Presentation differs per class — Rendered is
@@ -76,6 +92,7 @@ const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
 const HTML_EXT = new Set(['.html', '.htm']);
 const JSON_EXT = new Set(['.json', '.jsonc']);
 const YAML_EXT = new Set(['.yaml', '.yml']);
+const CSV_EXT = new Set(['.csv', '.tsv']);
 
 function extOf(path: string): string {
   const dot = path.lastIndexOf('.');
@@ -105,6 +122,16 @@ export function isYamlPath(path: string): boolean {
   return YAML_EXT.has(extOf(path));
 }
 
+/** `.csv` and `.tsv` both classify as the tabular `'csv'` class. */
+export function isCsvPath(path: string): boolean {
+  return CSV_EXT.has(extOf(path));
+}
+
+/** Field delimiter for a tabular path: tab for `.tsv`, comma otherwise. */
+export function delimiterFor(path: string): ',' | '\t' {
+  return extOf(path) === '.tsv' ? '\t' : ',';
+}
+
 /** Pure, path-only content-type classification. See the module doc comment
  *  for why an unrecognized extension classifies as `'text'` rather than
  *  `'generic-binary'`. */
@@ -114,6 +141,7 @@ export function classOf(path: string): ContentClass {
   if (isImagePath(path)) return 'image';
   if (isJsonPath(path)) return 'json';
   if (isYamlPath(path)) return 'yaml';
+  if (isCsvPath(path)) return 'csv';
   return 'text';
 }
 
@@ -130,6 +158,7 @@ const CLASS_MODES: Record<ContentClass, ContentMode[]> = {
   // VIEW_DISPATCH below for the one presentation difference: Rendered).
   json: ['diff', 'rendered', 'raw'],
   yaml: ['diff', 'rendered', 'raw'],
+  csv: ['diff', 'rendered', 'raw'],
   image: ['diff', 'rendered'],
   'generic-binary': ['diff', 'rendered'],
 };
@@ -205,6 +234,7 @@ export type ViewKind =
   | 'raw-file' // RawFile
   | 'image-compare' // ImageCompare (before/after)
   | 'image-view' // ImageView (single current image, fit to panel)
+  | 'csv-view' // CsvView — sortable/filterable table for csv/tsv (memory-capped; see tabular/tabularCap.ts)
   | 'folding-view'; // FoldingView — the Rendered presentation for source-mapped structural folding (json/yaml); see FoldingView.tsx
 
 const VIEW_DISPATCH: Record<ContentClass, Record<ContentMode, ViewKind>> = {
@@ -236,6 +266,9 @@ const VIEW_DISPATCH: Record<ContentClass, Record<ContentMode, ViewKind>> = {
   // its own state model regardless.
   json: { diff: 'diff-view', rendered: 'folding-view', raw: 'raw-file' },
   yaml: { diff: 'diff-view', rendered: 'folding-view', raw: 'raw-file' },
+  // csv/tsv: Diff and Raw reuse DiffView/RawFile exactly as `text` does;
+  // Rendered is the table (CsvView).
+  csv: { diff: 'diff-view', rendered: 'csv-view', raw: 'raw-file' },
   // Diff is the before/after visual compare (ImageCompare — the
   // "type-appropriate comparison" for images; see the epic's settled
   // end-state mapping). Rendered is the single current-image view

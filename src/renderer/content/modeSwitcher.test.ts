@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   classOf,
   defaultModeFor,
+  delimiterFor,
+  isCsvPath,
   isHtmlPath,
   isImagePath,
   isJsonPath,
@@ -44,6 +46,13 @@ describe('classOf (pure, path-only classification)', () => {
   it('classifies yaml extensions as their own class, not text', () => {
     expect(classOf('config.yaml')).toBe('yaml');
     expect(classOf('config.yml')).toBe('yaml');
+  });
+
+  it('classifies csv and tsv (case-insensitively) as the csv class', () => {
+    expect(classOf('data.csv')).toBe('csv');
+    expect(classOf('data.tsv')).toBe('csv');
+    expect(classOf('DATA.CSV')).toBe('csv');
+    expect(classOf('data.csv.bak')).toBe('text');
   });
 
   it('classifies an unknown/binary extension as text — unknown-at-classification-time, never a guessed generic-binary (classOf is pure/path-only and stays that way; runtime reclassification happens one layer up, in ContentViewer — see the module doc comment)', () => {
@@ -173,6 +182,12 @@ describe('viewFor — the (class, mode) -> component dispatch table', () => {
     expect(viewFor('json', 'raw')).toBe('raw-file');
   });
 
+  it('csv: Rendered is the table; Diff and Raw reuse the existing components', () => {
+    expect(viewFor('csv', 'diff')).toBe('diff-view');
+    expect(viewFor('csv', 'rendered')).toBe('csv-view');
+    expect(viewFor('csv', 'raw')).toBe('raw-file');
+  });
+
   it('yaml', () => {
     expect(viewFor('yaml', 'diff')).toBe('diff-view');
     expect(viewFor('yaml', 'rendered')).toBe('folding-view');
@@ -265,5 +280,31 @@ describe('path predicates (still exported; classOf composes them)', () => {
     expect(isYamlPath('a.yaml')).toBe(true);
     expect(isYamlPath('a.yml')).toBe(true);
     expect(isYamlPath('a.ts')).toBe(false);
+  });
+});
+
+describe('csv class modes and helpers', () => {
+  it('offers diff/rendered/raw like other text-like classes; external files get rendered/raw', () => {
+    expect(modesFor('a.csv', 'change')).toEqual(['diff', 'rendered', 'raw']);
+    expect(modesFor('a.tsv', 'file')).toEqual(['diff', 'rendered', 'raw']);
+    expect(modesFor('a.csv', 'external-file')).toEqual(['rendered', 'raw']);
+  });
+
+  it('defaults like json/yaml (diff for a change, raw for an Explorer/external file)', () => {
+    expect(defaultModeFor('a.csv', 'change')).toBe('diff');
+    expect(defaultModeFor('a.csv', 'file')).toBe('raw');
+    expect(defaultModeFor('a.csv', 'external-file')).toBe('raw');
+  });
+
+  it('a runtime-confirmed binary .csv drops raw like any other class', () => {
+    expect(modesFor('a.csv', 'change', true)).toEqual(['diff', 'rendered']);
+  });
+
+  it('isCsvPath / delimiterFor pick the delimiter from the extension', () => {
+    expect(isCsvPath('a.csv')).toBe(true);
+    expect(isCsvPath('a.tsv')).toBe(true);
+    expect(isCsvPath('a.txt')).toBe(false);
+    expect(delimiterFor('a.csv')).toBe(',');
+    expect(delimiterFor('dir/a.TSV')).toBe('\t');
   });
 });

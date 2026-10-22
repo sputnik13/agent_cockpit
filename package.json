@@ -35,7 +35,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "screenshots": "npm run build && node scripts/screenshots/capture.mjs",
-    "verify:content-modes": "npm run build && node scripts/screenshots/verify-content-modes.mjs"
+    "verify:content-modes": "npm run build && node scripts/screenshots/verify-content-modes.mjs",
+    "verify:content-tabs": "npm run build && node scripts/screenshots/verify-content-tabs.mjs"
   },
   "dependencies": {
     "@hpcc-js/wasm-graphviz": "^1.22.1",

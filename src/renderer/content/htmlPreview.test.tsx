@@ -114,7 +114,7 @@ describe('HtmlPreview in ContentViewer', () => {
 
   afterEach(() => {
     cleanup();
-    useContentSelection.setState({ selections: {} });
+    useContentSelection.getState().resetAll();
   });
 
   it('defaults an .html change to the Rendered tab and renders a sandboxed blob iframe', async () => {

@@ -9,7 +9,7 @@ import {
 } from '../providerClient';
 import { useActiveWorktree, useWorktreeStore } from '@renderer/worktree/worktreeStore';
 import { worktreeSelectOptions } from '@renderer/worktree/worktreeOptions';
-import { useContentSelection } from '../content';
+import { selectTabs, tabIdFor, useContentSelection } from '../content';
 import { useExplorerStore } from './explorerStore';
 import { FileTypeIcon } from './icons/FileTypeIcon';
 import { FolderIcon } from './icons/FolderIcon';
@@ -300,19 +300,25 @@ function FileNode({
   const activeId = useProjectsStore((s) => s.activeId);
   const activeProject = useProjectsStore(selectActiveProject);
   const select = useContentSelection((s) => s.select);
-  // Subscribe to the active project's selection slice (not the stable
-  // `selectionFor` action) so the active-row highlight re-renders when the
-  // selection changes; see panels.tsx ContentPanelHost for the same fix.
-  const activeSelection = useContentSelection((s) =>
-    activeId ? s.selections[activeId] ?? null : null,
-  );
+  // Subscribe to the active project's tabs slice (not the stable `selectionFor`
+  // action) so the active-row highlight re-renders when the active tab
+  // changes; see panels.tsx ContentPanelHost for the same fix.
+  const activeTabId = useContentSelection((s) => selectTabs(activeId)(s).activeId);
   // A root-browsed file is outside any repo: select it as an absolute
   // 'external-file' (no git diff) instead of an in-project 'file'. Uses the
   // shared resolver (moved from this file's own removed `absoluteUnder`) —
   // same base/relPath inputs, so the result is byte-for-byte identical.
   const targetPath = resolveRowPath(entry.path, worktreePath, external);
   const targetKind = external ? 'external-file' : 'file';
-  const active = activeSelection?.kind === targetKind && activeSelection.path === targetPath;
+  // The row is active when the front tab is this file's fully-qualified path,
+  // however that tab was opened (Changes, Explorer, or a link).
+  const active =
+    activeTabId !== null &&
+    activeTabId ===
+      tabIdFor(
+        { path: targetPath, worktreePath: external ? '' : (worktreePath ?? ''), kind: targetKind },
+        activeProject,
+      );
   // Scroll into view when this file is the reveal target of a clicked link.
   const isRevealTarget = useExplorerStore((s) => (activeId ? s.revealTarget[activeId] === entry.path : false));
   const consumeRevealTarget = useExplorerStore((s) => s.consumeRevealTarget);

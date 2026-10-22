@@ -200,7 +200,13 @@ agent-cockpit -CC new-session -A -s agent-cockpit-<projectId>`) is the
   image compare/view, highlighted code, or structural folding for JSON/YAML
   (FR-13); binary files degrade to graceful
   placeholders that point at Download. Filtering/search across the change
-  list. The rendered-
+  list. The Content panel holds **multiple open files as tabs** per project:
+  opening a file from Changes, Explorer, or a link activates the tab already
+  open for that file (identified by its fully-qualified, worktree-resolved
+  path, however it was opened) or adds a new one; each tab is labelled with
+  the filename and shows the full path on hover, can be closed, keeps its own
+  view mode/zoom/scroll/find state while open, and is restored on restart.
+  The rendered-
   Markdown mode is GFM-complete in a single whole-document parse so reference
   link definitions, footnote definitions, and reference images resolve across
   blocks; top-level elements are annotated with their source line range so the

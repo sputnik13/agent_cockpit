@@ -388,14 +388,14 @@ describe('row context menu', () => {
     const rowEl = row.closest('div')!;
     const classNameBefore = rowEl.className;
     expect(useChangesStore.getState().byProject[PROJECT]!.selectedPath).toBeNull();
-    expect(useContentSelection.getState().selections[PROJECT] ?? null).toBeNull();
+    expect(useContentSelection.getState().selectionFor(PROJECT)).toBeNull();
 
     fireEvent.contextMenu(row);
     // Let the menu open (and any microtasks settle) before asserting nothing moved.
     await screen.findByText(DOWNLOAD_LABEL);
 
     expect(useChangesStore.getState().byProject[PROJECT]!.selectedPath).toBeNull();
-    expect(useContentSelection.getState().selections[PROJECT] ?? null).toBeNull();
+    expect(useContentSelection.getState().selectionFor(PROJECT)).toBeNull();
     expect(rowEl.className).toBe(classNameBefore);
     expect(rowEl.className).not.toMatch(/border-accent/);
   });

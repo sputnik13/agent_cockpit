@@ -271,6 +271,20 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   toggle; the degrade notice for an unavailable/errored fold model; grouped
   multi-document rendering (labelled regions and separators) versus the flat
   single-document path; and anchor/alias badge rendering with tooltip text.
+- **Content tabs** (`tabState.ts`, `selectionStore.ts`, `ContentTabs.tsx`): the pure logic
+  (`tabState.test.ts`) — identity is the fully-qualified path regardless of opener or `kind`,
+  same relative path in two worktrees is two tabs, re-open reuses and activates with the latest
+  opener's selection, closing the active tab activates the right neighbour then the left, and
+  defensive parsing of persisted tabs; persistence (`tabPersistence.test.ts`, fake
+  `localStorage`, fresh module instance as a restart) — tabs and the active tab restore, a
+  restored file re-opens into its existing tab, projects stay independent, the entry is removed
+  when the last tab closes, corrupt storage degrades to no tabs; and the panel host
+  (`contentPanelHost.test.tsx`) — one tab per file with filename label and full-path `title`,
+  reuse on re-open, switching back does not reload a mounted tab, close and the empty state,
+  and per-project tab isolation. End to end, `npm run verify:content-tabs`
+  (`scripts/screenshots/verify-content-tabs.mjs`, isolated profile) opens files from Changes,
+  checks reuse, filename label and full-path title, closing, and restoration after a full app
+  restart.
 - **CSV/TSV table view** (`src/renderer/content/tabular/`, `CsvView.tsx`):
   the pure engine (`tabularCore.test.ts`) — RFC-4180 parsing (quoted
   delimiters/newlines/doubled quotes, CRLF/lone CR, BOM, ragged rows, blank

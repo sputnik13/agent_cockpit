@@ -149,13 +149,27 @@ async function activateDvTab(win, label) {
   await sleep(600);
 }
 
+// Content now holds open files as tabs and keeps visited ones mounted (hidden).
+// This script's locators assume ONE Content-viewer instance, so close every open
+// tab before opening the next file. (Tab behaviour itself is covered by
+// verify-content-tabs.mjs.)
+async function closeAllContentTabs(win) {
+  const close = win.getByRole('tablist', { name: 'Open files' }).getByRole('button', { name: /^Close / });
+  while ((await close.count()) > 0) {
+    await close.first().click();
+    await sleep(150);
+  }
+}
+
 async function openFromChanges(win, fileName) {
+  await closeAllContentTabs(win);
   await activateDvTab(win, 'Changes');
   await win.getByText(fileName, { exact: false }).first().click();
   await sleep(SETTLE_OPEN);
 }
 
 async function openFromExplorer(win, fileName) {
+  await closeAllContentTabs(win);
   await activateDvTab(win, 'Explorer');
   await win.getByText(fileName, { exact: true }).first().click();
   await sleep(SETTLE_OPEN);

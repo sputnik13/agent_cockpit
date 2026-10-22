@@ -1,5 +1,13 @@
 export { ContentViewer } from './ContentViewer';
-export { useContentSelection, type ContentSelection, type ContentKind } from './selectionStore';
+export { ContentTabs } from './ContentTabs';
+export {
+  useContentSelection,
+  selectActive,
+  selectTabs,
+  type ContentSelection,
+  type ContentKind,
+} from './selectionStore';
+export { tabIdFor, type ContentTab, type ContentTabsSlice } from './tabState';
 export {
   ModeSwitcher,
   defaultModeFor,

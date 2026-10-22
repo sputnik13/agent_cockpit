@@ -28,7 +28,7 @@ function resolveTo(r: Partial<ResolvedPath>): void {
 }
 
 beforeEach(() => {
-  useContentSelection.setState({ selections: {} });
+  useContentSelection.getState().resetAll();
   useExplorerStore.setState({ expanded: {}, revealTarget: {} });
   api.provider.resolvePath.mockReset();
   vi.spyOn(window, 'open').mockReturnValue(null);
@@ -44,7 +44,7 @@ describe('openLinkTarget', () => {
   it('opens an in-project file in the content panel and reveals it in the Explorer', async () => {
     resolveTo({ insideProject: true, relPath: 'src/a.ts', absPath: '/repo/src/a.ts' });
     await openLinkTarget('src/a.ts', { projectId: PID });
-    const sel = useContentSelection.getState().selections[PID];
+    const sel = useContentSelection.getState().selectionFor(PID);
     expect(sel).toMatchObject({ path: 'src/a.ts', kind: 'file' });
     expect(useExplorerStore.getState().revealTarget[PID]).toBe('src/a.ts');
     // ancestor dir expanded
@@ -54,7 +54,7 @@ describe('openLinkTarget', () => {
   it('opens an out-of-project file in the content panel only (no reveal)', async () => {
     resolveTo({ insideProject: false, relPath: null, absPath: '/etc/hosts' });
     await openLinkTarget('/etc/hosts', { projectId: PID });
-    const sel = useContentSelection.getState().selections[PID];
+    const sel = useContentSelection.getState().selectionFor(PID);
     expect(sel).toMatchObject({ path: '/etc/hosts', kind: 'external-file' });
     expect(useExplorerStore.getState().revealTarget[PID] ?? null).toBeNull();
   });
@@ -63,13 +63,13 @@ describe('openLinkTarget', () => {
     resolveTo({ exists: true, isDir: true, insideProject: true, relPath: 'src/sub', absPath: '/repo/src/sub' });
     await openLinkTarget('src/sub', { projectId: PID });
     expect(useExplorerStore.getState().revealTarget[PID]).toBe('src/sub');
-    expect(useContentSelection.getState().selections[PID] ?? null).toBeNull();
+    expect(useContentSelection.getState().selectionFor(PID)).toBeNull();
   });
 
   it('is a no-op for a non-existent local path', async () => {
     resolveTo({ exists: false });
     await openLinkTarget('./ghost.txt', { projectId: PID });
-    expect(useContentSelection.getState().selections[PID] ?? null).toBeNull();
+    expect(useContentSelection.getState().selectionFor(PID)).toBeNull();
     expect(useExplorerStore.getState().revealTarget[PID] ?? null).toBeNull();
   });
 

@@ -11,7 +11,7 @@ import { registerPanelFocus } from './panelFocus';
 import { PanelFocusProvider } from './panelFocusContext';
 import { BeadsPanel, TaskDetail } from '../beads';
 import { ChangesPanel } from '../changes';
-import { ContentViewer, useContentSelection } from '../content';
+import { ContentTabs, ContentViewer } from '../content';
 import { ExplorerPanel } from '../explorer';
 import { RunPanel } from '../run';
 import { TerminalPanel } from '../terminal/TerminalPanel';
@@ -21,20 +21,21 @@ import { useProjectsStore } from '../providerClient';
 import { PanelIds, type PanelId } from './panelIds';
 
 /**
- * Content panel host: renders the per-project content selection. Exported for
- * the store -> panel reactivity integration test.
+ * Content panel host: renders the active project's open content tabs. Exported
+ * for the store -> panel reactivity integration test.
  *
- * Subscribe to the per-project `selections` slice directly (not the stable
- * `selectionFor` action) so the panel re-renders when the active project's
- * selection changes. Selecting `s.selectionFor` returned the same function
+ * `ContentTabs` subscribes to the per-project tabs slice directly (not the
+ * stable `selectionFor` action) so the panel re-renders when the active
+ * project's tabs change. Selecting `s.selectionFor` returned the same function
  * identity on every store update, so zustand never re-rendered the panel after
  * a selection write and the Content panel stayed empty/stale until an unrelated
  * render happened to flush it.
  */
 export function ContentPanelHost(): JSX.Element {
   const activeId = useProjectsStore((s) => s.activeId);
-  const selection = useContentSelection((s) => (activeId ? s.selections[activeId] ?? null : null));
-  return <ContentViewer selection={selection} />;
+  if (!activeId) return <ContentViewer selection={null} />;
+  // Keyed by project so one project's tab state never carries into another's.
+  return <ContentTabs key={activeId} projectId={activeId} />;
 }
 
 const REGISTRY: Record<PanelId, FunctionComponent> = {

@@ -305,12 +305,12 @@ describe('row context menu (in-project)', () => {
     const fileRow = await screen.findByText('README.md');
     const rowEl = fileRow.closest('div')!;
     const classNameBefore = rowEl.className;
-    expect(useContentSelection.getState().selections[PROJECT] ?? null).toBeNull();
+    expect(useContentSelection.getState().selectionFor(PROJECT)).toBeNull();
 
     fireEvent.contextMenu(fileRow);
     await screen.findByText(DOWNLOAD_LABEL);
 
-    expect(useContentSelection.getState().selections[PROJECT] ?? null).toBeNull();
+    expect(useContentSelection.getState().selectionFor(PROJECT)).toBeNull();
     expect(rowEl.className).toBe(classNameBefore);
     expect(rowEl.className).not.toMatch(/border-accent/);
   });

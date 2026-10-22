@@ -2177,6 +2177,60 @@ Unit/component coverage: `tabularCore.test.ts`, `tabularCap.test.ts`,
 `csvView.test.tsx`, plus the csv cases in `modeSwitcher.test.ts` and
 `content.test.tsx`.
 
+## Content Panel Tabs
+
+The Content panel shows a project's **open files as tabs** instead of a single
+selection. State is one `{ tabs, activeId }` slice per project in
+[src/renderer/content/selectionStore.ts](../src/renderer/content/selectionStore.ts)
+(`useContentSelection`); pure open/close/activate/parse logic lives in
+[src/renderer/content/tabState.ts](../src/renderer/content/tabState.ts) and the UI in
+[src/renderer/content/ContentTabs.tsx](../src/renderer/content/ContentTabs.tsx), hosted by
+`ContentPanelHost` (`workspace/panels.tsx`).
+
+```mermaid
+flowchart LR
+  C[Changes panel] -->|select| S[useContentSelection]
+  E[Explorer] -->|select| S
+  L[Link opener] -->|select| S
+  S -->|tabIdFor: fully-qualified path| T[tabState: open / reuse / close]
+  T --> P[(localStorage per project)]
+  S --> H[ContentPanelHost → ContentTabs]
+  H --> V[ContentViewer per visited tab]
+```
+
+- **Identity.** A tab's id is the file's fully-qualified path (`resolveAbsolutePath`:
+  worktree-or-project-root joined with the relative path; absolute for external files). The
+  same file opened from Changes, Explorer, a link, or the root-browse Explorer is one tab, and
+  the same relative path in two worktrees is two tabs. Re-opening an existing tab replaces its
+  selection with the latest opener's (`kind`/`baseline`/`oldPath`) and activates it. The label
+  is the filename; the full path is the tab's `title`.
+- **Writers are unchanged.** Changes, Explorer, and `openLinkTarget` call
+  `select(projectId, selection)`, now meaning "open or activate". A plain file open still
+  carries no `baseline` (see CLAUDE.md "A plain file-open selection must never carry a
+  `baseline`").
+- **Per-tab view state.** Every tab that has been in front stays mounted (hidden with
+  `invisible` + `pointer-events-none`, **not** `display:none`, so scroll offsets survive), so
+  its `ContentViewer` keeps its mode, zoom, scroll, and find state. Tabs restored from a
+  previous run mount lazily on first activation, so a restart issues no reads for every
+  remembered file. Switching projects remounts (state is not carried across projects), and
+  hidden tabs keep their data subscriptions live.
+- **Closing.** Closing the active tab activates its right neighbour, else the left; closing
+  the last tab restores the empty state. Middle-click and Delete/Backspace on a focused tab
+  also close; arrow keys/Home/End move between tabs.
+- **Persistence.** Each project's slice is saved to `localStorage`
+  (`agent-cockpit:content-tabs:v1:<projectId>`) on every change and read once (cached, so
+  selectors stay referentially stable) the first time a project is read. Parsing is defensive:
+  malformed entries are dropped, a dangling active id falls back to the first tab, and an
+  unreadable store degrades to no tabs. A restored tab whose file has since been removed shows
+  the viewer's normal missing-file state. The key is versioned; changing the stored shape needs
+  a new version and a migration.
+- **File naming trap.** The pure module is `tabState.ts`, not `contentTabs.ts`: on a
+  case-insensitive filesystem `./ContentTabs` resolves to `contentTabs.ts` before
+  `ContentTabs.tsx`.
+
+Unit/component coverage: `tabState.test.ts`, `tabPersistence.test.ts`, and the tab cases in
+`contentPanelHost.test.tsx`.
+
 ## Content Panel Highlighting
 
 The Content panel supports **Shiki-based syntax highlighting** for the text-class

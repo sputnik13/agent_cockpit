@@ -713,6 +713,11 @@ resize|capture-pane` request channels and forwards parsed notifications on
     `connected`, stopped on disconnect/eviction); every live session fans out its
     `projectId`-tagged events, and the renderer `panelDataSync` routes by
     `(projectId, category)` to the right `byProject` slice.
+- **Content tabs.** The Content panel renders the active project's open files as tabs (see
+  ARCHITECTURE "Content Panel Tabs"): `ContentPanelHost` → `ContentTabs` (strip + per-tab
+  `ContentViewer`), state in `selectionStore.ts` (per-project `{tabs, activeId}`), pure
+  open/close/parse logic in `tabState.ts`. All writers (Changes, Explorer, links) keep calling
+  `select(projectId, selection)`, which now means "open or activate".
 - **Content viewer.** `ContentViewer` dispatches through the single (class, mode) → component
   table in `modeSwitcher.tsx` (uniform Diff/Rendered/Raw modes per content class; runtime
   generic-binary AND oversized-json/yaml reclassification — see ARCHITECTURE "Content Modes &

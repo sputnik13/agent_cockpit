@@ -119,7 +119,7 @@ const SAMPLE_DIFF = [
 afterEach(() => {
   cleanup();
   // Reset zustand store state between tests.
-  useContentSelection.setState({ selections: {} });
+  useContentSelection.getState().resetAll();
   useNotesStore.setState({ notes: [] });
   useSettingsStore.setState({ settings: DEFAULT_SETTINGS });
 });

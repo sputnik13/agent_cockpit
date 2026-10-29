@@ -42,7 +42,16 @@ export interface PaneEntry {
   /** Last time the user accessed this pane (acquire/attach); background output
    *  does not count, so an idle pane is still eligible for reaping. */
   lastTouched: number;
+  /** Key of the font/theme last applied to this entry's renderer; lets a
+   *  re-mounting view skip a redundant {@link applyAppearance} (which drops the
+   *  shared cell-size cache and would trigger a client-size push). */
+  appearanceKey: string;
   dispose: () => void;
+}
+
+/** Identity of the settings that affect a renderer's appearance. */
+export function appearanceKeyOf(s: Pick<AppSettings, 'theme' | 'fontFamily' | 'fontSize'>): string {
+  return `${s.theme}|${s.fontFamily}|${s.fontSize}`;
 }
 
 const entries = new Map<string, PaneEntry>();
@@ -213,6 +222,7 @@ export function acquire(projectId: string, paneId: string): PaneEntry {
     projectId,
     paneId,
     lastTouched: Date.now(),
+    appearanceKey: appearanceKeyOf(s),
     dispose: () => {
       disposed = true;
       unbind();
@@ -432,6 +442,7 @@ export function invalidateCellSize(): void {
  *  against the refit-to-new-font entry. */
 export function applyAppearance(entry: PaneEntry, settings: AppSettings): void {
   entry.renderer.applyAppearance(settings);
+  entry.appearanceKey = appearanceKeyOf(settings);
   invalidateCellSize();
 }
 

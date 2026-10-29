@@ -108,10 +108,20 @@ safely falls back when it is absent.
 > version mismatch, run `npm install` (or `bin/setup`) to restore them. `npm run
 dev` and the test suite are unaffected.
 
-On macOS, the package signing hook ad-hoc-signs the two staged `cockpit-mux`
-Mach-O binaries, re-hashes their release manifest, then seals the enclosing
-app. It deliberately preserves Electron's vendor-framework signatures, which
-keeps both the mux launcher's SHA-256 verification and Electron startup valid.
+On macOS, the package signing hook ad-hoc-signs the staged `cockpit-mux`
+Mach-O binaries and the `remote-helper` darwin binary, re-hashes both release
+manifests, then seals the enclosing app. It deliberately preserves Electron's
+vendor-framework signatures, which keeps both the mux launcher's SHA-256
+verification and Electron startup valid. The helper's darwin binary is also the
+local `cockpit` CLI (the same Go source, invoked under the program name
+`cockpit`): at run time the app links it at `<userData>/callback/bin/cockpit`
+from the packaged `remote-helper/dist` (or the built `remote-helper/dist` in a
+dev run), so no separate CLI artifact is built or shipped. `build.sh` has no
+`darwin/amd64` target, so an Intel Mac has no local CLI. The link follows the app
+instance that last bound a listener: a Linux AppImage's resources are a per-run
+mount, so the link dangles between runs, and dev runs from several checkouts or
+worktrees share one profile and re-point it at the newest (see
+`electron/main/callback/cliLink.ts`).
 
 The packaged app also includes the exact `@wterm/ghostty` `ghostty-vt.wasm` binary
 as a dedicated resource. Electron serves only that asset through Cockpit's private

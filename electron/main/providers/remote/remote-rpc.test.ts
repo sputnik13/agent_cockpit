@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import {
   FrameDecoder,
   HelperRpcClient,
+  HelperRpcError,
   encodeFrame,
   type RpcStream,
 } from './rpcClient';
@@ -94,6 +95,28 @@ describe('frame codec', () => {
     }
     expect(decoded).toHaveLength(1);
     expect(decoded[0]).toEqual(payload);
+  });
+
+  // The framing now lives in src/shared/wire/frame.ts; these pin what this module
+  // still promises on top of it: the helper's 16 MiB cap and its typed error.
+  it('refuses to encode a payload over the helper\'s 16 MiB cap, with a HelperRpcError', () => {
+    const tooBig = 'x'.repeat((16 << 20) + 1);
+    expect(() => encodeFrame(tooBig)).toThrow(HelperRpcError);
+    expect(() => encodeFrame(tooBig)).toThrow(/^frame too large: \d+ bytes$/);
+  });
+
+  it('rejects a length header over 16 MiB before any body, with a HelperRpcError', () => {
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE((16 << 20) + 1, 0);
+    expect(() => new FrameDecoder().push(header)).toThrow(HelperRpcError);
+    expect(() => new FrameDecoder().push(header)).toThrow('frame too large: 16777217 bytes');
+  });
+
+  it('accepts a frame of exactly 16 MiB, the helper\'s own limit', () => {
+    const atCap = 'x'.repeat((16 << 20) - 2); // plus the two JSON quotes
+    const frame = encodeFrame(atCap);
+    expect(frame.length).toBe(4 + (16 << 20));
+    expect(new FrameDecoder().push(frame)).toEqual([atCap]);
   });
 });
 
@@ -268,6 +291,18 @@ describe('HelperRpcClient correlation', () => {
     });
     const client = new HelperRpcClient({ stdin: toServer, stdout: toClient });
     await expect(client.stat('/x')).rejects.toThrow(/boom/);
+  });
+
+  it('fails an in-flight call when the helper stream carries an oversize frame header', async () => {
+    const toClient = new PassThrough();
+    const toServer = new PassThrough();
+    const client = new HelperRpcClient({ stdin: toServer, stdout: toClient });
+    const pending = client.stat('/x');
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE((16 << 20) + 1, 0);
+    toClient.write(header);
+    await expect(pending).rejects.toThrow('frame too large: 16777217 bytes');
+    await expect(client.stat('/y')).rejects.toThrow('helper stream is closed');
   });
 
   it('dispatches a pushed watch event to the registered handler', async () => {

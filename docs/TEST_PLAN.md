@@ -309,6 +309,17 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   against the true maximum with no long frame gaps, and a 40 MiB file hitting
   the notice with no worker spawned.
 
+- **Terminal callback socket** (`src/shared/callback/`, `electron/main/callback/`,
+  `electron/main/providers/**`, `remote-helper/callback_*`): the wire codec round trip and
+  caps, with shared fixture files replayed by the Go mirror; identity (`TMUX_PANE` / the mux
+  key, the project derived from the receiving socket); envelope and argument validation; the
+  broker's decision order (allowlist, rate limit, status gate, `dispatched` before
+  classification); socket-path derivation and `lstat` checks; listener lifecycle, takeover and
+  inode-checked unlink; path classification; the startup environment scrub; and the injection
+  contracts (the `update-environment` element indices, mux operands, the shared-session gate,
+  explicit project addressing, ordering before `attached`). Scenario matrix and evidence:
+  [docs/test/terminal-callback-socket.md](test/terminal-callback-socket.md).
+
 ## Integration Scope
 
 - **Beads write surface** ([beadsWrite.test.ts](../electron/main/providers/local/beadsWrite.test.ts),
@@ -346,6 +357,15 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   covered by [providers/remote/tmuxControl.test.ts](../electron/main/providers/remote/tmuxControl.test.ts)
   using a fake channel (no live SSH): reconnect/backoff and notification
   resync.
+
+- **Terminal callback socket, real processes:** a real isolated tmux (`-L` private socket,
+  private `-f` config) proves the variables reach the first pane, later windows, splits and
+  `respawn-pane`, that the server's global environment stays clean, and that a variable-less
+  attach strips only callback variables; a live local mux daemon on a private home proves the
+  operands; the Go helper's tests run in-process over pipes with the test acting as main; and
+  the real Go helper, the real `cockpit` CLI and the real broker run together (one from a real
+  tmux pane). Remote control-mode injection and the SFTP upload are covered with fakes (a fake
+  control channel, a fake SFTP server); a live remote host is a verification gap (below).
 
 ## E2E Scope
 
@@ -441,6 +461,23 @@ history-limit` to `TERMINAL_SCROLLBACK` before `new-session`.
   asserts text then quiet graphics-seed ordering and retained pixels, and proves
   xterm receives no graphics seed. A newly launched
   daemon must deliberately omit graphics. No other interaction exception is allowed.
+
+- **Terminal callback acceptance** (`npm run test:e2e:callback`;
+  [tests/e2e/callback-open.spec.ts](../tests/e2e/callback-open.spec.ts) and
+  [tests/e2e/callback-acceptance.spec.ts](../tests/e2e/callback-acceptance.spec.ts) with
+  [tests/e2e/support/callbackRun.ts](../tests/e2e/support/callbackRun.ts)): serialized Playwright
+  specs against the BUILT app. Each run owns an Electron profile, tmux socket and `TMUX_TMPDIR`, mux
+  home and git projects under one short directory (the profile of the runs that exercise the `/tmp`
+  socket fallback is a separate directory under the OS temp dir), is launched with the OUTER app's
+  callback variables in its environment, and its teardown FAILS on any leftover process, socket, pane
+  shell or directory.
+  They type a real `"$COCKPIT_CLI" open …` into control-mode, session-per-tab and Cockpit mux panes
+  (including a split and a new window) and assert that the tab opens in the pane's own project only
+  and that the terminal keeps the keyboard; that panes made by the in-pane `cockpit-mux` commands lack
+  the variables; the worktree, symlink, external-file, stale-socket and missing-socket cases; a
+  relaunch with the tmux server and the mux daemon alive; and `deterministicSessionNames` (no
+  injection, exit 3, two installs sharing one tmux session). Detail and the mutation checks:
+  [docs/test/terminal-callback-socket.md](test/terminal-callback-socket.md).
 
 ### Cockpit mux state-space acceptance plan
 
@@ -591,6 +628,30 @@ Electron-context test runner. node-pty has the same constraint in
 unavailable. Go helper tests (`protocol_test.go`, `commands_test.go`,
 `watch_test.go`) run under `go test` independently of the Node/Electron runner.
 
+### Known Verification Gaps: Terminal Callback Socket
+
+These parts of the terminal callback socket are NOT verified; the full list is in
+[docs/test/terminal-callback-socket.md](test/terminal-callback-socket.md).
+
+- **No live remote host has been run (scenario 18: not executed).** The ssh hop, provisioning of the helper build, a reconnect
+  or half-open ssh drop during a request, remote tmux and mux panes receiving the variables, and
+  remote `set-environment` over a real control channel are covered only with fakes and in-process
+  tests. The live-remote acceptance scenario remains open.
+- **The first pane of a brand-new remote control-mode session** lacks the variables (the accepted
+  default); its behavior on a real host is unrecorded.
+- **Linux:** the helper's `SO_PEERCRED` check is compiled for linux/amd64 and linux/arm64 and has
+  Linux-only tests, but they have not run on a Linux kernel; everything was exercised on macOS.
+- **A packaged, notarized app:** a real `electron-builder` package, its notarization and the packaged
+  app launching the CLI from `Contents/Resources` have not been run (the signer was run on a
+  synthetic bundle only). An Intel Mac has no local CLI.
+- **The old-tmux floor:** the oldest supported tmux is not recorded and a genuinely old tmux has not
+  been run; the indexed-`update-environment` failure diagnostic is exercised with a fake runner and
+  an emulating wrapper.
+- **Leftover fallback sockets are not swept after a crash** (requirement 5 of the callback
+  requirements): the app does not remove a crashed profile's socket file (a restarted app replaces its
+  own project's file; others stay), and only the live harness cleans up its own run's files.
+- **Old remote helper builds are not pruned** (about 4 MB per os/arch per source change), by design.
+
 ### Quality Gates
 
 - `npm run typecheck` (project references for main + renderer).
@@ -598,6 +659,8 @@ unavailable. Go helper tests (`protocol_test.go`, `commands_test.go`,
 - `npm run test` (vitest; remote-helper excluded — covered by `go test`).
 - `go test ./...` in `remote-helper/`.
 - `npm run build` produces a runnable Electron artifact.
+- `npm run test:e2e:callback` (builds, then drives the built app: the terminal
+  callback acceptance suite).
 
 ## Acceptance Tests
 
@@ -621,6 +684,12 @@ These map 1:1 to the Requirements acceptance criteria:
   across restart (FR-11). Currently a manual smoke pending the E2E harness.
 - Renderer surfaces are styled through shared roles/components, not per-element
   inline styles.
+- From a pane on each local backend, `"$COCKPIT_CLI" open ./README.md` opens or
+  activates the file's tab in the pane's own project with the terminal keeping the
+  keyboard, and two projects never cross; with the project disconnected, never
+  activated, or a stale or missing socket, the CLI exits non-zero within 5 s and the
+  UI does not change; after an app restart a re-activated project's pane still works
+  (FR-15, NFR-7; `npm run test:e2e:callback`; the remote variant is a known gap).
 
 ## Linked Documents
 
@@ -629,3 +698,5 @@ These map 1:1 to the Requirements acceptance criteria:
 - [docs/DESIGN.md](DESIGN.md) — the components under test.
 - [docs/ARCHITECTURE.md](ARCHITECTURE.md) — boundaries the security checks
   enforce.
+- [docs/test/terminal-callback-socket.md](test/terminal-callback-socket.md) — terminal
+  callback socket scenarios, evidence and verification gaps.

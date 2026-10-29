@@ -14,7 +14,8 @@ import type {
   TerminalWriteKind,
   WorkspaceProvider,
 } from '../providers/types';
-import { sessionManager } from '../providers';
+import { callbackBroker, localCallbackEnvironment, sessionManager } from '../providers';
+import { forwardCallbackOpens } from '../callback/rendererForward';
 import { diffCache } from '../providers/diffCache';
 import {
   addProject,
@@ -35,8 +36,8 @@ import type { AppSettings } from '@shared/settings';
 import { loadSettings, saveSettings } from '../config';
 import { listSystemFonts } from '../fonts';
 import { killCockpitSession, killDetachedCockpitSessions, listCockpitSessions } from '../sessions';
-import { LocalTmuxControlManager } from '../providers/local/tmuxControl';
-import { sessionNameToken } from '../providers/sessionKey';
+import type { LocalTmuxControlManager } from '../providers/local/tmuxControl';
+import { createLocalControlManager } from '../providers/local/controlManager';
 import { RemoteProvider } from '../providers/remote';
 import {
   refreshClientPauseAfter,
@@ -83,6 +84,21 @@ function providerFor(projectId?: string): WorkspaceProvider {
   const p = sessionManager.get(projectId);
   if (!p) throw new SessionGoneError(projectId);
   return p;
+}
+
+/**
+ * Wait for a LOCAL session's pending callback-socket bind. Every terminal and
+ * control-mode attach injects the socket path as it stands when it is created,
+ * and this IPC layer addresses the provider directly (`providerFor`), not through
+ * `SessionManager.open()`; `connected` reaches the renderer before the bind
+ * completes. Without the wait an attach could carry no socket, and the
+ * server-wide `update-environment` entries would then strip the values its session
+ * already held. A remote session has nothing to wait for. Delays no status event.
+ */
+function callbackReadyFor(provider: WorkspaceProvider): Promise<void> {
+  return provider.kind === 'local'
+    ? sessionManager.callbackReady(provider.projectId)
+    : Promise.resolve();
 }
 
 function requireString(v: unknown, name: string): string {
@@ -144,13 +160,17 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     }
   };
 
-  // send() is kept for channels that should only go to the main window (status,
-  // terminal data, watch, etc.). Log events use broadcast().
-  const send = (channel: string, payload: unknown): void => {
+  // sendToMainWindow() is for channels that should only go to the main window
+  // (status, terminal data, watch, callback open, etc.); it reports whether a live
+  // window received the push. Log events use broadcast().
+  const sendToMainWindow = (channel: string, payload: unknown): boolean => {
     const win = getWindow();
-    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
-      win.webContents.send(channel, payload);
-    }
+    if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return false;
+    win.webContents.send(channel, payload);
+    return true;
+  };
+  const send = (channel: string, payload: unknown): void => {
+    sendToMainWindow(channel, payload);
   };
   // Keyed by (projectId, terminalId): the renderer terminal id (`t1`/`run`) is
   // not unique across projects, so keying by id alone let a second project's
@@ -185,6 +205,14 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     diffCache.onWatch(projectId, event.paths, worktreePath);
     send(Channels.evtWatch, { projectId, worktreePath, event });
   });
+
+  // A terminal's `cockpit open` (CallbackBroker, after path classification) goes
+  // to the MAIN window only, tagged with the project whose socket carried it. The
+  // renderer records the tab in that project's slice and reveals the Content panel
+  // only for the active project; main never switches projects for it.
+  forwardCallbackOpens(callbackBroker, (payload) =>
+    sendToMainWindow(Channels.evtCallbackOpen, payload),
+  );
 
   // IPC cache cleanup on provider eviction (D2/FR5).
   // When a provider is evicted (disconnect/reconnect/close/failed-connect), the
@@ -578,6 +606,7 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
   };
   ipcMain.handle(Channels.terminalOpen, async (_e, req: { opts: never; projectId?: string }) => {
     const provider = providerFor(req?.projectId);
+    await callbackReadyFor(provider);
     // A renderer reload re-opens a named mux terminal while its main-process
     // manager survives. Drop the stale renderer binding before the manager
     // re-attaches and produces its fresh screen seed; the new binding below
@@ -602,6 +631,7 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       if (direction !== undefined && direction !== 'horizontal' && direction !== 'vertical')
         throw new Error('direction must be horizontal or vertical');
       const provider = providerFor(req?.projectId);
+      await callbackReadyFor(provider);
       const { id } = await provider.splitMuxTerminal(
         requireString(req?.sourceId, 'sourceId'),
         requireString(req?.terminalId, 'terminalId'),
@@ -615,6 +645,7 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
     Channels.terminalNewWindow,
     async (_e, req: { sourceId: string; terminalId: string; projectId?: string }) => {
       const provider = providerFor(req?.projectId);
+      await callbackReadyFor(provider);
       const { id } = await provider.newMuxWindow(
         requireString(req?.sourceId, 'sourceId'),
         requireString(req?.terminalId, 'terminalId'),
@@ -751,8 +782,15 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
           project && project.connection.kind === 'local'
             ? project.connection.rootPath
             : process.cwd();
-        const token = sessionNameToken(loadSettings().deterministicSessionNames, pid, rootPath);
-        mgr = new LocalTmuxControlManager(token, rootPath);
+        // ONE settings read names this manager's session AND decides whether
+        // callback injection may write to it; it is captured here and never
+        // re-read (a rebuilt manager reads again, and names a different session).
+        mgr = createLocalControlManager({
+          projectId: pid,
+          rootPath,
+          deterministicSessionNames: loadSettings().deterministicSessionNames,
+          callbackEnvironment: localCallbackEnvironment(pid),
+        });
         // Background %output counts as session activity (idle aging-out).
         mgr.onOutputActivity = () => sessionManager.touch(pid);
         // Surface a wedged control link to diagnostics (the FAIL threshold drops
@@ -830,8 +868,15 @@ export function registerIpc(getWindow: WinGetter, openDiagnostics: OpenDiagnosti
       // even after the command-routing fix, so a project switch racing main's
       // own activeId update could open/attach the WRONG project's control
       // manager under the guise of "opening" the intended one.
-      const { mgr, sessionName, projectId: pid } = activeControl(req?.projectId);
-      const provider = providerFor(req?.projectId);
+      //
+      // Resolve the addressed session ONCE (an ambient request must not drift to
+      // another project across the wait), then wait for a local session's pending
+      // callback-socket bind BEFORE the manager is built or opened, so the attach
+      // carries the socket. The wait delays no status event.
+      const target = providerFor(req?.projectId);
+      await callbackReadyFor(target);
+      const { mgr, sessionName, projectId: pid } = activeControl(target.projectId);
+      const provider = providerFor(pid);
       if (provider.kind === 'local') {
         // LocalTmuxControlManager.open() is synchronous; cast for unified call.
         (mgr as LocalTmuxControlManager).open({ cols: req?.cols, rows: req?.rows });

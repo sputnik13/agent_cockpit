@@ -7,8 +7,11 @@
  *   1. Detect the remote os/arch via `uname -sm` over an ssh exec channel.
  *   2. Pick the matching prebuilt binary from remote-helper/dist (selected by
  *      the local manifest.json) and SFTP-upload it to
- *      ~/.agent-cockpit/helper-<version>-<os>-<arch>, chmod +x. Re-upload is
- *      skipped when a binary of the same name already exists remotely.
+ *      ~/.agent-cockpit/helper-<version>-<sourceHash12>-<os>-<arch> (see
+ *      `remoteHelperFilename`: keyed on the build's source hash, so one path is one
+ *      build forever), chmod +x, by uploading beside and renaming into place.
+ *      Re-upload is skipped when that build's binary already exists remotely and
+ *      reports the same source hash.
  *   3. Launch it via an ssh exec channel whose stdio is the RPC transport and
  *      perform the `handshake`. On a protocol-version mismatch we re-provision
  *      and relaunch exactly once.
@@ -20,7 +23,12 @@
 import { readFile, access } from 'node:fs/promises';
 import { join, resolve as pathResolve } from 'node:path';
 import { app } from 'electron';
-import { HelperRpcClient, PROTOCOL_VERSION, type RpcStream } from './rpcClient';
+import {
+  HelperRpcClient,
+  PROTOCOL_VERSION,
+  type HandshakeResult,
+  type RpcStream,
+} from './rpcClient';
 import type { ProvisionSession, RemoteTransport } from './transportTypes';
 import { logger } from '../../logger';
 
@@ -58,7 +66,9 @@ interface HelperManifest {
 }
 
 /**
- * Resolve the local remote-helper/dist directory.
+ * Resolve the local remote-helper/dist directory. Exported because the local
+ * `cockpit` CLI is the same Go binary this directory ships for the host platform
+ * (callback/cliLink.ts).
  *
  * Dev (not packaged): __dirname is out/main at runtime (electron-vite bundles
  * to out/main/index.js). Two levels up from out/main reaches the repo root,
@@ -73,19 +83,49 @@ interface HelperManifest {
  * (macOS) or resources/remote-helper/dist (Linux). process.resourcesPath
  * points to that Resources directory on all platforms.
  */
-function distDir(): string {
+export function helperDistDir(): string {
   if (app.isPackaged) {
     return join(process.resourcesPath, 'remote-helper', 'dist');
   }
   return pathResolve(__dirname, '..', '..', 'remote-helper', 'dist');
 }
 
+/** How many leading hex characters of the source hash name a remote helper file. */
+const HASH_PREFIX_LENGTH = 12;
+
+/**
+ * The remote file name of one helper build.
+ *
+ * With the build's source hash in the manifest the name is KEYED ON IT:
+ * `helper-<version>-<sourceHash12>-<os>-<arch>`. A path then holds one specific
+ * build for good, which is what the helper's per-os/arch `cockpit` link relies on
+ * (it points at the helper's own executable path): a second app build or checkout
+ * provisioning the same host writes a DIFFERENT file, so it can neither swap the
+ * bytes under a link another build's helper made nor have its own overwritten by an
+ * older app. Two builds share a name only if their sources hash alike.
+ *
+ * A manifest without a usable hash (older builds) keeps the unkeyed name from the
+ * manifest, the pre-hash behaviour.
+ */
+export function remoteHelperFilename(
+  manifest: Pick<HelperManifest, 'version' | 'sourceHash'>,
+  binary: Pick<ManifestBinary, 'os' | 'arch' | 'filename'>,
+): string {
+  const hash = manifest.sourceHash;
+  if (hash === undefined || !/^[0-9a-f]{12,}$/.test(hash)) return binary.filename;
+  return `helper-${manifest.version}-${hash.slice(0, HASH_PREFIX_LENGTH)}-${binary.os}-${binary.arch}`;
+}
+
 /** A launched helper: the live RPC client plus its underlying channel handle. */
 export interface LaunchedHelper {
   client: HelperRpcClient;
+  /** What the helper answered the handshake with, including (when a project id was
+   *  sent and the helper could serve one) the project's `callbackSock`/`cliPath`. */
+  handshake: HandshakeResult;
   /** Channel-level close handle for the launched helper's exec stream. */
   channel: { close(): void };
-  /** The remote path the helper was launched from. */
+  /** The remote path the helper was launched from (keyed on the source hash; see
+   *  `remoteHelperFilename`). */
   remotePath: string;
   /** Helper release version reported by the manifest. */
   version: string;
@@ -109,14 +149,33 @@ function normalizeArch(unameM: string): string {
   return m;
 }
 
+/** Options that shape how the helper is launched and handshaken. */
+export interface RemoteHelperLauncherOptions {
+  /** The project this helper serves. Sent in the handshake, so the helper binds
+   *  that project's callback socket; omitted, the helper starts no listener. */
+  projectId?: string;
+  /**
+   * Called with the new RPC client BEFORE the handshake is sent. The helper's
+   * callback listener starts serving while it handles the handshake, so a request
+   * from a pane that outlived the previous app run can be forwarded as an event
+   * ahead of the handshake reply — before `launch()` resolves. Handlers registered
+   * here cannot miss it; handlers registered after `launch()` returns can. Called
+   * once per launch attempt (a protocol-mismatch retry builds a new client), so a
+   * caller that registers handlers must replace the previous ones. A throw fails the
+   * launch (phase `launch`).
+   */
+  onClient?: (client: HelperRpcClient) => void;
+}
+
 export class RemoteHelperLauncher {
   constructor(
     private readonly transport: RemoteTransport,
     private readonly artifacts?: string,
+    private readonly options: RemoteHelperLauncherOptions = {},
   ) {}
 
   private artifactDir(): string {
-    return this.artifacts ?? distDir();
+    return this.artifacts ?? helperDistDir();
   }
 
   /** Read and parse the local dist manifest. */
@@ -220,7 +279,7 @@ export class RemoteHelperLauncher {
     }
 
     const remoteDir = `./${REMOTE_DIR}`;
-    const remotePath = `${remoteDir}/${binary.filename}`;
+    const remotePath = `${remoteDir}/${remoteHelperFilename(manifest, binary)}`;
     const ctx = 'remote-helper';
 
     const session: ProvisionSession = await this.beginProvision();
@@ -228,10 +287,13 @@ export class RemoteHelperLauncher {
       const exists = await session.exists(remotePath);
 
       if (!exists) {
-        // Binary is absent: upload fresh.
+        // Binary is absent: upload fresh. Uploaded beside and renamed into place, so
+        // the final name only ever holds a complete binary: a dropped connection
+        // cannot leave a truncated file that a later launch (or the `cockpit` link,
+        // which targets this very path) would trust.
         logger.info(`helper: uploading (absent at ${remotePath})`, ctx);
         await session.mkdirp(remoteDir);
-        await session.uploadExecutable(localPath, remotePath, 0o755);
+        await session.replaceExecutable(localPath, remotePath, 0o755);
       } else if (manifest.sourceHash) {
         // Binary is present and the manifest carries a source hash: check
         // whether the remote is running the same build.
@@ -243,7 +305,13 @@ export class RemoteHelperLauncher {
             `helper: replacing (remote=${remoteHash ?? 'error'} local=${manifest.sourceHash.slice(0, 12)}…)`,
             ctx,
           );
-          await session.uploadExecutable(localPath, remotePath, 0o755);
+          // With a hash-keyed name a file here that reports another hash is damaged
+          // (a truncated upload from before uploads were atomic) or foreign, never
+          // "another build". Upload beside, then rename over: a helper left running
+          // from this path (a predecessor of a half-open ssh drop, or another app
+          // instance) keeps its inode, where an in-place overwrite would fail with
+          // "text file busy".
+          await session.replaceExecutable(localPath, remotePath, 0o755);
         }
       } else {
         // Legacy: no sourceHash in manifest — existence-only check (no re-upload).
@@ -303,9 +371,19 @@ export class RemoteHelperLauncher {
       // decoder's failAll fires on the readable's end/error).
       const channel = { close: () => stream.stdin.end() };
       const client = new HelperRpcClient(stream);
+      try {
+        this.options.onClient?.(client);
+      } catch (err) {
+        channel.close();
+        throw new HelperLaunchError(
+          `onClient hook failed: ${err instanceof Error ? err.message : String(err)}`,
+          'launch',
+          err,
+        );
+      }
       let result;
       try {
-        result = await client.handshake();
+        result = await client.handshake(this.options.projectId);
       } catch (err) {
         channel.close();
         throw new HelperLaunchError(
@@ -321,7 +399,7 @@ export class RemoteHelperLauncher {
           'handshake',
         );
       }
-      return { client, channel, remotePath, version };
+      return { client, handshake: result, channel, remotePath, version };
     };
 
     try {

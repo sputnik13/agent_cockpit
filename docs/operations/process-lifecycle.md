@@ -86,8 +86,9 @@ The integration test now gets a unique `ac-test-*` socket and kills its server
 after each test. If startup fails after tmux has created the test server, the
 fixture closes the manager and kills that exact server before skipping. Packaged
 E2E, explicitly isolated-development, and `bin/run-isolated` runs set a unique
-socket, enable ephemeral `exit-empty on`, and kill only that socket during
-teardown.
+socket, keep `exit-empty off` (the isolated server is only ever started by a
+variable-free process; it is not allowed to exit on its own), and kill only that
+exact socket during teardown.
 The isolated launcher starts a detached guardian before packaging; it watches
 the launcher and app identities, owns cleanup of the unique socket/profile,
 and removes an incomplete build directory if the launcher dies before app

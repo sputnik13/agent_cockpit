@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DockviewApi, DockviewReadyEvent } from './Workspace';
 import { Workspace } from './Workspace';
 import { dockviewComponents } from './panels';
-import { applyPreset, type ColumnRatio, type PresetName } from './presets';
+import { applyPreset, panelOptions, type ColumnRatio, type PresetName } from './presets';
 import { activeViewKey, layoutKey } from './layoutKeys';
 import { readFocus, writeFocus } from './focusMemory';
-import { PANEL_TITLES, PanelIds, type PanelId } from './panelIds';
+import { PanelIds, type PanelId } from './panelIds';
+import { revealContentWithoutFocus, type RevealOutcome } from './panelReveal';
 import { useProjectsStore } from '../providerClient';
 import { focusPanel, focusPanelForce, setFocusSuppressed } from './panelFocus';
 import { useWorkspaceControlsStore } from './workspaceControlsStore';
@@ -13,6 +14,11 @@ import { useWorkspaceControlsStore } from './workspaceControlsStore';
 /** Last view used for a project (defaults to edit). */
 function readView(projectId: string): PresetName {
   return localStorage.getItem(activeViewKey(projectId)) === 'review' ? 'review' : 'edit';
+}
+
+/** Save `api`'s layout for a project and view (done on every Dockview layout-change event). */
+function persistLayout(api: DockviewApi, projectId: string | null, view: PresetName): void {
+  if (projectId) localStorage.setItem(layoutKey(projectId, view), JSON.stringify(api.toJSON()));
 }
 
 /**
@@ -28,6 +34,14 @@ export function CockpitWorkspace(): JSX.Element {
   // The layout-change saver is registered once, so it reads the live view here.
   const viewRef = useRef<PresetName>(view);
   viewRef.current = view;
+  // Which project's layout (and view) Dockview is showing RIGHT NOW. `activeId` flips
+  // before the effect below rebuilds the layout, so for a render or two the workbench
+  // still shows the previous project's panels: anything that acts on "the layout" (the
+  // callback-open reveal, saving it) must key on this, never on `activeId`.
+  const loadedRef = useRef<{ projectId: string | null; view: PresetName }>({
+    projectId: null,
+    view: 'edit',
+  });
 
   // Applying a layout/preset activates panels in a cascade; suppress keyboard
   // focus during it so it does not thrash, then clear on the next frame (covers
@@ -35,6 +49,7 @@ export function CockpitWorkspace(): JSX.Element {
   // restoreFocusedPanel runs after and uses focusPanelForce to bypass this.
   const loadLayout = useCallback(
     (api: DockviewApi, projectId: string | null, which: PresetName) => {
+      loadedRef.current = { projectId, view: which };
       setFocusSuppressed(true);
       try {
         const saved = projectId ? localStorage.getItem(layoutKey(projectId, which)) : null;
@@ -72,10 +87,9 @@ export function CockpitWorkspace(): JSX.Element {
       apiRef.current = event.api;
       loadLayout(event.api, activeId, viewRef.current);
       restoreFocusedPanel(event.api, useProjectsStore.getState().activeId);
-      event.api.onDidLayoutChange(() => {
-        const id = useProjectsStore.getState().activeId;
-        if (id) localStorage.setItem(layoutKey(id, viewRef.current), JSON.stringify(event.api.toJSON()));
-      });
+      event.api.onDidLayoutChange(() =>
+        persistLayout(event.api, loadedRef.current.projectId, loadedRef.current.view),
+      );
       // Remember which panel has focus per project, so a switch-back restores it,
       // and move keyboard focus into the newly active panel (tab click, menu-open
       // via addPanel). Suppressed during layout/preset application.
@@ -201,10 +215,30 @@ export function CockpitWorkspace(): JSX.Element {
       existing.api.setActive();
       return;
     }
-    api.addPanel({ id, component: 'panel-host', params: { panelId: id }, title: PANEL_TITLES[id] });
+    api.addPanel(panelOptions(id));
   };
   const openPanelRef = useRef(openPanel);
   openPanelRef.current = openPanel;
+
+  /**
+   * Show the Content panel for a terminal's `cockpit open` for `projectId` without
+   * moving focus. Refused while Dockview still shows another project's layout (a
+   * project switch in flight): revealing, or saving, would act on the wrong project.
+   */
+  const revealContent = (projectId: string): RevealOutcome => {
+    const api = apiRef.current;
+    if (!api) return 'unavailable';
+    const loaded = loadedRef.current;
+    if (loaded.projectId !== projectId) return 'not-loaded';
+    const outcome = revealContentWithoutFocus(api);
+    // Switching the visible tab of a group that is not the active one emits none of
+    // the events the layout-change listener above watches, so save it here or a
+    // restart would restore the old tab. (A re-added panel is saved by its add event.)
+    if (outcome === 'revealed') persistLayout(api, loaded.projectId, loaded.view);
+    return outcome;
+  };
+  const revealContentRef = useRef(revealContent);
+  revealContentRef.current = revealContent;
 
   // Publish the workbench controls to the shell top bar (ProjectTabs renders
   // them). Handlers are wrapped over refs so they stay stable for the store
@@ -216,6 +250,7 @@ export function CockpitWorkspace(): JSX.Element {
       choosePreset: (next) => choosePresetRef.current(next),
       openPanel: (id) => openPanelRef.current(id),
       resetTo: (ratio) => resetToRef.current(ratio),
+      revealContent: (projectId) => revealContentRef.current(projectId),
     });
     return () => useWorkspaceControlsStore.setState({ available: false });
   }, []);

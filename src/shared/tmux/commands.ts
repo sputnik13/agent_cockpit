@@ -53,6 +53,18 @@ export function resizePane(paneId: string, opts: { x?: number; y?: number }): st
   return cmd;
 }
 
+/**
+ * `set-environment` of ONE variable on an EXACT session (`-t '=<name>'`; the `=`
+ * prefix refuses a prefix or pattern match, so it can never land on another
+ * session). A session's environment is what every later window, split and
+ * `respawn-pane` of that session inherits. Target and value are single-quoted
+ * for tmux's command parser, so spaces and shell metacharacters survive.
+ */
+export function setSessionEnvironment(sessionName: string, name: string, value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`invalid environment name: ${name}`);
+  return `set-environment -t ${shellQuote(`=${sessionName}`)} ${name} ${shellQuote(value)}`;
+}
+
 /** Report the control client's overall size; tmux re-emits layout. */
 export function refreshClientSize(cols: number, rows: number): string {
   return `refresh-client -C ${Math.max(1, Math.floor(cols))}x${Math.max(1, Math.floor(rows))}`;

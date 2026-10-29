@@ -16,12 +16,13 @@
  */
 import { spawnSync } from 'node:child_process';
 import * as pty from 'node-pty';
+import type { CallbackEnvironmentSource } from '@shared/callback/env';
 import { withNativeArch } from './nativeArch';
+import { startTmuxServer, tmuxClientEnv } from './tmuxServer';
+import { resolveCallbackEnvironment } from '../../callback/resolveEnvironment';
 import { tmuxSocket } from '../../instanceConfig';
 import {
   TERMINAL_TERM,
-  tmuxServerOptionArgs,
-  terminalPaneEnv,
   TmuxControlParser,
   buildSendKeysCommands,
   capturePane as capturePaneCmd,
@@ -140,11 +141,22 @@ export class LocalTmuxControlManager {
   /** True once the current stall episode has fired onUnresponsive (warn-once). */
   private unresponsiveWarned = false;
 
+  /**
+   * `callbackEnvironment`, when given, enables callback injection for THIS manager
+   * (docs/design/terminal-callback-socket.md, "Environment injection"): its
+   * project's values ride the attaching client's environment and the local-only
+   * `update-environment` entries copy them into the session. Absent means
+   * DISABLED for this manager — and the owner decides that once, at creation, from
+   * the very settings read that chose `sessionToken` (requirement 12: a manager
+   * that attached a shared session must never write to it, whatever the setting
+   * says later), so it is a constructor argument and never re-read here.
+   */
   constructor(
     private readonly sessionToken: string,
     private readonly rootPath: string,
     socket = SOCKET,
     private readonly configPath?: string,
+    private readonly callbackEnvironment?: CallbackEnvironmentSource,
   ) {
     this.socket = socket;
   }
@@ -170,7 +182,14 @@ export class LocalTmuxControlManager {
     if (!hasTmux()) throw new Error('tmux is not available');
     const cols = opts?.cols ?? 80;
     const rows = opts?.rows ?? 24;
-    const env = terminalPaneEnv(process.env);
+    // This project's callback variables (if its listener is bound) ride the
+    // ATTACHING CLIENT's environment only: tmux copies them into the session via
+    // the local-only `update-environment` entries. Never `process.env`, and never
+    // the server-start process below.
+    const env = tmuxClientEnv(
+      process.env,
+      resolveCallbackEnvironment(this.callbackEnvironment, `session=${this.sessionName()}`),
+    );
     const configArgs = this.configPath ? ['-f', this.configPath] : [];
     // Set the GLOBAL history-limit on the socket BEFORE the first new-session.
     // `new-session -A` creates the initial pane as part of session creation
@@ -195,14 +214,17 @@ export class LocalTmuxControlManager {
     // `uname -m` = x86_64 despite the arm64 client wrapper. Wrapping the
     // `set -g` sub-commands chained after it via the literal `;` is harmless (they
     // target the server it just started).
-    const srv = withNativeArch('tmux', [
-      ...configArgs,
-      '-L',
-      this.socket,
-      'start-server',
-      ...tmuxServerOptionArgs({ exitEmpty: process.env['AC_TMUX_EPHEMERAL'] === '1' }),
-    ]);
-    spawnSync(srv.file, srv.args, { stdio: 'ignore' });
+    //
+    // The server-start spawn carries NO callback variables (its environment becomes
+    // every project's global environment), and the chain ends with the local-only
+    // `update-environment` entries when callback injection is enabled for this
+    // manager. Both live in startTmuxServer, shared with the session-per-tab opener.
+    startTmuxServer({
+      socket: this.socket,
+      ...(this.configPath ? { configPath: this.configPath } : {}),
+      callbackEnvironment: this.callbackEnvironment !== undefined,
+      env: process.env,
+    });
     // Wrap with arch -arm64 when translated under Rosetta (no-op otherwise) so
     // the control-mode tmux client attaches native; the server above is already
     // born native via the same wrapper.

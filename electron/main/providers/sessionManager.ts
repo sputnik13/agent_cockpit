@@ -18,6 +18,10 @@
  * This is never an eager fanout across every known worktree: a worktree's
  * extra watch follows the active SELECTION, not the worktree LIST, mirroring
  * this class's own "liveness is lazy" principle for sessions themselves.
+ *
+ * A LOCAL session also owns its terminal callback socket (`deps.callback`),
+ * on exactly the watch's lifecycle: started on the edge into `connected`,
+ * stopped on the edge into `disconnected`/`failed` AND on eviction/`closeAll`.
  */
 import type {
   ConnectionSpec,
@@ -53,6 +57,21 @@ export interface SessionManagerDeps {
    * aging-out). Defaults to `Date.now`.
    */
   now?: () => number;
+  /**
+   * Terminal callback socket lifecycle for LOCAL sessions (remote projects'
+   * socket is served by their helper). Optional: absent means no callback socket.
+   */
+  callback?: SessionCallbackLifecycle;
+}
+
+/**
+ * Start/stop of a local session's callback socket (the CallbackBroker). Both
+ * calls are idempotent and must not throw; `start` is only ever made for a
+ * `local` session, `stop` may be made for any.
+ */
+export interface SessionCallbackLifecycle {
+  start(projectId: string): Promise<void>;
+  stop(projectId: string): Promise<void>;
 }
 
 /** Strip a trailing slash (except a bare `/`), for stable path comparison. */
@@ -115,6 +134,9 @@ export class SessionManager {
    *  EDGE into `connected` and only tear down on the edge into a terminal
    *  state — not on every repeated status emission. */
   private lastState = new Map<string, ConnectionStatus['state']>();
+  /** A local session's listener start still in flight (see {@link callbackReady}).
+   *  Entries never reject and are removed once they settle. */
+  private callbackStarts = new Map<string, Promise<void>>();
   private readonly now: () => number;
 
   constructor(
@@ -162,9 +184,61 @@ export class SessionManager {
     this.lastState.set(projectId, status.state);
     this.deps.onStatus?.(projectId, status);
     if (status.state === 'connected') {
-      if (prev !== 'connected') void this.startWatch(projectId);
+      if (prev !== 'connected') {
+        void this.startWatch(projectId);
+        this.trackCallbackStart(projectId);
+      }
     } else if (status.state === 'disconnected' || status.state === 'failed') {
       void this.stopWatch(projectId);
+      void this.stopCallback(projectId);
+    }
+  }
+
+  /** Start a local session's callback socket and remember the start while it runs. */
+  private trackCallbackStart(projectId: string): void {
+    const start = this.startCallback(projectId);
+    this.callbackStarts.set(projectId, start);
+    const clear = (): void => {
+      if (this.callbackStarts.get(projectId) === start) this.callbackStarts.delete(projectId);
+    };
+    void start.then(clear, clear);
+  }
+
+  /**
+   * Resolves once the local callback listener start of `projectId`'s session, if
+   * one is in flight, has settled (immediately otherwise); never rejects.
+   *
+   * Anything that creates or attaches a terminal injects the socket path as it
+   * stands at that moment, so it must wait for this first. `connected` is
+   * reported to the renderer BEFORE the bind completes, and the renderer's
+   * terminal and control-mode IPC resolves the provider with `get()`, not through
+   * `open()`: without the wait, a control-mode attach could read no socket,
+   * attach with no variables, and the server-wide `update-environment` entries
+   * would then STRIP the values its session already held. Waiting delays no
+   * status event: `onStatus` still fires first, synchronously.
+   */
+  callbackReady(projectId: string): Promise<void> {
+    return this.callbackStarts.get(projectId) ?? Promise.resolve();
+  }
+
+  /** Start a LOCAL session's callback socket (best-effort: a project whose socket
+   *  cannot be served simply has no callback; it never fails the session). */
+  private async startCallback(projectId: string): Promise<void> {
+    const provider = this.sessions.get(projectId);
+    if (!this.deps.callback || provider?.kind !== 'local') return;
+    try {
+      await this.deps.callback.start(projectId);
+    } catch {
+      /* the broker logs its own failures */
+    }
+  }
+
+  /** Stop a session's callback socket; part of the same symmetric teardown as `stopWatch`. */
+  private async stopCallback(projectId: string): Promise<void> {
+    try {
+      await this.deps.callback?.stop(projectId);
+    } catch {
+      /* best-effort teardown */
     }
   }
 
@@ -334,6 +408,7 @@ export class SessionManager {
    *  symmetric-teardown invariant. */
   private notifyEviction(projectId: string): void {
     void this.stopWatch(projectId);
+    void this.stopCallback(projectId);
     this.lastState.delete(projectId);
     // Bounded bookkeeping cleanup (mirrors lastState.delete above): an
     // evicted project's setActiveWorktree call sequence has no further use.
@@ -344,7 +419,12 @@ export class SessionManager {
   /** Create (if needed) and connect a project's provider without activating it. */
   async open(projectId: string): Promise<WorkspaceProvider> {
     const existing = this.sessions.get(projectId);
-    if (existing) return existing;
+    if (existing) {
+      // A caller that raced the first open() must not get the session before its
+      // socket is bound either (see the end of this method).
+      await this.callbackReady(projectId);
+      return existing;
+    }
     const spec = this.deps.loadSpec(projectId);
     if (!spec) throw new Error(`no project/connection spec for '${projectId}'`);
     const provider = this.registry.create({ projectId, spec });
@@ -384,6 +464,14 @@ export class SessionManager {
     }
     // Every live session is fully live (no warm/hot distinction). The watch is
     // started by handleStatus when the provider reaches `connected`.
+    //
+    // A local session's callback socket is bound BEFORE the session is handed
+    // out: its terminals inject the socket path at creation, and the first
+    // terminal created right after `open()` resolves (a restored tab, a first
+    // control-mode attach) would otherwise race the bind and start without the
+    // variables, for the whole life of its tmux session. The start never rejects.
+    // (IPC paths that do not go through open() wait on callbackReady() themselves.)
+    await this.callbackReady(projectId);
     return provider;
   }
 
@@ -499,6 +587,9 @@ export class SessionManager {
     const all = [...this.sessions.values()];
     this.sessions.clear();
     this.activityAt.clear();
+    // Started before the first await: the app does not await closeAll() at quit,
+    // and this unlinks each callback socket synchronously.
+    const callbackStops = all.map((p) => this.stopCallback(p.projectId));
     // Union of both watch maps' keys: a project can in principle hold an
     // extra worktree-watch subscription with no primary watch sub (e.g. the
     // primary subscribeWatch failed best-effort while setActiveWorktree still
@@ -506,6 +597,7 @@ export class SessionManager {
     // worktree watch on shutdown — stopWatch tears down both per project.
     const watchProjectIds = new Set([...this.watchSubs.keys(), ...this.worktreeWatchSubs.keys()]);
     for (const id of watchProjectIds) await this.stopWatch(id);
+    await Promise.all(callbackStops);
     this.lastState.clear();
     this.worktreeWatchSeq.clear();
     for (const id of [...this.statusOff.keys()]) this.unwireStatus(id);

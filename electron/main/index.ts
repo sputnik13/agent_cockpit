@@ -1,9 +1,14 @@
+// MUST stay the FIRST import: it scrubs the OUTER cockpit app's callback variables
+// from process.env as it is evaluated, before any other module of the app is (this
+// app is routinely launched from inside a cockpit pane). Logged in whenReady, once
+// the log sink exists. See callback/startupScrub.ts.
+import { scrubbedCallbackEnv } from './callback/startupScrub';
 import { app, BrowserWindow, crashReporter, powerMonitor } from 'electron';
 import { createMainWindow, createDiagnosticsWindow } from './window';
 import { setupSecurity } from './security';
 import { closeDb, getDb } from './store/sqlite';
 import { registerIpc } from './ipc';
-import { sessionManager } from './providers';
+import { callbackBroker, sessionManager } from './providers';
 import { stopLocalMuxOwners } from './providers/local/mux';
 import { startSessionReaper, type SessionReaperHandle } from './providers/sessionReaper';
 import { loadSettings } from './config';
@@ -127,6 +132,9 @@ app.whenReady().then(() => {
   // logged before this point is captured too. It does not spawn, so it does not
   // violate the "no spawn before bootstrapPath" invariant.
   initLogFileSink({ dir: resolveLogsDir() });
+  if (scrubbedCallbackEnv.length > 0) {
+    logger.info(`scrubbed inherited callback environment: ${scrubbedCallbackEnv.join(', ')}`, 'callback');
+  }
   // Log the resolved crash-dump directory once so the next native crash is
   // findable. crashReporter.start() ran at module load; this only reports where
   // its minidumps land.
@@ -186,5 +194,8 @@ app.on('will-quit', () => {
     spawnSync('tmux', ['-L', tmuxSocket(), 'kill-server'], { stdio: 'ignore', timeout: 2_000 });
   }
   void sessionManager.closeAll();
+  // Backstop (idempotent): closeAll stops each session's callback socket through its
+  // hooks; this also takes down any listener a session no longer references.
+  void callbackBroker.stopAll();
   closeDb();
 });

@@ -9,18 +9,22 @@ export const PRESET_LABELS: Record<PresetName, string> = {
   review: 'Review',
 };
 
+/** The Dockview options that add panel `id`: every cockpit panel is hosted by `panel-host`. */
+export function panelOptions(id: PanelId): {
+  id: PanelId;
+  component: 'panel-host';
+  params: { panelId: PanelId };
+  title: string;
+} {
+  return { id, component: 'panel-host', params: { panelId: id }, title: PANEL_TITLES[id] };
+}
+
 function addPanel(
   api: DockviewApi,
   id: PanelId,
   position?: Parameters<DockviewApi['addPanel']>[0]['position'],
 ): void {
-  api.addPanel({
-    id,
-    component: 'panel-host',
-    params: { panelId: id },
-    title: PANEL_TITLES[id],
-    ...(position ? { position } : {}),
-  });
+  api.addPanel({ ...panelOptions(id), ...(position ? { position } : {}) });
 }
 
 /**

@@ -8,6 +8,7 @@
  * main owns one watch per live session over its lifecycle (SessionManager) and
  * pushes terminal/watch/status events tagged with the originating projectId.
  */
+import type { CallbackOpenSelection } from '@shared/callback/protocol';
 import type {
   ConnectionSpec,
   ConnectionStatus,
@@ -147,6 +148,8 @@ export const Channels = {
   evtWatch: 'evt:watch',
   evtStatus: 'evt:status',
   evtProjectsChanged: 'evt:projects-changed',
+  /** A terminal's `cockpit open`, classified by main (terminal callback socket). */
+  evtCallbackOpen: 'evt:callback-open',
 } as const;
 
 export type ChannelName = (typeof Channels)[keyof typeof Channels];
@@ -342,6 +345,21 @@ export interface TmuxCommandReply {
 export interface StatusEvent {
   projectId: string;
   status: ConnectionStatus;
+}
+/**
+ * `evt:callback-open`: a process in one of `projectId`'s terminals ran
+ * `cockpit open <path>` and main classified the path (terminal callback socket,
+ * docs/design/terminal-callback-socket.md). The renderer opens
+ * `selection` as a tab of THAT project's Content panel. `selection` is the
+ * subset of a Content selection a plain file open uses and has no `baseline`
+ * field by construction (a baseline would force a git-ref read, which falsely
+ * reports an untracked file as missing). Sent to the main window only. The
+ * terminal's `pane` attribution stays in main: it is unverified metadata the
+ * renderer has no use for.
+ */
+export interface CallbackOpenPushEvent {
+  projectId: string;
+  selection: CallbackOpenSelection;
 }
 
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -616,6 +634,7 @@ export interface IpcContract {
   [Channels.evtWatch]: { request: void; response: WatchPushEvent };
   [Channels.evtStatus]: { request: void; response: StatusEvent };
   [Channels.evtProjectsChanged]: { request: void; response: { at: string } };
+  [Channels.evtCallbackOpen]: { request: void; response: CallbackOpenPushEvent };
 
   [Channels.notesCreate]: {
     request: {

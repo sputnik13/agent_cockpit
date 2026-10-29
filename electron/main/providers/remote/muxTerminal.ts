@@ -1,4 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import {
+  callbackMuxOperands,
+  NO_CALLBACK_ENVIRONMENT,
+  type CallbackEnvironmentSource,
+} from '@shared/callback/env';
 import type {
   TerminalDataHandler,
   TerminalData,
@@ -12,6 +17,7 @@ import type {
   MuxTopologyLayoutNode,
   TerminalWriteKind,
 } from '../types';
+import { resolveCallbackEnvironment } from '../../callback/resolveEnvironment';
 import type { MuxClient } from './muxClient';
 import type { RemoteMuxConnectionManager } from './muxConnection';
 
@@ -23,8 +29,15 @@ const HYDRATED_SCROLLBACK_ROWS = 1_000;
 // trampoline expands the daemon's $SHELL then execs it, so it is never the
 // pane's lasting process. A login shell sourced host profile hooks and could
 // start a nested Byobu/tmux inside the daemon-owned mux pane.
+//
+// The trampoline is where the callback variables enter a mux pane: the daemon
+// spawns the pane itself and sets no pane identity, so the project's variables
+// and the app-chosen terminal key are `NAME=value` operands to `env`, between
+// BYOBU_DISABLE and the shell (see `shellArgs`). They are argv, so spaces and
+// shell metacharacters in a value are safe, and no daemon protocol change is needed.
 const COCKPIT_SHELL = '/usr/bin/env';
-const COCKPIT_SHELL_ARGS = ['BYOBU_DISABLE=1', '/bin/sh', '-c', 'exec "${SHELL:-/bin/sh}"'];
+const COCKPIT_SHELL_ENV = ['BYOBU_DISABLE=1'];
+const COCKPIT_SHELL_EXEC = ['/bin/sh', '-c', 'exec "${SHELL:-/bin/sh}"'];
 
 type MuxTerminalClient = Pick<MuxClient, 'request'>;
 
@@ -183,12 +196,21 @@ export class RemoteMuxTerminalManager {
   /** Stable keys deliberately destroyed in this manager lifetime. */
   private readonly retired = new Set<string>();
 
+  /**
+   * `callbackEnvironment` is the PER-PROVIDER environment of this manager's
+   * project (the local mux uses this same manager with local values): evaluated at
+   * every spawn, so a rebound listener or reconnected helper reaches the next pane.
+   * `undefined` from the source means nothing is injected. Mux injection is NOT
+   * gated by `deterministicSessionNames`: mux sessions are namespaced by the raw
+   * project id, not by that setting.
+   */
   constructor(
     private readonly connection: MuxConnection,
     private readonly defaultCwd: string,
     private readonly broadcastGroup = '',
     private readonly persistScrollback: () => boolean = () => true,
     private readonly scrollbackLines: () => number = () => 10_000,
+    private readonly callbackEnvironment: CallbackEnvironmentSource = NO_CALLBACK_ENVIRONMENT,
   ) {
     connection.onAttached.add(() => {
       void this.reconfigureAndReattach();
@@ -205,6 +227,21 @@ export class RemoteMuxTerminalManager {
         );
       }
     });
+  }
+
+  /**
+   * argv of the `/usr/bin/env` trampoline for ONE new pane, keyed by the
+   * app-chosen terminal key the daemon is also given as `key`. With a callback
+   * environment: `BYOBU_DISABLE=1 <project vars> COCKPIT_CALLBACK_MUX_KEY=<key>
+   * /bin/sh -c …`; without one, exactly the argv this manager always sent. The key
+   * is known before the pane exists and wins over a stale `TMUX_PANE` in pane
+   * identity. Used by ALL THREE creation call sites (`session.create`,
+   * `pane.split`, `window.new`).
+   */
+  private shellArgs(key: string): string[] {
+    const environment = resolveCallbackEnvironment(this.callbackEnvironment, `mux key=${key}`);
+    const operands = environment ? callbackMuxOperands(environment, key) : undefined;
+    return [...COCKPIT_SHELL_ENV, ...(operands ?? []), ...COCKPIT_SHELL_EXEC];
   }
 
   // The UI preference belongs to Cockpit, while the daemon owns durability.
@@ -387,7 +424,7 @@ export class RemoteMuxTerminalManager {
           .current()
           .request<CreateSessionResponse>('session.create', {
             command: COCKPIT_SHELL,
-            args: COCKPIT_SHELL_ARGS,
+            args: this.shellArgs(id),
             cwd: term.cwd,
             key: id,
             ...(this.broadcastGroup ? { broadcast_group: this.broadcastGroup } : {}),
@@ -427,7 +464,7 @@ export class RemoteMuxTerminalManager {
     const created = await this.connection.current().request<CreateSessionResponse>('pane.split', {
       pane_id: source.paneId,
       command: COCKPIT_SHELL,
-      args: COCKPIT_SHELL_ARGS,
+      args: this.shellArgs(id),
       cwd: source.cwd,
       key: id,
       direction,
@@ -444,7 +481,7 @@ export class RemoteMuxTerminalManager {
     const created = await this.connection.current().request<CreateSessionResponse>('window.new', {
       session_id: source.sessionId,
       command: COCKPIT_SHELL,
-      args: COCKPIT_SHELL_ARGS,
+      args: this.shellArgs(id),
       cwd: source.cwd,
       key: id,
     });

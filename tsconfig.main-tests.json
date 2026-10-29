@@ -1,0 +1,19 @@
+{
+  // Type-checks the main-process tests for `evt:callback-open` (and the registerIpc
+  // suite whose mock they extend). `tsconfig.main.json` excludes every test from the
+  // production project; this lists the ones that are checked.
+  "extends": "./tsconfig.main.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "emitDeclarationOnly": false,
+    "declaration": true,
+    "incremental": false
+  },
+  "include": [
+    "electron/main/callback/rendererForward.test.ts",
+    "electron/main/ipc/callbackOpenWiring.test.ts",
+    "electron/main/ipc/controlManagerWiring.test.ts"
+  ],
+  "exclude": ["node_modules", "out", "dist", "src/renderer"]
+}

@@ -142,7 +142,9 @@ The durable architectural boundaries are:
 | Provider IPC bridge                       | main        | Typed handlers route ordinary active-project calls to the active provider, while retained terminal lifecycle calls carry an explicit project id; forwards push events and validates inputs.                             |
 | SQLite store                              | main        | App-local persistence (projects + order + run command, layouts, notes, since-seen, settings).                                                                                                                           |
 | tmux session inventory                    | main        | Lists/kills sessions on the `agent-cockpit` socket for the Sessions panel.                                                                                                                                              |
-| Remote helper                             | remote host | Go static binary serving read RPC + fs-watch over the SSH exec channel.                                                                                                                                                 |
+| Remote helper                             | remote host | Go static binary serving read RPC + fs-watch over the SSH exec channel, the project's callback listener and (invoked as `cockpit`) the multi-call CLI.                                                                  |
+| `CallbackBroker`                          | main        | Terminal callback socket decision point: local listener, `open` allowlist, rate limit, status gate, async path classification; also decides requests a remote helper forwards.                                          |
+| `cockpit` CLI                             | pane        | Multi-call mode of the helper's Go binary: `cockpit open <path>` sends one request on `COCKPIT_CALLBACK_SOCK`; never serves RPC.                                                                                        |
 | Renderer shell/workspace/panels           | renderer    | App shell, top project tab strip, Dockview workspace, xterm terminal + Run panel, read-only review panels, zustand stores.                                                                                              |
 
 ## Runtime Topology and Flows
@@ -821,10 +823,12 @@ list-comments}`) carry these; the renderer store reloads the graph on a
   leaves the server + other panes running (default policy fails the scope and tears down
   the whole server). The cap only applies to a freshly-created server (an already-running
   uncapped server must be `kill-server`'d to re-cap).
-- **Remote helper protocol** is a pinned `PROTOCOL_VERSION = 1`,
-  length-prefixed JSON RPC (request/response + server-push `watch` events) over
-  the SSH exec channel; a mismatch re-provisions once, else hard-fails. The
-  client codec (`HelperRpcClient`) is decoupled from ssh2.
+- **Remote helper protocol** is a pinned `PROTOCOL_VERSION = 2`,
+  length-prefixed JSON RPC (request/response + server-push `watch` and `callback`
+  events) over the SSH exec channel; a mismatch re-provisions once, else
+  hard-fails. The version is stated in four places that a test keeps equal (Go
+  `ProtocolVersion`, the TypeScript client, `build.sh`, the Makefile). The client
+  codec (`HelperRpcClient`, with an event registry) is decoupled from ssh2.
 - **Trust boundaries:**
 
 | Boundary                                    | Trusted?    | Notes                                                                                                                 |
@@ -2490,6 +2494,535 @@ former terminal-only `FOCUS_TERMINAL_EVENT` special case to all panels via their
 handlers. `focusMemory.ts` is unrelated — it is `localStorage` persistence of _which_ panel
 was last active per project, not a focus mechanism.
 
+### Revealing a panel without focus
+
+A programmatic reveal that must not take the keyboard (a terminal's `cockpit open`
+showing the Content panel) does not use `panel.api.setActive()`: it activates the
+panel's group and emits `onDidActivePanelChange`, whose handler writes the focus
+memory unconditionally and calls `focusPanel`, and `withFocusSuppressed` silences only
+the last. `src/renderer/workspace/panelReveal.ts` makes the panel the visible tab of
+its own group with `group.model.openPanel(panel, { skipSetGroupActive: true })`: no
+activation event, so the registry, the focus memory and the `lastActivePanelId` guard
+are untouched. It declines when showing the panel would hide the Terminal or the group
+in use, because Dockview's default renderer detaches a hidden tab's DOM and drops focus
+with it. See Terminal Callback Socket, "Showing Content without moving keyboard focus".
+`PanelHost`'s root carries `data-panel-id` so tests and DevTools can see which panel
+holds the focus.
+
+## Terminal Callback Socket
+
+A terminal-to-app channel. A process in a cockpit terminal pane — a user, or an
+agent — runs `"$COCKPIT_CLI" open <path>` and the file opens as a tab in the
+Content panel of the pane's own project, local or remote, on both the tmux and the
+cockpit-mux backends. The channel is general and versioned (a length-prefixed
+JSON request/reply envelope with a default-deny operation allowlist, `open` being
+the only operation), not an "open" socket, so later operations reuse it. This
+section describes what is built: the transport, the environment injection, the
+remote helper's listener, the `cockpit` CLI, and the renderer leg that opens the
+file as a Content tab without moving keyboard focus. The numbered requirements are in
+[docs/requirements/terminal-callback-socket.md](requirements/terminal-callback-socket.md), the
+implementation detail in [docs/design/terminal-callback-socket.md](design/terminal-callback-socket.md)
+and the verification in [docs/test/terminal-callback-socket.md](test/terminal-callback-socket.md).
+
+```mermaid
+---
+config:
+  layout: elk
+---
+flowchart LR
+  subgraph Pane["Terminal pane"]
+    CLI["cockpit CLI"]
+  end
+  subgraph Host["Remote host"]
+    HL["Helper listener"]
+    RW["Helper reader + worker"]
+  end
+  subgraph Main["Electron main"]
+    BR["CallbackBroker"]
+    BG["remoteBridge"]
+    SM["SessionManager"]
+    EV["open event"]
+  end
+  subgraph Rend["Renderer (main window)"]
+    RD["callbackOpen: validate, select, reveal"]
+  end
+  CLI -->|"local socket"| BR
+  CLI -->|"host socket"| HL
+  HL --> RW
+  RW -->|"callback event"| BG
+  BG --> BR
+  BG -->|"callback.reply"| RW
+  SM --> BR
+  BR --> EV
+  EV -->|"evt:callback-open"| RD
+```
+
+Sources (as built): [electron/main/callback/broker.ts:82](../electron/main/callback/broker.ts#L82),
+[electron/main/callback/listener.ts:46](../electron/main/callback/listener.ts#L46),
+[electron/main/callback/remoteBridge.ts:54](../electron/main/callback/remoteBridge.ts#L54),
+[electron/main/callback/rendererForward.ts:30](../electron/main/callback/rendererForward.ts#L30),
+[electron/main/providers/sessionManager.ts:220](../electron/main/providers/sessionManager.ts#L220),
+[remote-helper/callback_service.go:87](../remote-helper/callback_service.go#L87),
+[remote-helper/cockpit_cli.go:106](../remote-helper/cockpit_cli.go#L106),
+[src/renderer/workspace/callbackOpen.ts:126](../src/renderer/workspace/callbackOpen.ts#L126).
+
+- **Local project:** main's `CallbackBroker` owns the unix socket and decides each
+  request in-process.
+- **Remote project:** the project's own helper owns the socket on the host
+  (`electron/main/callback/` never opens a remote socket). It validates the
+  envelope, the allowlist and the operation's arguments at the edge, applies its
+  own burst limit (10/s), forwards what survives to main over the existing helper
+  RPC stream as a `callback` event carrying a request RE-ENCODED from the
+  validated fields only (unknown fields a same-user process put in the frame never
+  reach main), and relays main's `callback.reply` back to the CLI. `remoteBridge`
+  turns each event into a call of the SAME decision function the local listener
+  uses, bound to the project whose helper stream delivered it — never to whichever
+  project is ambiently active. Main re-validates everything: the helper's checks
+  spare a round trip and bound what a stream can carry, but main is the
+  authority.
+- **One decision function:** `CallbackBroker.handle(projectId, request)` validates
+  the envelope, applies the allowlist, the per-project burst limit (10/s) and the
+  connection-status gate (only `connected` is served), checks the argument bounds,
+  replies `dispatched`, and only THEN classifies the path asynchronously (its
+  provider RPCs, such as `listWorktrees`, may queue behind slow helper methods and
+  must never sit on the reply path). Classification builds a `ContentSelection`
+  from the canonical path the CLI sent (worktree path plus relative path, the same
+  inputs the Explorer uses, so the tab id equals the Explorer's; an external path
+  keeps its logical form) and never carries a `baseline`.
+
+### Identity and trust
+
+The project is the one that owns the socket a request arrived on; a request can
+never name another. `pane` (`{kind: 'tmux' | 'mux', id}`, read by the CLI from
+`COCKPIT_CALLBACK_MUX_KEY`, which wins when present, else `TMUX_PANE`) is
+attribution metadata only: main cannot verify it. No secret exists. Access control
+is the filesystem: the socket directory is 0700 (`lstat`-verified: a real
+directory, owned by the user, no group or other access, or the project's callback
+fails closed) and the socket is explicitly 0600; on Linux the helper also checks
+the peer uid with `SO_PEERCRED` (it fails closed). Any process of the same user can
+connect, which is the accepted trust boundary. Everything is bounded: frames are
+length-prefixed with a 64 KiB cap, one request per connection, a 5 s read deadline
+from accept (absolute, so a trickling peer is cut off), at most 32 concurrent
+connections on main's listener (a connection past the cap is dropped without a
+reply, so the CLI exits 3) and 16 on a helper's (a connection past the cap is
+answered `rate-limited`, under a write deadline, and closed, so the CLI exits 4),
+and `open` only reads and displays. Callback traffic never feeds the `ConnectionMachine`; the broker only
+reads a session's status.
+
+### Socket location
+
+`<h>` is the first 12 hex characters of SHA-256(projectId); `<hosthash>` the first
+8 of SHA-256(host name), because a remote home may be shared over NFS between
+hosts and a socket is reachable only on the host that bound it. A path over the
+90-byte guard (counted in bytes; the OS limit is 104 on macOS and 108 on Linux and
+the takeover temp name needs a few more) or one that could not be injected into an
+environment falls back to a short per-user `/tmp` directory, which never disables
+the feature.
+
+| Project | Primary                                                                                              | Fallback                               |
+| ------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| Local   | `<userData>/callback/<h>.sock`                                                                       | `/tmp/ac-cb-<uid>/<h'>.sock`           |
+| Remote  | `$XDG_RUNTIME_DIR/agent-cockpit/callback/` (else `~/.agent-cockpit/callback/`) `<hosthash>-<h>.sock` | `/tmp/ac-cb-<uid>/<hosthash>-<h>.sock` |
+
+`<h'>` (local fallback only) hashes the resolved `userData` path together with the
+projectId, because two profiles that share a projectId (a copied `store.db`) must
+never share a socket. The remote helper takes no launch arguments: main sends the
+`projectId` in the handshake and the helper returns the absolute `callbackSock`
+and `cliPath`, so the location never matters to main or to the CLI.
+
+### Listener lifecycle and takeover (invariant)
+
+A local listener follows the session-owned watch: it is started on the edge into
+`connected` (and awaited before any terminal or control-mode attach is created,
+because terminals read the socket path at creation), and stopped on
+`disconnected`/`failed` and on eviction. A remote listener is bound by the helper
+at the handshake and lives exactly as long as the helper's RPC stream: when the
+stream ends the helper releases the socket path first, then exits;
+`RemoteProvider.disconnect()` (called by `SessionManager` on close, reconnect and
+shutdown) stops the bridge and ends the helper channel. There is no second
+teardown path.
+
+The **newest listener always wins the path unconditionally**. The new owner binds a
+uniquely named temporary path in the same directory, `chmod`s it 0600 and `rename`s
+it over the real one (atomic, so the path is never briefly absent). A stale
+predecessor — a helper left alive by a half-open ssh drop — stays bound to an inode
+nothing can reach. Every owner unlinks on close only if the path's inode is still
+its own (an `lstat` device + inode identity, with the runtime's own unlink-on-close
+turned off), so a stale owner can neither hold the path nor delete the newer
+socket. A fixed temporary name would let an old listener's close unlink a new one.
+
+### Remote reply path
+
+```mermaid
+sequenceDiagram
+  participant C as cockpit CLI
+  participant L as Helper listener
+  participant R as Helper reader
+  participant M as Main (bridge + broker)
+  C->>L: request frame
+  Note over L: envelope, allowlist, args, burst limit
+  L->>M: callback event (re-encoded request)
+  Note over M: status, rate limit, bounds
+  alt main replies in time
+    M->>R: callback.reply (dispatched)
+    R->>L: deliver to the waiting connection
+    L->>C: reply frame
+    M-->>M: classify path, emit open
+  else no reply within 4 s
+    L->>C: timeout reply
+  end
+```
+
+Sources (as built): the helper's reader/worker loop
+[remote-helper/main.go:114](../remote-helper/main.go#L114), the forward and reply handling
+[remote-helper/callback_service.go:124](../remote-helper/callback_service.go#L124) and
+[remote-helper/main.go:154](../remote-helper/main.go#L154) (`callback.reply` answered inline by the reader), and the
+bridge [electron/main/callback/remoteBridge.ts:54](../electron/main/callback/remoteBridge.ts#L54).
+
+The helper's forward timeout (4 s) is shorter than the CLI's 5 s deadline so that
+`timeout` can reach the user; it means "no confirmation", not "the tab did not
+open". A request still pending when the helper's RPC stream ends is answered
+`not-connected`, as is one whose event cannot be written (a dead stream) or whose
+event queue (one writer goroutine, 64 events) is full behind a stalled stream.
+The helper relays main's reply re-stamped with the CLI request's own id and turns
+anything malformed into `internal` (relayed error text is capped at 512 bytes and
+cut on a character boundary), so correlation never depends on main. The `connId`
+that correlates an event with its `callback.reply` comes from ONE counter for the
+life of the helper process, not one per listener: a second handshake replaces the
+listener, and per-listener ids restarting at 1 would let a late reply meant for
+the old listener's request answer a different CLI's request on the new one. The
+replaced listener releases its socket path and answers its pending requests at
+once; draining its old connections happens in the background so the handshake
+that replaced it is never held for the grace period.
+
+Main registers its `callback` handler on the helper's client BEFORE the handshake
+is sent (`RemoteHelperLauncher`'s `onClient` hook), not after `launch()` returns:
+the listener serves from inside the handshake, so a request from a pane that
+outlived the previous app run can reach main as an event ahead of the handshake
+reply, and a handler registered later would miss it (the CLI would then wait out
+the helper's 4 s and report `timeout`). An early request is answered by the
+broker's normal status gate (`not-connected` while the session is still
+`connecting`).
+
+### Helper concurrency: reader and worker (invariant)
+
+The helper is a reader plus one worker. The reader decodes frames, answers
+`callback.reply` **inline** (it never waits on anything), and pushes every other
+request onto an **unbounded** FIFO that the worker drains in arrival order. So a
+slow `beadsExec`, diff or status can neither delay main's reply to a pending
+`cockpit open` nor block the reader, while every existing method keeps the ordering
+it had when the read loop was also the executor. At EOF the callback listener is
+released first (nothing can answer a forwarded request any more, and the path must
+be free for the next helper), then the worker finishes what was already accepted —
+every request that arrived before EOF is still executed. Do not route
+`callback.reply` through the queue, bound the queue, or make the reader execute
+methods: each reintroduces the blocking the split exists to remove.
+
+### The `cockpit` CLI
+
+A multi-call mode of the helper's Go binary: invoked as `cockpit` (a symlink) or
+`remote-helper cockpit …` it dispatches **before** `bootstrapPath()` and before
+anything that could start the RPC server or read stdin. `open <path>` makes the
+path absolute from the logical working directory (`$PWD` when it names the current
+directory) plus a lexical clean, computes the canonical form (the symlink-resolved
+PARENT directory joined with the base name, so a symlinked file inside a worktree
+is not misclassified as external), reads `COCKPIT_CALLBACK_SOCK` and the pane
+identity, sends one request and prints nothing on success. Exit codes: 0
+dispatched, 2 usage, 3 not connected (no socket in the environment, nothing
+listening, the connection closed before a reply, or an app `not-connected`), 4
+rejected (`unsupported-op`, `bad-request`, `rate-limited`), 1 anything else
+(including no confirmation within the 5 s deadline).
+
+- **Local:** the same Go source is already built per host platform and shipped
+  with `remote-helper/dist` (electron-builder's `extraResources`); the macOS signer
+  signs the darwin binary with the app's identity like the mux binaries and
+  refreshes the manifest hashes. Before each local listener binds, the app links
+  `<userData>/callback/bin/cockpit` to the host's entry of that manifest
+  (packaged: the app resources; dev: the built dist), atomically and idempotently,
+  under a directory created 0700 and verified like the socket directory. A failure
+  is logged once and never fails a session; `COCKPIT_CLI` then dangles. The link is
+  one path per user data directory, so it follows the app instance that bound last:
+  a Linux AppImage's resources are a per-run mount, so between runs the link
+  dangles (a surviving pane's `$COCKPIT_CLI` reports "No such file or directory";
+  nothing is running to answer it anyway) until the next start re-links it; dev
+  runs share one profile, so a second checkout or worktree re-points the link at
+  its own built `remote-helper/dist`, and deleting a checkout or rebuilding its
+  `dist` leaves it dangling until the next start. It is refreshed only when a
+  listener binds, never in the background.
+- **Remote:** at startup the helper retargets `~/.agent-cockpit/bin/<os>-<arch>/cockpit`
+  (0700 directories, atomic temp link plus rename) at its own executable and
+  reports it as `cliPath`. The link has a FIXED name per os/arch (the per-os/arch
+  directory exists because dispatch keys on the program name and an NFS home can be
+  shared between hosts of different architectures); what changes is its target,
+  and the newest helper launch wins. That target is an immutable build: the
+  uploaded helper's file name is keyed on the build's source hash (see Helper
+  provisioning), so no other app build can overwrite the bytes under the link.
+  Protocol skew between the CLI the link names and a listener of another build is
+  what the envelope's `v` is for.
+
+### Environment injection (invariant)
+
+Variables reach a pane by the mechanism that actually reaches it for that backend, and never
+through a typed shell command (a typed `NAME=value` echoes into pane output and shell history).
+The central fact: **a tmux pane inherits its SESSION environment, never the attaching client's**.
+The session environment is the server's global environment — copied from whichever process
+STARTED the server — plus whatever tmux copies in from a client through `update-environment`.
+So variables placed on a client either do nothing, or, for the process that starts the server,
+stamp one project's values into every project's panes.
+
+```mermaid
+flowchart LR
+  subgraph Main["Electron main"]
+    SRC["CallbackEnvironmentSource\n(evaluated at every spawn or attach)"]
+    SCRUB["startup scrub of inherited\nCOCKPIT_CALLBACK_* / COCKPIT_CLI"]
+  end
+  subgraph LocalTmux["Local tmux (control-mode, session-per-tab)"]
+    START["start-server ; set ...\n(variable-free, update-environment[100..102] last)"]
+    CLIENT["attaching client\ncarries THIS project's values"]
+    SESS["tmux SESSION environment"]
+  end
+  RCTL["Remote control-mode:\nset-environment -t '=session'\nover the control channel"]
+  MUX["cockpit-mux (local, remote):\nNAME=value operands on the\n/usr/bin/env trampoline"]
+  PANE["pane process"]
+  SCRUB --> START
+  SRC --> CLIENT
+  START -->|"update-environment copies from"| CLIENT
+  CLIENT --> SESS
+  SRC --> RCTL --> SESS
+  SRC --> MUX
+  SESS --> PANE
+  MUX --> PANE
+```
+
+Sources (as built): the variable-free server start
+[electron/main/providers/local/tmuxServer.ts:131](../electron/main/providers/local/tmuxServer.ts#L131)
+and the attaching client's environment
+[electron/main/providers/local/tmuxServer.ts:190](../electron/main/providers/local/tmuxServer.ts#L190); the
+local-only option tail [src/shared/tmux/terminalConfig.ts:86](../src/shared/tmux/terminalConfig.ts#L86); the
+remote session environment
+[electron/main/providers/remote/tmuxControl.ts:464](../electron/main/providers/remote/tmuxControl.ts#L464);
+the mux operands [src/shared/callback/env.ts:106](../src/shared/callback/env.ts#L106) applied at
+[electron/main/providers/remote/muxTerminal.ts:243](../electron/main/providers/remote/muxTerminal.ts#L243);
+the startup scrub [electron/main/callback/envScrub.ts:22](../electron/main/callback/envScrub.ts#L22).
+
+| Backend                                    | Mechanism                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Local tmux (control-mode, session-per-tab) | One **indexed** `update-environment` element per variable (`[100]` socket, `[101]` version, `[102]` CLI) on the local server only, last in the `start-server ; set …` chain; tmux copies the values from the attaching client into the session on create and on `-A` attach, and strips them when the client lacks them. |
+| Remote control-mode                        | `set-environment -t '=<session>'` over the control channel (stdin, not remote argv), after the data handler is wired, before `attached` is emitted, on every attach and reattach; the wait is bounded and an expired wait leaves the command's reply entry in the FIFO.                                                  |
+| cockpit-mux (local and remote)             | `NAME=value` operands on the `/usr/bin/env BYOBU_DISABLE=1 /bin/sh -c …` trampoline at all three creation sites (`session.create`, `pane.split`, `window.new`), plus the app-chosen `COCKPIT_CALLBACK_MUX_KEY`.                                                                                                          |
+
+Invariants (each reintroduces a cross-project leak or a silently absent feature if broken):
+
+- **The server-start process is variable-free**, in isolated and ephemeral runs too, and the shared
+  server never exits when its last session goes (`exit-empty` is `off` in every opener; an ephemeral run
+  is cleaned up by an explicit `kill-server` at quit). A server that exits would be restarted by the next
+  client, which carries one project's values.
+- **`update-environment` is local-only and indexed.** The shared option source gains a flag: the local
+  argv opener includes the tail, both remote shell openers filter it out, so a remote variable-less attach
+  never strips. It is one element per name, never a plain `set -g` and never repeated `-ga`; an element holds
+  exactly one name, so a space-separated value would match nothing. This is a documented exception to "one
+  option source for both openers".
+- **The inherited environment is scrubbed at startup**, unconditionally and before any spawn: the app is
+  routinely launched from inside a cockpit pane. The `COCKPIT_MUX_*` overrides are kept. A project's values
+  are added to each spawn explicitly, never to `process.env`.
+- **A local session's pending listener bind is awaited before any terminal or control-mode attach is
+  created** (`SessionManager.open()`, and `callbackReady` for the IPC handlers that address the provider
+  directly): terminals read the socket path at creation, so one made before the bind would start without the
+  variables for the life of its tmux session, and a variable-less `-A` attach would make the server-wide
+  entries strip the values its session already held.
+- **Every command that applies them is explicitly addressed** to the project's own session (never to the
+  ambiently active project).
+- **The shared-session gate is captured with the object that names the session** (`deterministicSessionNames`
+  at its creation): a gated object injects nothing and sets no entry of its own. Entries are server-global, so
+  an entry a non-gated object set earlier still applies to a gated object's attaches, whose variable-less client
+  strips the callback variables of that session — accepted, because this app never puts values into a shared
+  session. Mux sessions are namespaced by the raw project id and are not gated.
+- **If the indexed form is rejected** (an old tmux), each element is retried alone and one structured
+  diagnostic names the reason (`update-environment-set-failed` with the tmux version, or `tmux-command-failed`
+  without a version claim); only the callback variables are lost.
+
+A remote project's values are exactly what its helper reported in the handshake, evaluated at each attach or
+spawn, and are absent while the helper's stream is closed. Remote session-per-tab terminals, panes created by
+the in-pane `cockpit-mux` commands, and panes of a shared session (`deterministicSessionNames`) do not get the
+variables.
+
+### Known limitations
+
+- The first pane of a **brand-new remote control-mode session** exists before the manager can set the session
+  environment, so it lacks the variables until a new tab is opened (accepted; one swappable function).
+- **Already-running shells never gain new variables**; re-attaching to a surviving pane does not retrofit it.
+  They keep working across an app restart because the socket path is deterministic.
+- A variable-less attach to the shared tmux server (a user running `tmux -L agent-cockpit attach` in their own
+  terminal) strips the variables from that session; a local control client never re-attaches, so that project's
+  new tabs lose the feature until restart.
+- Old helper builds accumulate on remote hosts (about 4 MB per os/arch per source change); there is no pruning.
+- A symlinked remote project root cannot be canonicalized without a realpath RPC, so a path under it is
+  classified as an external file.
+
+### Renderer: `evt:callback-open` and the no-focus reveal
+
+Main pushes each classified `open` the broker emits to the renderer as
+`evt:callback-open` `{projectId, selection}` (`forwardCallbackOpens`,
+`electron/main/callback/rendererForward.ts`, wired in `registerIpc`). It goes to the
+**main window only**: the diagnostics window is among `BrowserWindow.getAllWindows()`
+and has no Content panel, so it is never a broadcast. `projectId` is the project whose
+socket carried the request, never the ambiently active one. The selection is copied
+field by field (`kind` of `file` or `external-file`, `path`, `worktreePath`), so the
+unverified `pane` attribution stays in main and a `baseline` cannot cross. A push with
+no live main window is logged, since the CLI was already answered `dispatched`. The
+preload exposes it as `events.onCallbackOpen`, which returns its unsubscribe.
+
+In the renderer, `initCallbackOpenSync` (`src/renderer/workspace/callbackOpen.ts`;
+`AppShell` subscribes for its lifetime and releases on unmount):
+
+1. validates the payload and rebuilds the selection from the validated fields only. A
+   malformed payload, an empty project id, a `change` kind, or a shape main never
+   produces is ignored and logged: a `file` is relative to its worktree (or the project
+   root when `worktreePath` is empty) with no `..` segment and a `worktreePath` that is
+   empty or absolute; an `external-file` is an absolute path with no `..` segment and
+   no worktree;
+2. records the tab with `useContentSelection.select(projectId, selection)`, first and
+   unconditionally, so a reveal that declines or throws never loses the open; the tab
+   for the same fully-qualified path is activated, not duplicated;
+3. only when `projectId` is the **active** project, asks the workbench to show the
+   Content panel (`workspaceControlsStore.revealContent(projectId)`, published by
+   `CockpitWorkspace`). A non-active project only records its tab: the active project
+   is never switched, the layout is never touched and nothing is revealed on its behalf.
+   The workbench also refuses (`not-loaded`) while Dockview still shows ANOTHER
+   project's layout. `activeId` flips before the layout effect rebuilds the panels, so
+   acting then would reveal in, and save, the previous project's layout; `loadLayout`
+   records which project's layout is loaded (`loadedRef`) and the reveal and every
+   saved-layout write key on that, never on `activeId`. The tab shows once the switch
+   completes.
+
+An open that reaches a renderer which is not subscribed (the window is reloading, or
+`AppShell` has not mounted yet) is lost: nothing queues or replays it, the CLI was
+already answered `dispatched`, and no tab is recorded.
+
+#### Showing Content without moving keyboard focus (invariant)
+
+The user is typing in the terminal that ran the command, so the open must neither take
+the keyboard nor rearrange what they are working in. `panelReveal.ts` (in
+`src/renderer/workspace/`) therefore **never activates anything**. It makes Content the
+visible tab of ITS OWN group with `group.model.openPanel(panel, { skipSetGroupActive: true })`:
+no activation event is emitted (Dockview re-emits a group's active-panel change
+globally only when that group is the active one), so there is no focus-memory write, no
+`focusPanel` call and the `lastActivePanelId` guard is untouched.
+
+`panel.api.setActive()` under `withFocusSuppressed` is not a substitute. `setActive`
+makes the group the active group (exiting a maximized group) and fires
+`onDidActivePanelChange`; its handler writes the persisted focus memory
+unconditionally, records `lastActivePanelId` and calls `focusPanel`, and
+`withFocusSuppressed` silences only that last call. The memory would still be
+overwritten (the next project switch-back would `focusPanelForce` Content), the
+active-group highlight would move while keystrokes keep going to the terminal, and the
+suppression flag is a global that also swallows a genuine `focusPanel` in the same
+window.
+
+Dockview's default `onlyWhenVisible` renderer DETACHES a hidden tab's DOM, so showing
+Content in a group replaces what that group shows and drops DOM focus if the replaced
+panel held it. The reveal therefore decides by layout:
+
+| Content is…                                                                                                   | Outcome                                                                   |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| the visible tab of its own group (the Edit and Review defaults)                                               | left alone (`already-visible`); only the tab strip changes                |
+| a background tab of a group that is not in use                                                                | becomes that group's visible tab, the group is not activated (`revealed`) |
+| tabbed behind the Terminal                                                                                    | declined (`withheld-terminal`): it would hide the terminal                |
+| a background tab of the group in use: Dockview's active group (it follows DOM focus) or the one holding focus | declined (`withheld-active-group`)                                        |
+| anywhere while another group is maximized                                                                     | declined (`withheld-maximized`): maximize is never exited                 |
+| closed, with room to add it without resizing the terminal                                                     | re-added inactive, then shown without activating its group (`added`)      |
+| closed, with no such room                                                                                     | declined (`withheld-no-room`)                                             |
+
+A declined reveal leaves the tab recorded, writes one renderer log line saying why
+(`logDiagnostic`: the main window's console and log store, visible in DevTools or the
+launching terminal; the Diagnostics window shows main-process entries only) and raises
+a **status-bar cue**: `StatusRegion` shows "Opened <file> in Content (hidden)" in an
+always-mounted `role="status"` live region, with a **Show** action and a tooltip
+carrying the path and the reason (`openCueStore`). The cue is renderer-only state and
+not part of the saved layout. It is replaced by a newer decline, dismissed by an open
+that did show the panel, by Show, or after 15 s, and shown only while its project is the
+active one. Show is the user's explicit request, so it goes through the workbench's own
+`openPanel` (which exits a maximized state and takes the focus); the automatic path
+never does.
+
+A closed panel is re-added without activating anything: under the Changes group (the
+Edit view's own slot for it), else as a new column at the right edge; one
+view-independent rule, because the Review view's Content slot is a root-level column
+that reference-plus-direction placement cannot express. **The terminal is never resized
+by the add.** Adding a group makes Dockview equalize EVERY sibling in the splitview it
+joins (`Sizing.Distribute`): measured against the real presets, the Review view's
+terminal fell from 430 to 288 high (it shares the right column with Changes) and either
+right-edge fallback cut its width from 720 to 480. The terminal group is therefore
+pinned at its current size (`group.api.setConstraints`, min == max, restored in a
+`finally`) for the add. Dockview's equalizing skips inflexible views and its resize
+absorption clamps to [min, max], so the terminal cannot change, by construction, and
+the other groups split what is left (in Review, Changes and Content share Changes' old
+cell). The terminal is never carved: when Changes shares the terminal's group the right
+edge is used, a Changes cell under 200px (too short to split) falls back to the right
+edge, and when the right edge leaves under 200px for the columns that are not the
+terminal's the add is declined, because a group added without room lands OUTSIDE the
+container (measured: 100px past the edge when the terminal is alone). The Panels
+menu's `openPanel` is not reused: it adds to the ACTIVE group (usually the terminal's)
+and activates the new panel. A panel added `inactive` into a brand-new group has no
+visible tab and renders blank until its group is activated, so the re-add also calls
+`openPanel(…, { skipSetGroupActive: true })`. The saved layout follows the reveal: a
+re-added panel is saved by Dockview's buffered layout-change event, but a tab switch in
+a group that is not the active one emits none of the events that listener watches, so
+`CockpitWorkspace` saves the layout itself after a `revealed` outcome (otherwise a
+restart would restore the old visible tab).
+
+Options not adopted for the declined layouts, so the next decision is informed: moving
+Content out of the shared group (`panel.api.moveTo({ group, position, skipSetActive:
+true })`) would show it and keep the terminal's focus but rearranges a layout the user
+chose; a floating group covers part of the terminal and is serialized with the layout;
+leaving a maximized group resizes the terminal; a badge on the hidden Content tab would
+change a title that is serialized into the layout (the status-bar cue above, which is
+renderer-only state, shipped instead). Declining, recording and saying why never
+rearranges, hides or refocuses anything.
+
+### Regression Check
+
+- `cd remote-helper && go vet ./... && go test ./...` pins the wire codec (the same
+  fixtures the TypeScript reference replays), the edge allowlist, argument
+  validation, burst limit and frame cap, the re-encoded forwarding, the
+  process-wide `connId`, the over-cap `rate-limited` reply, the takeover inode
+  check, the reader/worker split, the CLI's exit codes and its dispatch before
+  `bootstrapPath()`.
+- `npx vitest run electron/main/callback electron/main/providers/remote` pins the
+  bridge and its registration before the handshake, the handshake-derived
+  environment, the provider lifecycle, the hash-keyed atomic helper upload and
+  `replaceExecutable`'s cleanup and SFTP fallback, and the CLI link, and runs one
+  test with the real Go helper, the real CLI and the real broker
+  (skipped, with a stated reason, when no Go toolchain is present).
+- On a live remote project: a pane's `"$COCKPIT_CLI" open README.md` returns
+  silently; while a slow `br` write is running it still returns promptly; killing
+  the ssh transport makes the CLI exit 3 within 5 s and a reconnect takes the
+  socket path over without a stale predecessor deleting it.
+- `npx vitest run src/renderer/workspace src/renderer/shell electron/main/callback/rendererForward.test.ts electron/main/ipc`
+  pins the renderer leg against the REAL Dockview in jsdom (the full `CockpitWorkspace`
+  with the real `PanelHost`): for every Content layout (visible, hidden in its own
+  group, tabbed with the Terminal, a background tab of the active group or of the group
+  holding the focus, another group maximized, closed) DOM focus stays on the same
+  attached element, no activation event is emitted, the focus memory is untouched and
+  `focusPanel` is never called; a plain `setActive()` on the same tab is pinned to DO
+  emit one (the reason the reveal never uses it). Re-adding a closed Content panel is
+  asserted never to change the terminal's size in the real presets (Edit, Review, both
+  right-edge fallbacks, Changes tabbed with the terminal) and to be declined when there
+  is no room. It also pins the payload validation and shapes, the non-active-project
+  rule, the refusal while another project's layout is loaded, the status-bar cue and
+  its Show action, and the main-window-only send.
+- `npm run typecheck` also type-checks the test support (`src/renderer/testing`) and
+  this feature's tests (`tsconfig.renderer-tests.json`, `tsconfig.main-tests.json`),
+  which `tsconfig.renderer.json` and `tsconfig.main.json` exclude from the production
+  projects.
+- `npm run test:e2e:callback` drives the built app (isolated profile, `TMUX_TMPDIR`,
+  tmux socket and hidden window): a real `"$COCKPIT_CLI" open README.md` typed into the
+  focused terminal adds the Content tab, the terminal keeps the keyboard (the next
+  command typed is run by the shell), a closed Content panel is re-added without taking
+  focus, with the terminal maximized the open is declined and the status cue's Show
+  exits maximize and takes the focus, and an open aimed at a background project's
+  socket records its tab there with no switch and no reveal.
+
 ## Configuration and Environment Contracts
 
 ### Local Terminal Process Ownership
@@ -2523,8 +3056,12 @@ explicit user action. No automatic TTL is applied to detached production tmux
 sessions, because a detached session may still contain a running agent.
 
 E2E, isolated development, and `bin/run-isolated` runs set `AC_TMUX_SOCKET` to a
-unique socket and `AC_TMUX_EPHEMERAL=1`. The latter sets `exit-empty on`; app
-shutdown and detached run guardians also kill only that exact socket. E2E
+unique socket and `AC_TMUX_EPHEMERAL=1`. The latter makes app shutdown
+(`will-quit`) kill that exact server, as detached run guardians also do. It does
+not turn `exit-empty on`: every opener keeps `exit-empty off`, because the server
+is started by a process that carries no terminal callback variables, and a server
+that exits when its last session goes would let the next client, which does carry
+one project's values, start it. E2E
 guards reject direct Playwright invocation with a non-isolated socket. The default
 `agent-cockpit` tmux server is never targeted by automated teardown.
 
@@ -2532,6 +3069,13 @@ For confirmed causes, unresolved historical evidence, and the cleanup
 acceptance commands, see
 [Process Lifecycle and Leak Findings](operations/process-lifecycle.md).
 
+- **Terminal callback environment:** a cockpit terminal pane of a project with a live callback
+  socket has `COCKPIT_CALLBACK_SOCK` (the project's socket), `COCKPIT_CALLBACK_VERSION` (the
+  callback protocol version) and `COCKPIT_CLI` (the absolute path of the `cockpit` CLI; locally it
+  contains a space on a default macOS profile, so the documented form is `"$COCKPIT_CLI" open
+<path>`), and in a cockpit-mux pane `COCKPIT_CALLBACK_MUX_KEY` (the pane's terminal key). The app
+  removes inherited `COCKPIT_CALLBACK_*` and `COCKPIT_CLI` from its own environment at startup and
+  keeps `COCKPIT_MUX_HOME`/`COCKPIT_MUX_BIN`/`COCKPIT_MUX_EPHEMERAL`. `PATH` is not modified.
 - **Remote host prerequisites:** an SSH account, `tmux`, and the ability to run
   the uploaded static helper binary. No package manager, language runtime, or
   root. Hosts are assumed POSIX (macOS/Linux); Windows remote hosts are out of
@@ -2548,8 +3092,19 @@ acceptance commands, see
   bounds the live remote-session set; see the Session Idle Aging-Out section.
 - **Helper provisioning:** the matching prebuilt binary is selected from the
   local `remote-helper/dist` manifest by `uname -sm`, SFTP-uploaded to
-  `~/.agent-cockpit/helper-<version>-<os>-<arch>` (skipped if already present),
-  and run over an exec channel.
+  `~/.agent-cockpit/helper-<version>-<sourceHash12>-<os>-<arch>` (the name is
+  keyed on the build's source hash, so one path is one build for good; a manifest
+  without a hash keeps the unkeyed `helper-<version>-<os>-<arch>`), and run over
+  an exec channel. Every write goes to a temporary name beside the target and is
+  renamed into place (`posix-rename@openssh.com`, or remove-then-rename on an SFTP
+  server without it; the temporary is removed on any failure), so the final name
+  never holds a partial file and a helper still running from it keeps its inode. A
+  present file is skipped when it reports the current source hash and replaced the
+  same way when it does not (a damaged upload). Old builds are not pruned: each
+  source change leaves one more binary (about 4 MB) per os/arch in
+  `~/.agent-cockpit/`, as the mux binaries there also accumulate. At startup the
+  helper retargets the `cockpit` CLI link under `~/.agent-cockpit/bin/<os>-<arch>/`
+  at itself (see Terminal Callback Socket).
 
 ## Linked Documents
 
@@ -2559,3 +3114,9 @@ acceptance commands, see
   phasing.
 - [docs/TEST_PLAN.md](TEST_PLAN.md) — test strategy, scope, and the
   better-sqlite3 ABI constraint.
+- [docs/requirements/terminal-callback-socket.md](requirements/terminal-callback-socket.md) —
+  the numbered terminal callback socket requirements.
+- [docs/design/terminal-callback-socket.md](design/terminal-callback-socket.md) — the terminal
+  callback socket implementation design.
+- [docs/test/terminal-callback-socket.md](test/terminal-callback-socket.md) — the terminal callback
+  socket scenarios, evidence and verification gaps.

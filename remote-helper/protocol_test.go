@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -69,7 +70,7 @@ func TestFrameMultipleSequential(t *testing.T) {
 
 func TestHandshakeVersionMatch(t *testing.T) {
 	s := &server{}
-	raw := json.RawMessage(`{"protocolVersion":1}`)
+	raw := json.RawMessage(fmt.Sprintf(`{"protocolVersion":%d}`, ProtocolVersion))
 	res, err := s.handleHandshake(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

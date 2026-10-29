@@ -8,9 +8,12 @@
  */
 import { spawnSync } from 'node:child_process';
 import * as pty from 'node-pty';
+import type { CallbackEnvironmentSource } from '@shared/callback/env';
 import { withNativeArch } from './nativeArch';
+import { startTmuxServer, tmuxClientEnv } from './tmuxServer';
+import { resolveCallbackEnvironment } from '../../callback/resolveEnvironment';
 import { tmuxSocket } from '../../instanceConfig';
-import { TERMINAL_TERM, tmuxServerOptionArgs, terminalPaneEnv } from '@shared/tmux';
+import { TERMINAL_TERM, terminalPaneEnv } from '@shared/tmux';
 import type {
   TerminalDataHandler,
   TerminalExitHandler,
@@ -53,13 +56,33 @@ interface Session {
 
 let counter = 0;
 
+export interface LocalTerminalOptions {
+  /** tmux socket; defaults to the app's cockpit socket (tests use a private one). */
+  socket?: string;
+  /** tmux `-f` config file (tests only, so they never read the user's config). */
+  configPath?: string;
+  /**
+   * Present = callback injection is ENABLED for this manager
+   * (docs/design/terminal-callback-socket.md, "Environment injection"): a new
+   * session's first pane gets this project's variables through the attaching
+   * client's environment and the local-only `update-environment` entries. Absent =
+   * DISABLED. The owner decides once, at creation, from the same settings read
+   * that chose `sessionToken` (requirement 12), so it is never re-read here.
+   */
+  callbackEnvironment?: CallbackEnvironmentSource;
+}
+
 export class LocalTerminalManager {
   private sessions = new Map<string, Session>();
+  private readonly socket: string;
 
   constructor(
     private readonly rootPath: string,
     private readonly sessionToken: string,
-  ) {}
+    private readonly options: LocalTerminalOptions = {},
+  ) {
+    this.socket = options.socket ?? SOCKET;
+  }
 
   /** Prefix for the `terminal` namespace (used to list/restore terminal tabs).
    *  `sessionToken` is the project id (default) or a sha of the project root
@@ -81,20 +104,43 @@ export class LocalTerminalManager {
     const key = opts.key ?? `t${++counter}`;
     const cwd = opts.cwd ?? this.rootPath;
     const name = this.sessionName(opts.kind ?? 'terminal', key);
-    const env = terminalPaneEnv(process.env);
+    const tmux = hasTmux();
+    const configArgs = this.options.configPath ? ['-f', this.options.configPath] : [];
+    // Apply the shared server options BEFORE the session (single source), so the
+    // session-per-tab backend gets history-limit/mouse/color too. This is its own
+    // VARIABLE-FREE spawn, split off the session-creating client below: the process
+    // that starts the shared server stamps its environment into every project's
+    // panes, and the client that creates the session must carry THIS project's
+    // callback variables (docs/requirements/terminal-callback-socket.md,
+    // requirement 7). The server keeps the TERM/COLORTERM it always got from the
+    // one-spawn form.
+    if (tmux) {
+      startTmuxServer({
+        socket: this.socket,
+        ...(this.options.configPath ? { configPath: this.options.configPath } : {}),
+        callbackEnvironment: this.options.callbackEnvironment !== undefined,
+        env: terminalPaneEnv(process.env),
+      });
+    }
+    // The attaching client carries the project's callback variables; tmux copies
+    // them into the new session (its first pane included) via the local-only
+    // `update-environment` entries. A bare-shell fallback (no tmux) is not a
+    // callback backend and keeps the plain terminal environment.
+    const env = tmux
+      ? tmuxClientEnv(
+          process.env,
+          resolveCallbackEnvironment(this.options.callbackEnvironment, `session=${name}`),
+        )
+      : terminalPaneEnv(process.env);
 
     // Run the session-creating child native arm64 when we're translated under
     // Rosetta on Apple Silicon (no-op elsewhere); the two branches share spawn
     // options, so wrap whichever target applies and spawn once.
-    const { file, args } = hasTmux()
+    const { file, args } = tmux
       ? withNativeArch('tmux', [
+          ...configArgs,
           '-L',
-          SOCKET,
-          // Apply the shared server options before the session (single source),
-          // so the session-per-tab backend gets history-limit/mouse/color too.
-          'start-server',
-          ...tmuxServerOptionArgs({ exitEmpty: process.env['AC_TMUX_EPHEMERAL'] === '1' }),
-          ';',
+          this.socket,
           'new-session',
           '-A',
           '-s',
@@ -168,7 +214,7 @@ export class LocalTerminalManager {
       /* already exited */
     }
     if (opts?.kill && s && hasTmux()) {
-      spawnSync('tmux', ['-L', SOCKET, 'kill-session', '-t', s.name], { stdio: 'ignore' });
+      spawnSync('tmux', ['-L', this.socket, 'kill-session', '-t', s.name], { stdio: 'ignore' });
     }
   }
 
@@ -178,7 +224,7 @@ export class LocalTerminalManager {
    */
   listSessions(): string[] {
     if (!hasTmux()) return [...this.sessions.keys()];
-    const res = spawnSync('tmux', ['-L', SOCKET, 'ls', '-F', '#{session_name}'], {
+    const res = spawnSync('tmux', ['-L', this.socket, 'ls', '-F', '#{session_name}'], {
       encoding: 'utf8',
     });
     if (res.status !== 0 || !res.stdout) return [];

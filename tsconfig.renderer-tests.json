@@ -1,0 +1,26 @@
+{
+  // Type-checks the renderer test support (src/renderer/testing) and the callback-open
+  // tests that use it. `tsconfig.renderer.json` deliberately excludes all tests and the
+  // test-support directory from the production project; most renderer tests are not
+  // type-checked anywhere yet (a baseline of errors), so this lists the ones that are.
+  "extends": "./tsconfig.renderer.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "emitDeclarationOnly": false,
+    "declaration": true,
+    "incremental": false
+  },
+  "include": [
+    "src/renderer/types/window.d.ts",
+    "src/renderer/testing/**/*.ts",
+    "src/renderer/testing/**/*.tsx",
+    "src/renderer/workspace/panelReveal.test.tsx",
+    "src/renderer/workspace/callbackOpen.test.tsx",
+    "src/renderer/workspace/callbackOpenWorkspace.test.tsx",
+    "src/renderer/workspace/openCueStore.test.ts",
+    "src/renderer/shell/appShellCallbackOpen.test.tsx",
+    "src/renderer/shell/statusRegionCue.test.tsx"
+  ],
+  "exclude": ["node_modules", "out", "dist", "electron"]
+}

@@ -2,6 +2,9 @@ import { useState } from 'react';
 import { useProjectsStore, useSessionStore, selectActiveProject, selectStatus } from '../providerClient';
 import type { ConnectionState } from '@shared/providers/types';
 import { Badge, Button, StatusDot } from '../ui';
+import { useOpenCueStore } from '../workspace/openCueStore';
+import { PanelIds } from '../workspace/panelIds';
+import { useWorkspaceControlsStore } from '../workspace/workspaceControlsStore';
 
 const STATE_TONE: Record<ConnectionState, 'neutral' | 'accent' | 'added' | 'removed' | 'warn'> = {
   disconnected: 'neutral',
@@ -81,6 +84,39 @@ function ConnectionToggle({
   );
 }
 
+/**
+ * The live region for a terminal's `cockpit open` that was recorded but whose Content
+ * panel was deliberately not shown (see openCueStore). The region is always mounted, so
+ * a screen reader announces the text when it appears; the "Show" action is the user's
+ * explicit request to bring Content up, so it MAY take focus (it activates the panel).
+ */
+function OpenCue({ activeId }: { activeId: string | null }): JSX.Element {
+  const cue = useOpenCueStore((s) => s.cue);
+  const shown = cue !== null && cue.projectId === activeId ? cue : null;
+  return (
+    <span role="status" className="flex min-w-0 items-center gap-1.5">
+      {shown && (
+        <>
+          <span className="truncate text-fg" title={`${shown.path}: ${shown.reason}`}>
+            Opened {shown.name} in Content (hidden)
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-label={`Show ${shown.name} in Content`}
+            onClick={() => {
+              useWorkspaceControlsStore.getState().openPanel(PanelIds.content);
+              useOpenCueStore.getState().clear();
+            }}
+          >
+            Show
+          </Button>
+        </>
+      )}
+    </span>
+  );
+}
+
 /** Bottom status bar: active project + live connection state + recovery. */
 export function StatusRegion(): JSX.Element {
   const active = useProjectsStore(selectActiveProject);
@@ -90,7 +126,10 @@ export function StatusRegion(): JSX.Element {
   const state: ConnectionState = status?.state ?? 'disconnected';
 
   return (
-    <div className="flex h-6 shrink-0 items-center gap-2 border-t border-edge bg-panel px-2 text-[11px] text-dim">
+    <div
+      data-active-project={active?.id ?? ''}
+      className="flex h-6 shrink-0 items-center gap-2 border-t border-edge bg-panel px-2 text-[11px] text-dim"
+    >
       {active ? (
         <>
           <StatusDot
@@ -119,6 +158,7 @@ export function StatusRegion(): JSX.Element {
       ) : (
         <span>No active project</span>
       )}
+      <OpenCue activeId={active?.id ?? null} />
       <span className="flex-1" />
       <span>Agent Cockpit</span>
     </div>

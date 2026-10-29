@@ -52,6 +52,10 @@ In scope:
   rendered Markdown with changed-block callouts, Mermaid, raw, image-compare),
   task detail, notes, since-seen. All are read-only except **task detail**, which
   mutates beads issue state via the `br` CLI (close/reopen/comment/create — NFR-2).
+- A **terminal callback**: from any cockpit terminal pane (local or remote; tmux or
+  Cockpit mux), `"$COCKPIT_CLI" open <path>` opens that file as a tab in the Content
+  panel of the pane's own project, over a per-project, default-deny socket whose access
+  control is the filesystem (FR-15, NFR-7).
 - A renderer visual system: Tailwind v4 token layer, app-owned primitives, and
   Radix controls.
 - A branded application/launcher icon derived from a transparent source image.
@@ -68,6 +72,9 @@ Out of scope:
   version with a hard-fail mismatch (which triggers a single re-provision).
 - Windows remote-host support (the client may run on macOS/Linux; remote hosts
   are assumed POSIX with `tmux` available).
+- Terminal callback operations other than `open`, and any callback operation that
+  mutates repository, terminal or app state (see
+  [the callback requirements](requirements/terminal-callback-socket.md)).
 
 ## Functional Requirements
 
@@ -323,6 +330,29 @@ noreferrer"`; relative links route through the local-file resolver, while
   search); on a remote project the table is additionally limited to the remote
   helper's file-read cap.
 
+- **FR-15 Terminal callback (`cockpit open`).** A process in a cockpit terminal pane (a
+  user or an agent) runs `"$COCKPIT_CLI" open <path>` and the file opens — or is
+  activated, if already open — as a tab in the Content panel of the pane's own
+  project, with the usual tab identity (the fully-qualified path including the
+  worktree). It works for local and remote projects on the tmux control-mode, tmux
+  session-per-tab and Cockpit mux backends, including splits and new windows (not
+  remote session-per-tab, the first pane of a brand-new remote session, or panes
+  created by the in-pane `cockpit-mux` commands). A project's panes only ever reach
+  that project: two projects on one host never cross, even when the other started the
+  tmux server or mux daemon. A path inside a linked worktree opens with that worktree
+  in its identity (also through a symlinked path); a path outside the project opens as
+  an external file. The Content panel is shown without moving keyboard focus from the
+  terminal; when showing it would hide the terminal, change the group in use, leave a
+  maximized group or resize the terminal, the open is recorded and a status-bar cue
+  offers to show it. With the project disconnected, never activated in this run of the
+  app, or a stale or missing socket in the environment, the CLI exits non-zero within
+  5 s with a clear message and the UI does not change; panes survive an app restart and
+  work again once their project is re-activated. Installs that share tmux session names
+  (`deterministicSessionNames`) inject nothing into those sessions. The channel is a
+  general, versioned terminal → app socket whose only operation is `open`. The numbered
+  requirements are in
+  [docs/requirements/terminal-callback-socket.md](requirements/terminal-callback-socket.md).
+
 ## Non-Functional Requirements
 
 - **NFR-1 Security boundary.** The renderer stays sandboxed
@@ -360,6 +390,16 @@ noreferrer"`; relative links route through the local-file resolver, while
   files degrade to size/binary notices, Markdown (including bare inline HTML)
   is sanitized, and Mermaid/Graphviz SVG output is sanitized before insertion
   into the same document.
+
+- **NFR-7 Terminal callback boundary.** The callback socket is terminal → app only and
+  default-deny: its single allowlisted operation, `open`, only reads and displays.
+  Access control is the filesystem (a 0700 directory and a 0600 socket; the Linux helper
+  also checks the peer uid) and the identity it carries (the project by socket, the pane by
+  environment) is not a secret, so any process of the same user can use it — the stated
+  trust boundary. Input is bounded (64 KiB frames, one request per connection, read
+  deadlines, connection caps, a per-project rate limit) and a request can never name
+  another project. Launching the app from inside a cockpit pane never makes its own panes
+  call back into the outer app.
 
 ## Workflow
 
@@ -420,6 +460,13 @@ The high-level user loop:
 - Renderer surfaces (shell, rail, Dockview host, panels, controls, rows,
   badges, dialogs, status) are styled through shared roles/components, not
   per-element inline styles.
+- From a pane on each local backend, `"$COCKPIT_CLI" open ./README.md` opens or
+  activates that file's tab in the pane's own project and the terminal keeps the
+  keyboard; two projects on one host never cross (FR-15).
+- With the project disconnected, never activated in this run of the app, or a stale or
+  missing socket in the environment, the CLI exits non-zero within 5 s with a clear
+  message and the UI does not change; after an app restart a pane of a re-activated
+  project still works (FR-15, NFR-7).
 
 ## Linked Documents
 
@@ -428,3 +475,5 @@ The high-level user loop:
 - [docs/ARCHITECTURE.md](ARCHITECTURE.md) — cross-cutting boundaries, topology,
   and ownership.
 - [docs/TEST_PLAN.md](TEST_PLAN.md) — test strategy and scope.
+- [docs/requirements/terminal-callback-socket.md](requirements/terminal-callback-socket.md) —
+  the numbered terminal callback socket requirements (FR-15, NFR-7).

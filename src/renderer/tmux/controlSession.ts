@@ -273,11 +273,27 @@ export async function syncFromTmux(projectId: string): Promise<boolean> {
       apply({ type: 'window-add', windowId: w.id });
       apply({ type: 'window-renamed', windowId: w.id, name: w.rest });
     }
-    const layoutRows = await listWindows('#{window_id} #{window_layout}', projectId);
+    // Fold the REAL visible layout + flags, not the full layout alone: while a
+    // window is zoomed tmux returns the SAVED (unzoomed) layout for
+    // `#{window_layout}`, so re-applying it as `visibleLayout` flipped a zoomed
+    // window back to unzoomed (local_repo_explorer-6ywh). Layout strings and
+    // flags contain no spaces, so the space split is safe.
+    const layoutRows = await listWindows(
+      '#{window_id} #{window_layout} #{window_visible_layout} #{window_flags}',
+      projectId,
+    );
     if (!isActiveProject(projectId)) return false;
     for (const w of layoutRows) {
-      const wl = tryParseLayout(w.rest);
-      if (wl) apply({ type: 'layout-change', windowId: w.id, layout: wl, visibleLayout: wl, flags: null });
+      const [full, vis, flags] = w.rest.split(' ');
+      const wl = tryParseLayout(full ?? '');
+      if (!wl) continue;
+      apply({
+        type: 'layout-change',
+        windowId: w.id,
+        layout: wl,
+        visibleLayout: tryParseLayout(vis ?? '') ?? wl,
+        flags: flags ? flags : null,
+      });
     }
     return true;
   } catch {
@@ -483,7 +499,31 @@ export function pushClientSize(host: HTMLElement | null): void {
   if (!host) return;
   const { cols, rows } = clientCells(host);
   const projectId = useTmuxStore.getState().activeProjectId ?? undefined;
-  if (cols > 0 && rows > 0) void store().resize(cols, rows, projectId);
+  if (cols > 0 && rows > 0) sendClientSize(cols, rows, projectId, false);
+}
+
+/** Last client size sent per project, tagged with the channel epoch it was sent
+ *  on. A new epoch (fresh `-CC` attach) is a new client whose size tmux may have
+ *  reset, so the record only matches within the same epoch. */
+const lastSentSize = new Map<string, { epoch: number | undefined; cols: number; rows: number }>();
+
+/**
+ * The one seam through which a client size reaches tmux. Unless `force`, a size
+ * equal to the last one sent on this channel is skipped: a same-size
+ * `refresh-client -C` on a ZOOMED window is NOT a tmux no-op (it unzooms, runs
+ * layout_resize, re-zooms), so the zoomed pane's pty sees full -> split -> full
+ * and the TUI redraws its whole history at the wrong geometry
+ * (local_repo_explorer-6ywh). `nudgeClientSize` passes `force` — its
+ * shrink/restore is deliberately a real round-trip — but still records the size.
+ */
+function sendClientSize(cols: number, rows: number, projectId: string | undefined, force: boolean): void {
+  const epoch = projectId === undefined ? undefined : channelEpoch.get(projectId);
+  if (projectId !== undefined) {
+    const last = lastSentSize.get(projectId);
+    if (!force && last && last.epoch === epoch && last.cols === cols && last.rows === rows) return;
+    lastSentSize.set(projectId, { epoch, cols, rows });
+  }
+  void store().resize(cols, rows, projectId);
 }
 
 /**
@@ -537,12 +577,12 @@ export function nudgeClientSize(host: HTMLElement | null, windowId?: string | nu
   const { cols, rows } = root ? { cols: root.w, rows: root.h } : clientCells(host);
   if (cols <= 0 || rows <= 0) return;
   const projectId = st.activeProjectId;
-  void store().resize(cols, Math.max(1, rows - 1), projectId ?? undefined);
+  sendClientSize(cols, Math.max(1, rows - 1), projectId ?? undefined, true);
   requestAnimationFrame(() => {
     if (useTmuxStore.getState().activeProjectId !== projectId) return;
     // identity restore of the CAPTURED size — never a recompute; addressed at
     // the SAME projectId captured above, not re-read (local_repo_explorer-0255).
-    void store().resize(cols, rows, projectId ?? undefined);
+    sendClientSize(cols, rows, projectId ?? undefined, true);
   });
 }
 
@@ -1026,6 +1066,7 @@ export function resetControlSession(projectId?: string): void {
     clearReinitRetry(projectId);
     inFlight.delete(projectId);
     ready.delete(projectId);
+    lastSentSize.delete(projectId);
     clearPendingWindowRefreshForProject(projectId);
     return;
   }
@@ -1040,6 +1081,7 @@ export function resetControlSession(projectId?: string): void {
   reinitRetryAttempts.clear();
   inFlight.clear();
   ready.clear();
+  lastSentSize.clear();
   pendingWindowRefresh.clear();
 }
 

@@ -2,8 +2,10 @@
  * HelperRpcClient — the Electron-main client half of the length-prefixed JSON
  * RPC protocol served by the Go remote helper (see remote-helper/protocol.go).
  *
- * Wire framing: each message is a 4-byte big-endian uint32 length header
- * followed by that many bytes of a JSON payload. Three payload shapes exist:
+ * Wire framing (the shared codec in src/shared/wire/frame.ts, bound here to
+ * the helper's 16 MiB cap): each message is a 4-byte big-endian uint32 length
+ * header followed by that many bytes of a JSON payload. Three payload shapes
+ * exist:
  *   - request  `{ id, method, params }`
  *   - response `{ id, result, error }`
  *   - event    `{ event, data }` (server push, no id)
@@ -18,10 +20,23 @@
  * no live SSH server or built helper binary.
  */
 import type { Readable, Writable } from 'node:stream';
+import type { CallbackReply } from '@shared/callback/protocol';
 import type { WatchSpec } from '@shared/watch/types';
+import {
+  FrameDecoder as WireFrameDecoder,
+  FrameError,
+  encodeFrame as encodeWireFrame,
+} from '@shared/wire/frame';
 
-/** Protocol version this client speaks; must match the helper's. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * Protocol version this client speaks; must match the helper's
+ * (remote-helper/protocol.go's ProtocolVersion, and build.sh's manifest).
+ *
+ * Version 2 adds the terminal callback socket: the handshake carries the project
+ * id and returns the project's `callbackSock`/`cliPath`, the helper pushes
+ * `callback` events and main answers each with the `callback.reply` RPC.
+ */
+export const PROTOCOL_VERSION = 2;
 
 // ---- Wire message shapes ---------------------------------------------------
 
@@ -47,6 +62,12 @@ interface RpcEvent {
 export interface HandshakeResult {
   protocolVersion: number;
   pid: number;
+  /** The absolute path of this project's callback socket on the host. Absent when
+   *  the helper could not serve one (no project id was sent, no usable directory,
+   *  bind failure); terminals then carry no callback variables. */
+  callbackSock?: string;
+  /** The absolute path of the `cockpit` CLI link on the host; absent with `callbackSock`. */
+  cliPath?: string;
 }
 
 export interface ReadFileResult {
@@ -149,6 +170,9 @@ export interface WatchEventData {
 
 export type WatchEventHandler = (data: WatchEventData) => void;
 
+/** A handler for a named server-push event (see {@link HelperRpcClient.onEvent}). */
+export type HelperEventHandler = (data: unknown) => void;
+
 /** Typed error raised by RPC failures (helper-reported errors or transport). */
 export class HelperRpcError extends Error {
   readonly method: string | undefined;
@@ -159,19 +183,23 @@ export class HelperRpcError extends Error {
   }
 }
 
-const HEADER_BYTES = 4;
 /** Match the helper's 16 MiB cap so a corrupt header can't allocate forever. */
 const MAX_MESSAGE_BYTES = 16 << 20;
 
+/** The shared codec's FrameError, re-raised as the typed error this module has
+ *  always thrown for a bad frame (same message). */
+function asRpcError(err: unknown): unknown {
+  return err instanceof FrameError ? new HelperRpcError(err.message) : err;
+}
+
 /** Encode a JSON-serializable payload as a length-prefixed frame. */
 export function encodeFrame(payload: unknown): Buffer {
-  const body = Buffer.from(JSON.stringify(payload), 'utf8');
-  if (body.length > MAX_MESSAGE_BYTES) {
-    throw new HelperRpcError(`frame too large: ${body.length} bytes`);
+  try {
+    const frame = encodeWireFrame(payload, MAX_MESSAGE_BYTES);
+    return Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength);
+  } catch (err) {
+    throw asRpcError(err);
   }
-  const header = Buffer.allocUnsafe(HEADER_BYTES);
-  header.writeUInt32BE(body.length, 0);
-  return Buffer.concat([header, body]);
 }
 
 /**
@@ -179,37 +207,15 @@ export function encodeFrame(payload: unknown): Buffer {
  * payloads as they become available, buffering partial frames across chunks.
  */
 export class FrameDecoder {
-  // Pending chunks held WITHOUT concatenation, plus their running byte total.
-  // Concatenating the whole accumulated buffer on every chunk (the old approach)
-  // is O(n^2) in chunk count for a large payload that arrives as many small SSH
-  // packets; here we concat exactly once per complete frame instead.
-  private chunks: Buffer[] = [];
-  private buffered = 0;
+  private readonly inner = new WireFrameDecoder(MAX_MESSAGE_BYTES);
 
   /** Append a chunk and return any complete payloads decoded from the buffer. */
   push(chunk: Buffer): unknown[] {
-    if (chunk.length === 0) return [];
-    this.chunks.push(chunk);
-    this.buffered += chunk.length;
-    const out: unknown[] = [];
-    for (;;) {
-      if (this.buffered < HEADER_BYTES) break;
-      // Coalesce only when we have at least a header to read; one concat yields a
-      // contiguous view for both the length read and the body slice below.
-      const buf = this.chunks.length === 1 ? this.chunks[0]! : Buffer.concat(this.chunks, this.buffered);
-      this.chunks = [buf];
-      const length = buf.readUInt32BE(0);
-      if (length > MAX_MESSAGE_BYTES) {
-        throw new HelperRpcError(`frame too large: ${length} bytes`);
-      }
-      if (buf.length < HEADER_BYTES + length) break;
-      const body = buf.subarray(HEADER_BYTES, HEADER_BYTES + length);
-      out.push(JSON.parse(body.toString('utf8')));
-      const rest = buf.subarray(HEADER_BYTES + length);
-      this.chunks = rest.length > 0 ? [rest] : [];
-      this.buffered = rest.length;
+    try {
+      return this.inner.push(chunk);
+    } catch (err) {
+      throw asRpcError(err);
     }
-    return out;
   }
 }
 
@@ -234,6 +240,8 @@ export class HelperRpcClient {
   private readonly decoder = new FrameDecoder();
   private readonly pending = new Map<number, PendingCall>();
   private readonly watchHandlers = new Map<string, WatchEventHandler>();
+  /** Handlers registered with {@link onEvent}, by event name. */
+  private readonly eventHandlers = new Map<string, Set<HelperEventHandler>>();
   private nextId = 1;
   private closed = false;
 
@@ -269,6 +277,7 @@ export class HelperRpcClient {
         const handler = this.watchHandlers.get(data.token);
         if (handler) handler(data);
       }
+      this.emitEvent(ev.event, ev.data);
       return;
     }
     // Otherwise a response correlated by id.
@@ -283,6 +292,46 @@ export class HelperRpcClient {
         call.resolve(res.result);
       }
     }
+  }
+
+  /** Deliver an event to the handlers registered for its name. A handler that
+   *  throws must not break the stream (or the handlers after it); its owner is
+   *  responsible for logging its own failures. */
+  private emitEvent(event: string, data: unknown): void {
+    const handlers = this.eventHandlers.get(event);
+    if (!handlers) return;
+    for (const handler of [...handlers]) {
+      try {
+        handler(data);
+      } catch {
+        /* a handler owns its own error reporting */
+      }
+    }
+  }
+
+  /**
+   * Register a handler for a server-push event by name (the registry added for the
+   * helper's `callback` event; `watch` events are ALSO delivered here, in addition
+   * to the per-token routing of {@link watchSubscribe}). An event with no handler
+   * is dropped. Returns an unsubscribe function.
+   */
+  onEvent(event: string, handler: HelperEventHandler): () => void {
+    let handlers = this.eventHandlers.get(event);
+    if (!handlers) {
+      handlers = new Set();
+      this.eventHandlers.set(event, handlers);
+    }
+    handlers.add(handler);
+    return () => {
+      const current = this.eventHandlers.get(event);
+      current?.delete(handler);
+      if (current?.size === 0) this.eventHandlers.delete(event);
+    };
+  }
+
+  /** True once the helper stream has ended or failed: nothing it was serving is live. */
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   private failAll(reason: string): void {
@@ -318,8 +367,26 @@ export class HelperRpcClient {
 
   // ---- Typed method wrappers ----------------------------------------------
 
-  handshake(): Promise<HandshakeResult> {
-    return this.call<HandshakeResult>('handshake', { protocolVersion: PROTOCOL_VERSION });
+  /**
+   * The first exchange. With a `projectId` the helper also starts that project's
+   * callback listener and reports where it is; without one it starts nothing (the
+   * helper takes no launch arguments, so this is how it learns the project).
+   */
+  handshake(projectId?: string): Promise<HandshakeResult> {
+    return this.call<HandshakeResult>('handshake', {
+      protocolVersion: PROTOCOL_VERSION,
+      ...(projectId ? { projectId } : {}),
+    });
+  }
+
+  /**
+   * Answer a `callback` event: main's reply to the request the helper forwarded
+   * under `connId`, which the helper relays to the waiting `cockpit` CLI.
+   * `delivered: false` means nobody was waiting any more (the helper already
+   * answered `timeout`, or the connection went away); that is not an error.
+   */
+  callbackReply(connId: number, reply: CallbackReply): Promise<{ delivered: boolean }> {
+    return this.call<{ delivered: boolean }>('callback.reply', { connId, reply });
   }
 
   readFile(

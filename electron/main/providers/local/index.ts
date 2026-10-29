@@ -64,6 +64,16 @@ import { loadSettings } from '../../config';
 import { createConnectionMachine, type ConnectionMachine } from '../connectionMachine';
 import { resolveBranchPoint as gitResolveBranchPoint } from '../../git/branchPoint';
 import type { BranchPoint } from '@shared/ipc/channels';
+import { NO_CALLBACK_ENVIRONMENT, type CallbackEnvironmentSource } from '@shared/callback/env';
+import { noteCallbackDisabledForSharedSessions } from '../../callback/sharedSessions';
+
+export interface LocalProviderDeps {
+  /**
+   * This project's callback environment (the broker's live socket plus the CLI
+   * the app links). Absent means nothing is injected into any of its terminals.
+   */
+  callbackEnvironment?: CallbackEnvironmentSource;
+}
 
 export class LocalProvider implements WorkspaceProvider {
   readonly kind: ProjectKind = 'local';
@@ -76,16 +86,32 @@ export class LocalProvider implements WorkspaceProvider {
   private readonly machine: ConnectionMachine;
   private readonly watch: LocalWatchManager;
   private readonly terminals: LocalTerminalManager;
+  private readonly callbackEnvironment: CallbackEnvironmentSource | undefined;
   private muxConnectionManager: RemoteMuxConnectionManager | null = null;
   private muxTerminals: RemoteMuxTerminalManager | null = null;
 
-  constructor(projectId: string, rootPath: string) {
+  constructor(projectId: string, rootPath: string, deps: LocalProviderDeps = {}) {
     this.projectId = projectId;
     this.rootPath = rootPath;
     this.machine = createConnectionMachine(projectId, 'connected');
     this.watch = new LocalWatchManager(rootPath);
-    const token = sessionNameToken(loadSettings().deterministicSessionNames, projectId, rootPath);
-    this.terminals = new LocalTerminalManager(rootPath, token);
+    this.callbackEnvironment = deps.callbackEnvironment;
+    // ONE settings read both NAMES the session-per-tab sessions and decides whether
+    // callback injection may write to them (requirement 12): with shared session
+    // names the sockets of different installs would collide, so this provider's
+    // session-per-tab terminals get no injection and no `update-environment` entry
+    // of their own, whatever the setting says later. Mux sessions are namespaced by
+    // the raw project id and are not gated.
+    const sharedSessionNames = loadSettings().deterministicSessionNames;
+    const token = sessionNameToken(sharedSessionNames, projectId, rootPath);
+    if (sharedSessionNames && deps.callbackEnvironment) {
+      noteCallbackDisabledForSharedSessions(projectId, 'session-per-tab');
+    }
+    this.terminals = new LocalTerminalManager(rootPath, token, {
+      ...(deps.callbackEnvironment && !sharedSessionNames
+        ? { callbackEnvironment: deps.callbackEnvironment }
+        : {}),
+    });
   }
 
   private resolve(path: string): string {
@@ -112,6 +138,7 @@ export class LocalProvider implements WorkspaceProvider {
         this.projectId,
         () => loadSettings().muxPersistScrollback,
         () => loadSettings().muxScrollbackLines,
+        this.callbackEnvironment ?? NO_CALLBACK_ENVIRONMENT,
       );
     }
     return this.muxTerminals;

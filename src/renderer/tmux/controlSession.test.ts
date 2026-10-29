@@ -48,6 +48,7 @@ import {
   acquireControlSession,
   ensureWindows,
   nudgeClientSize,
+  pushClientSize,
   nudgePaneRows,
   queueRefreshForOtherWindows,
   queueWindowRefresh,
@@ -1253,5 +1254,115 @@ describe('nudgeClientSize (client resize round-trip — local_repo_explorer-ppjp
 
     expect(api.tmuxControl.resize).toHaveBeenCalledTimes(2);
     expect(api.tmuxControl.resize).toHaveBeenNthCalledWith(2, 100, 35, P);
+  });
+});
+
+describe('zoom-safe sync and client-size dedupe (local_repo_explorer-6ywh)', () => {
+  const PZ = 'proj-zoom';
+  // tmux 3.7c, zoomed 2-pane stacked window: #{window_layout} is the SAVED
+  // (unzoomed) layout; #{window_visible_layout} is the zoomed single pane.
+  const FULL = 'b653,200x60,0,0[200x30,0,0,0,200x29,0,31,1]';
+  const VISIBLE = 'ae9d,200x60,0,0,0';
+
+  beforeEach(() => {
+    resetControlSession();
+    useTmuxStore.getState().reset();
+    useTmuxStore.getState().setActiveProject(PZ);
+    api.tmuxControl.command.mockReset();
+    api.tmuxControl.resize.mockReset();
+    api.tmuxControl.resize.mockResolvedValue(undefined);
+    const one: LayoutNode = { type: 'leaf', paneId: '%0', w: 200, h: 60, x: 0, y: 0 };
+    seedWindow(PZ, '@0', one);
+    seedWindow('proj-other', '@0', one);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function tmuxAnswers(flags: string, vis: string): void {
+    api.tmuxControl.command.mockImplementation(async (args: string) => {
+      const m = /^list-windows -F "(.*)"$/.exec(args);
+      if (!m) return { num: 1, error: false, lines: [] };
+      const line = m[1]!
+        .replace('#{window_id}', '@0')
+        .replace('#{window_name}', 'zsh')
+        .replace('#{window_layout}', FULL)
+        .replace('#{window_visible_layout}', vis)
+        .replace('#{window_flags}', flags);
+      return { num: 1, error: false, lines: [line] };
+    });
+  }
+
+  it('syncFromTmux keeps a zoomed window zoomed (folds visible layout + flags)', async () => {
+    tmuxAnswers('*Z', VISIBLE);
+    await syncFromTmux(PZ);
+    const w = useTmuxStore.getState().byProject[PZ]?.windows['@0'];
+    expect(w?.isZoomed).toBe(true);
+    expect(w?.visibleLayout?.type).toBe('leaf');
+    expect(w?.layout?.type).toBe('split');
+  });
+
+  it('syncFromTmux on an unzoomed window folds visibleLayout == layout and not zoomed', async () => {
+    tmuxAnswers('*', FULL);
+    await syncFromTmux(PZ);
+    const w = useTmuxStore.getState().byProject[PZ]?.windows['@0'];
+    expect(w?.isZoomed).toBe(false);
+    expect(w?.visibleLayout?.type).toBe('split');
+  });
+
+  it('pushClientSize does not re-send a size equal to the last one sent', () => {
+    vi.spyOn(paneRegistry, 'getPaneTermSize').mockReturnValue({ cols: 200, rows: 60 });
+    const host = document.createElement('div');
+    pushClientSize(host);
+    pushClientSize(host);
+    expect(api.tmuxControl.resize).toHaveBeenCalledTimes(1);
+    expect(api.tmuxControl.resize).toHaveBeenCalledWith(200, 60, PZ);
+  });
+
+  it('pushClientSize sends again when the size changes, and again on a new channel epoch', async () => {
+    api.tmuxControl.command.mockResolvedValue({ num: 1, error: false, lines: [] });
+    acquireControlSession(PZ); // registers the shared onTmux subscription
+    await whenReady(PZ);
+    const size = { cols: 200, rows: 60 };
+    vi.spyOn(paneRegistry, 'getPaneTermSize').mockImplementation(() => size);
+    const host = document.createElement('div');
+    pushClientSize(host);
+    size.cols = 190;
+    pushClientSize(host);
+    expect(api.tmuxControl.resize).toHaveBeenCalledTimes(2);
+    pushClientSize(host);
+    expect(api.tmuxControl.resize).toHaveBeenCalledTimes(2);
+    emitAttached(PZ, 2); // fresh -CC client: its size must be re-established
+    pushClientSize(host);
+    expect(api.tmuxControl.resize).toHaveBeenCalledTimes(3);
+  });
+
+  it('dedupe is per project', () => {
+    vi.spyOn(paneRegistry, 'getPaneTermSize').mockReturnValue({ cols: 200, rows: 60 });
+    const host = document.createElement('div');
+    pushClientSize(host);
+    useTmuxStore.getState().setActiveProject('proj-other');
+    pushClientSize(host);
+    expect(api.tmuxControl.resize).toHaveBeenCalledTimes(2);
+    expect(api.tmuxControl.resize).toHaveBeenLastCalledWith(200, 60, 'proj-other');
+  });
+
+  it('nudgeClientSize still round-trips (shrink then restore) after an identical push', () => {
+    const raf = stubRaf();
+    seedWindow(PZ, '@0', { type: 'leaf', paneId: '%0', w: 200, h: 60, x: 0, y: 0 });
+    vi.spyOn(paneRegistry, 'getPaneTermSize').mockReturnValue({ cols: 200, rows: 60 });
+    const host = document.createElement('div');
+    pushClientSize(host); // records 200x60 as last-sent
+    api.tmuxControl.resize.mockClear();
+    nudgeClientSize(host);
+    raf.flush();
+    expect(api.tmuxControl.resize.mock.calls).toEqual([
+      [200, 59, PZ],
+      [200, 60, PZ],
+    ]);
+    // The restore is recorded, so a following identical push is deduped.
+    pushClientSize(host);
+    expect(api.tmuxControl.resize).toHaveBeenCalledTimes(2);
   });
 });

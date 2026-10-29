@@ -3,6 +3,7 @@ import { TooltipProvider } from '../ui';
 import { initProjectsSync, initSessionSync } from '../providerClient';
 import { initSettingsSync, useSettingsStore, SettingsDialog } from '../settings';
 import { initPanelDataSync } from '../workspace/panelDataSync';
+import { initCallbackOpenSync } from '../workspace/callbackOpen';
 import { ProjectTabs } from './ProjectTabs';
 import { StatusRegion } from './StatusRegion';
 
@@ -19,7 +20,10 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
     const offProjects = initProjectsSync();
     const offPanelData = initPanelDataSync();
     const offSettings = initSettingsSync();
+    // A terminal's `cockpit open`: record the tab, reveal Content without focus.
+    const offCallbackOpen = initCallbackOpenSync();
     return () => {
+      offCallbackOpen();
       offPanelData();
       offProjects();
       offSession();

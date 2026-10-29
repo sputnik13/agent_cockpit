@@ -475,3 +475,79 @@ describe('refresh button issues the per-pane row-nudge on a multi-pane split (bv
     });
   });
 });
+
+describe('zoom is non-structural and remount-safe (local_repo_explorer-6ywh)', () => {
+  const tbSplit = (): WindowState['layout'] => ({
+    type: 'split',
+    dir: 'tb',
+    w: 80,
+    h: 49,
+    x: 0,
+    y: 0,
+    children: [
+      { type: 'leaf', paneId: '%0', w: 80, h: 24, x: 0, y: 0 },
+      { type: 'leaf', paneId: '%1', w: 80, h: 24, x: 0, y: 25 },
+    ],
+  });
+  const slice = (): Partial<ReturnType<typeof emptyView>> => ({
+    windowOrder: ['@0'],
+    windows: { '@0': { windowId: '@0', name: 'shell', layout: tbSplit() } },
+    activeWindowId: '@0',
+    panes: { '%0': { paneId: '%0', windowId: '@0' }, '%1': { paneId: '%1', windowId: '@0' } },
+  });
+
+  it('clicking Zoom sends resize-pane -Z and a re-sync but no client-size push', async () => {
+    const { container } = render(<ControlTerminalPanel />);
+    await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
+    act(() => setActiveSlice(slice()));
+    await waitFor(() => expect(container.querySelectorAll('.ac-term').length).toBe(2));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    api.tmuxControl.command.mockClear();
+    api.tmuxControl.resize.mockClear();
+    // Forget the last-sent size so the client-size dedupe cannot mask a push.
+    resetControlSession('proj-1');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Zoom pane' })[0]!);
+    await waitFor(() => {
+      const cmds = api.tmuxControl.command.mock.calls.map((c) => c[0] as string);
+      expect(cmds.some((a) => a.startsWith('resize-pane -Z'))).toBe(true);
+      expect(cmds.some((a) => a.startsWith('list-windows'))).toBe(true); // syncFromTmux still runs
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(api.tmuxControl.resize).not.toHaveBeenCalled();
+  });
+
+  it('remounting a pane whose renderer already has the current font/theme does not applyAppearance', async () => {
+    const apply = vi.spyOn(paneRegistry, 'applyAppearance');
+    const { container, unmount } = render(<ControlTerminalPanel />);
+    await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
+    act(() => setActiveSlice(slice()));
+    await waitFor(() => expect(container.querySelectorAll('.ac-term').length).toBe(2));
+    apply.mockClear();
+    unmount(); // panes detach (registry keeps the entries)
+    const again = render(<ControlTerminalPanel />);
+    await waitFor(() => expect(again.container.querySelectorAll('.ac-term').length).toBe(2));
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('a real font-size change still applies appearance to mounted panes', async () => {
+    const apply = vi.spyOn(paneRegistry, 'applyAppearance');
+    const { container } = render(<ControlTerminalPanel />);
+    await waitFor(() => expect(api.tmuxControl.open).toHaveBeenCalled());
+    act(() => setActiveSlice(slice()));
+    await waitFor(() => expect(container.querySelectorAll('.ac-term').length).toBe(2));
+    apply.mockClear();
+    const size = useSettingsStore.getState().settings.fontSize;
+    act(() => {
+      useSettingsStore.setState((st) => ({ settings: { ...st.settings, fontSize: size + 2 } }));
+    });
+    await waitFor(() => expect(apply).toHaveBeenCalled());
+    act(() => {
+      useSettingsStore.setState((st) => ({ settings: { ...st.settings, fontSize: size } }));
+    });
+  });
+});

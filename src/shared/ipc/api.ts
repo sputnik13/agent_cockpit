@@ -4,6 +4,7 @@ import type {
   BeadsIssue,
   BeadsTaskGraph,
   BranchPoint,
+  CallbackOpenPushEvent,
   Changeset,
   LogEntry,
   NoteRecord,
@@ -310,6 +311,9 @@ export interface RendererApi {
     onWatch(handler: (e: WatchPushEvent) => void): () => void;
     onStatus(handler: (e: StatusEvent) => void): () => void;
     onProjectsChanged(handler: (e: { at: string }) => void): () => void;
+    /** A terminal ran `cockpit open` (main already classified the path). Main
+     *  window only; the renderer validates the payload before using it. */
+    onCallbackOpen(handler: (e: CallbackOpenPushEvent) => void): () => void;
     onLog(handler: (e: LogEntry) => void): () => void;
   };
 }

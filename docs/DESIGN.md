@@ -148,9 +148,18 @@ the tree (VS Code Remote-inspired thin client).
    so a read at `connected` never hits "helper unavailable".
 3. `RemoteHelperLauncher.launch` runs `uname -sm`, selects the matching binary
    from the local `remote-helper/dist` manifest, SFTP-uploads it to
-   `~/.agent-cockpit/helper-<version>-<os>-<arch>` (skipped if already present),
-   `chmod +x`, launches it on an exec channel, and handshakes. A protocol-version
-   mismatch re-provisions and relaunches once, else hard-fails.
+   `~/.agent-cockpit/helper-<version>-<sourceHash12>-<os>-<arch>` (keyed on the
+   build's source hash, so one path is one build; a present file is skipped if it
+   reports the current source hash; every write is uploaded beside, then renamed
+   into place, so the final name never holds a partial file and a helper still
+   running from it keeps its inode; old builds are not pruned), `chmod +x`,
+   launches it on an exec channel, and handshakes. The handshake names the
+   project, so the helper binds that project's terminal callback socket and
+   answers with its `callbackSock` and `cliPath` (see ARCHITECTURE.md →
+   "Terminal Callback Socket"); the provider registers its `callback` handler on
+   the client before the handshake is sent, so a request that overtakes the
+   handshake reply is not lost. A protocol-version mismatch re-provisions and
+   relaunches once, else hard-fails.
 4. `RemoteTerminalManager.open` runs `tmux -L agent-cockpit new-session -A -s
 agent-cockpit-terminal-<projectId>-<key>` over a PTY shell channel
    (attach-or-create, on a dedicated socket). The agent runs inside tmux.
@@ -216,6 +225,63 @@ Workgraph data stay current and a return is instant — no warm/hot distinction.
 
 <!-- AI NOTE: source: electron/main/providers/sessionManager.ts:41 -->
 <!-- AI NOTE: source: electron/main/providers/local/index.ts:140 ; electron/main/providers/remote/index.ts:301 -->
+
+### UC-4 Open a File from a Terminal Pane (`cockpit open`)
+
+#### Summary
+
+A user, or an agent, in a cockpit terminal pane wants a file shown in the Content panel of
+that pane's own project without leaving the terminal. The pane's environment carries the
+project's callback socket and the `cockpit` CLI; `"$COCKPIT_CLI" open <path>` sends one framed
+request, main (local project) or the project's own remote helper (remote project) decides it,
+and the renderer opens the tab without taking the keyboard.
+
+#### Key Design Rationale
+
+The variables must reach the pane by the mechanism that actually reaches a pane on each
+backend. A tmux pane inherits its SESSION environment, never the attaching client's, so local
+tmux uses a local-only `update-environment` entry fed by the attaching client (the shared
+server is started variable-free), remote control-mode applies `set-environment` over the
+control channel before the channel is announced, and Cockpit mux adds env operands at its
+three creation sites. The pane identity is not a secret; the socket's filesystem permissions
+are the access control. See [the design breakout](design/terminal-callback-socket.md).
+
+#### Walkthrough
+
+1. Opening a local session binds the project's socket first (`SessionManager.open` waits for
+   the broker), so the first terminal already has `COCKPIT_CALLBACK_SOCK`; a remote project's
+   helper binds its socket during the handshake and returns the path.
+2. In a pane of project A (root `/work/a`, active), the user types
+   `"$COCKPIT_CLI" open docs/plan.md`.
+3. The CLI sends `{v:1, id:1, op:'open', pane:{kind:'tmux', id:'%3'}, args:{path:'/work/a/docs/plan.md',
+canonicalPath:'/work/a/docs/plan.md'}}` on `COCKPIT_CALLBACK_SOCK`.
+4. The listener — main's, or the helper's, which forwards a `callback` event to main — hands it
+   to `CallbackBroker.handle('A', …)`. The broker checks the envelope, the allowlist, the rate
+   limit, A's connection status and the argument bounds, and replies `dispatched`; the CLI exits
+   0 and prints nothing.
+5. The broker classifies the canonical path against A's worktree roots to
+   `{kind:'file', path:'docs/plan.md', worktreePath:'/work/a'}` and emits it; main sends
+   `evt:callback-open` to the main window only.
+6. The renderer records the tab with `select('A', selection)` and, because A is the active
+   project, shows the Content panel without activating any group: the tab is labelled
+   `plan.md` with the full path on hover, and the next keystroke still goes to the shell. For a
+   non-active project it only records the tab.
+
+#### Details
+
+Failure modes are all visible and bounded: a disconnected, never-activated or stale-socket
+project makes the CLI exit 3 within 5 s with a reason; an over-rate, malformed or unsupported
+request is refused with exit 4; no reply in time is exit 1 ("no confirmation", not "the tab did
+not open"). A request whose path cannot be classified after `dispatched` is logged and opens
+nothing. With `deterministicSessionNames` on the tmux sessions are shared between installs, so
+nothing is injected into them and the CLI exits 3.
+
+#### References
+
+<!-- AI NOTE: source: electron/main/callback/broker.ts:108 ; remote-helper/cockpit_cli.go:106 ; src/renderer/workspace/callbackOpen.ts:126 -->
+
+- [docs/design/terminal-callback-socket.md](design/terminal-callback-socket.md) — implementation design.
+- [docs/ARCHITECTURE.md](ARCHITECTURE.md) — "Terminal Callback Socket".
 
 ## Data and State Design
 
@@ -301,6 +367,11 @@ re-render the active view, the mechanism behind FR-3/NFR-5):
   slices off per-session connection status + `projectId`-routed watch events.
   External IPC/watch results are written into stores via `set` from outside React,
   keeping panels declarative.
+
+The terminal callback socket persists nothing and needs no migration: its sockets and the
+local CLI link live under `userData/callback/` (or the `/tmp/ac-cb-<uid>/` fallback; remotely
+under the helper's runtime directory), are derived from the project id and recreated at each
+session start, and the persisted Content-tab format is unchanged.
 
 ## Detailed Design
 
@@ -892,10 +963,17 @@ flowchart TB
 Remote helper protocol: a length-prefixed (4-byte big-endian) JSON stream over
 the SSH exec channel with three payload shapes — `request {id,method,params}`,
 `response {id,result,error}`, and server-push `event {event,data}` (used for
-`watch`). `PROTOCOL_VERSION = 1` on both ends; messages are capped at 16 MiB.
-The Go helper is stateless beyond active watches; the codec
-(`HelperRpcClient`) is decoupled from ssh2 so it is unit-testable over an
-in-memory stream.
+`watch` and `callback`). `PROTOCOL_VERSION = 2` on both ends (pinned together
+with `build.sh` and the Makefile by a test); messages are capped at 16 MiB.
+Version 2 added the terminal callback socket: the handshake carries the
+`projectId` and returns `callbackSock`/`cliPath`, the helper pushes `callback`
+events, and main answers each with the `callback.reply` RPC. The helper is a
+reader plus a single worker: the reader answers `callback.reply` itself and
+queues every other request on an unbounded FIFO the worker drains in arrival
+order, so a slow method never delays a pending callback reply. The Go helper is
+stateless beyond active watches and its callback listener; the codec
+(`HelperRpcClient`, with an event registry for `callback` and `watch`) is
+decoupled from ssh2 so it is unit-testable over an in-memory stream.
 
 Dockview presets ship two arrangements built by
 [src/renderer/workspace/presets.ts](../src/renderer/workspace/presets.ts):
@@ -919,6 +997,16 @@ dropdown clears the current view's saved layout and reapplies the proportional
 default at a chosen column ratio (`1:3:1`, `1:2:1`, `1:1:1`, or `2:3:1`). The
 View switcher, Panels (reopen), and Reset controls live in the shell top bar
 (`ProjectTabs`), bridged from the workbench via `workspaceControlsStore`.
+
+A terminal's `cockpit open` shows the Content panel through a separate path that
+never activates a panel (`workspaceControlsStore.revealContent` ->
+[src/renderer/workspace/panelReveal.ts](../src/renderer/workspace/panelReveal.ts)),
+so the keyboard stays where the user is typing; it declines when Content is tabbed
+behind the Terminal, is a background tab of the group in use, or another group is
+maximized (and raises a status-bar cue with a Show action, `StatusRegion` +
+`openCueStore`), and re-adds a closed Content panel under Changes (else at the right
+edge) with the terminal group pinned so it is never resized. The rules and the
+reasons are in ARCHITECTURE.md, "Terminal Callback Socket".
 
 ### Content panel line notes
 
@@ -1176,6 +1264,19 @@ destroying a replacement. Two adapters:
   `direct_graphics_v1` attach capability and writes the daemon-produced quiet seed.
   It does not parse, persist, or source image protocols itself.
 
+### Terminal callback socket
+
+`cockpit open` is a terminal → app channel: a per-project unix socket (main locally, the project's
+remote helper remotely) carrying a length-prefixed JSON envelope with a default-deny allowlist
+whose only operation is `open`. One decision function (`CallbackBroker.handle`) serves both the
+local listener and the remote `callback` event path; it replies `dispatched` after cheap checks and
+classifies the path afterwards, and the renderer opens the tab without moving keyboard focus. The
+environment reaches each backend's panes by its own mechanism (see UC-4), the `cockpit` CLI is a
+multi-call mode of the helper's Go binary, and the whole feature is verified live on every local
+backend. The envelope, injection, helper, CLI, bridge, failure-handling and limitation detail is in
+[docs/design/terminal-callback-socket.md](design/terminal-callback-socket.md); the structure and
+invariants are in [docs/ARCHITECTURE.md](ARCHITECTURE.md) ("Terminal Callback Socket").
+
 ## Observability and Recovery
 
 Connection state (`disconnected`/`connecting`/`connected`/`reconnecting`/
@@ -1266,6 +1367,16 @@ checkpoint:
     (`electron/main/watch/ingest.ts`), renderer dispatch hub (`src/renderer/watch/hub.ts`),
     `showAllChanges` setting, and Changes surface filter. Closes the remote
     auto-refresh gap (FR-8 transport parity).
+13. **Terminal callback socket** (additive) — delivered in sequenced increments, each with a
+    runnable checkpoint: the shared wire codec, the identity model, socket paths and the
+    `CallbackBroker` with its local listener and the startup environment scrub; environment
+    injection on every terminal-creation path (local-only indexed `update-environment`, remote
+    `set-environment`, mux operands, the shared-session gate); the remote helper's listener,
+    reader/worker split, `callback`/`callback.reply` and the multi-call `cockpit` CLI with its
+    local and remote links; the renderer event and the no-focus reveal; and an integrated
+    acceptance suite against the built app (every local backend, a restart, shared session
+    names). The per-increment checks are in
+    [docs/test/terminal-callback-socket.md](test/terminal-callback-socket.md).
 
 ## Directory Structure
 
@@ -1274,20 +1385,21 @@ electron/main/
   providers/
     types.ts              # main-side provider type re-exports
     registry.ts           # ProviderRegistry.create({projectId, spec})
-    sessionManager.ts     # background-live sessions, single activeId, per-session watch + activity tracker
+    sessionManager.ts     # background-live sessions, single activeId, per-session watch + local callback socket + activity tracker
     sessionReaper.ts      # remote-only idle aging-out (first periodic main timer)
-    local/                # index, reads (simple-git/fs/beads), watch (chokidar), terminal (node-pty), tmuxControl (per-project -CC session)
-    remote/               # transport (Ssh2Transport — only ssh2 importer), transportTypes/transportFactory (RemoteTransport seam), helper (SFTP launch), rpcClient (codec), tmux, tmuxControl (-CC over SSH shell channel), index
+    local/                # index, reads (simple-git/fs/beads), watch (chokidar), terminal (node-pty), tmuxControl (per-project -CC session), tmuxServer (variable-free shared-server start + attaching-client env), controlManager (control-mode manager + shared-session gate)
+    remote/               # transport (Ssh2Transport — only ssh2 importer), transportTypes/transportFactory (RemoteTransport seam), helper (SFTP launch; names the project in the handshake), rpcClient (helper RPC client with event registry; frame codec in src/shared/wire), tmux, tmuxControl (-CC over SSH shell channel; session-environment injection), muxTerminal (mux env operands), index (callback bridge + handshake-derived environment)
+  callback/               # terminal callback socket (terminal -> app): CallbackBroker, per-project listener, socket paths, path classification, startup env scrub, injection support (local/remote environment sources, safe resolver, shared-session gate note), remoteBridge (helper `callback` events -> the broker's decision function -> `callback.reply`), cliLink (the local `cockpit` CLI link under userData), rendererForward (classified opens -> `evt:callback-open`, main window only)
   ipc/index.ts            # typed provider IPC bridge + event forwarding (incl. tmuxControl:* and evt:tmux)
   watch/
     ingest.ts             # per-project ingest pipeline: normalize → classify → debounce → CanonicalWatchEvent
   sessions.ts             # tmux session inventory (cockpit socket) for SessionsDialog
   store/                  # sqlite, migrations, projects, notes
-remote-helper/            # Go static helper: protocol, commands, watch, main, build
+remote-helper/            # Go static helper: protocol, commands, watch, main (reader/worker), callback_* (callback wire/protocol/path/listener/service), cockpit_cli + cockpit_link (the multi-call `cockpit` CLI), build
 src/renderer/
   shell/                  # AppShell, ProjectTabs (top strip), StatusRegion
   ui/                     # owned primitives over Radix
-  workspace/              # Dockview host, presets, panels, theme
+  workspace/              # Dockview host, presets, panels, theme; panelFocus (keyboard-focus seam), panelReveal (show a panel without focus), callbackOpen (`evt:callback-open` handler)
   terminal/               # session-per-tab backend: XtermView, TerminalPanel, terminalRegistry, backendSwitch
   tmux/                   # control-mode backend: ControlTerminalPanel, PaneXterm, controlPaneRegistry, controlSession, tmuxStore, extractScreenTitle
   run/                    # RunPanel (per-project run command; binds to a tab-namespace tty or a control-mode pane)
@@ -1300,6 +1412,8 @@ src/shared/
   providers/types.ts      # WorkspaceProvider (the seam)
   ipc/                    # channels + api (typed IPC contract)
   tmux/                   # pure control-mode protocol: parser, codec, layout, commands, types
+  wire/frame.ts           # length-prefixed JSON framing shared by the helper RPC stream and the callback socket
+  callback/               # callback socket protocol: envelope, limits, validation, pane identity, wire fixtures for the Go mirror; env.ts (injected variables, tmux update-environment indices, mux operands)
   watch/
     policy.ts             # SINGLE SOURCE: WatchCategory, classifyWatchPath, deriveWatchSpec, isHiddenFromChanges, WATCH_DEBOUNCE_MS
 ```
@@ -1316,5 +1430,7 @@ src/shared/
   rendered-view per-item diff-highlighting design breakout.
 - [docs/design/ui-design-language.md](design/ui-design-language.md) — UI
   design-language record (color roles, component patterns).
+- [docs/design/terminal-callback-socket.md](design/terminal-callback-socket.md) — terminal
+  callback socket and `cockpit open` implementation design breakout.
 - [docs/reference/README.md](reference/README.md) — durable research records,
   including the Ghostty-WASM custom WebGL renderer viability assessment.

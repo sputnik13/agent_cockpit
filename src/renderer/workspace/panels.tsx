@@ -95,7 +95,12 @@ function PanelHost(props: IDockviewPanelProps<{ panelId: PanelId }>): JSX.Elemen
   return (
     <PanelFullscreenProvider value={fullscreen}>
       <PanelFocusProvider value={setFocusOverride}>
-        <div ref={rootRef} tabIndex={-1} className="h-full min-h-0 outline-none">
+        <div
+          ref={rootRef}
+          tabIndex={-1}
+          data-panel-id={panelId}
+          className="h-full min-h-0 outline-none"
+        >
           {Comp ? <Comp /> : <EmptyState title="Unknown panel" hint={panelId} />}
         </div>
       </PanelFocusProvider>

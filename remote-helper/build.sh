@@ -6,7 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 VERSION="${VERSION:-0.1.0}"
-PROTOCOL_VERSION="${PROTOCOL_VERSION:-1}"
+# Keep in step with ProtocolVersion in protocol.go and PROTOCOL_VERSION in
+# electron/main/providers/remote/rpcClient.ts.
+PROTOCOL_VERSION="${PROTOCOL_VERSION:-2}"
 DIST="dist"
 
 # os/arch targets to build.

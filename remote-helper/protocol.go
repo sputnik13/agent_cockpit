@@ -11,7 +11,13 @@ import (
 // ProtocolVersion is the wire protocol version implemented by this helper.
 // The client sends its requested version in the initial handshake; a mismatch
 // causes the client to re-provision a compatible helper binary.
-const ProtocolVersion = 1
+//
+// Version 2 adds the terminal callback socket: the handshake carries the
+// project id and returns the project's callbackSock and cliPath, the helper
+// pushes `callback` events, and main answers them with the `callback.reply` RPC
+// (see callback_service.go). Keep build.sh, the Makefile and the TypeScript
+// PROTOCOL_VERSION (electron/main/providers/remote/rpcClient.ts) in step.
+const ProtocolVersion = 2
 
 // Version is the helper release version. The Makefile may override it via
 // -ldflags "-X main.Version=...".
@@ -118,10 +124,20 @@ func decodeRequest(r io.Reader) (Request, error) {
 // HandshakeParams is the params object for the handshake method.
 type HandshakeParams struct {
 	ProtocolVersion int `json:"protocolVersion"`
+	// ProjectID names the project this helper serves. The helper takes no launch
+	// arguments, so this is how it learns which callback socket to bind. Absent
+	// (an older or callback-less client): no listener is started.
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // HandshakeResult is returned on a successful handshake.
 type HandshakeResult struct {
 	ProtocolVersion int `json:"protocolVersion"`
 	PID             int `json:"pid"`
+	// CallbackSock is the absolute path of this project's callback socket on this
+	// host, and CLIPath the absolute path of the `cockpit` CLI link. Both empty
+	// when callback is unavailable (no project id, no usable directory, bind
+	// failure): terminals then simply carry no callback variables.
+	CallbackSock string `json:"callbackSock,omitempty"`
+	CLIPath      string `json:"cliPath,omitempty"`
 }

@@ -312,6 +312,7 @@ const api: RendererApi = {
     onWatch: (h) => on(Channels.evtWatch, h),
     onStatus: (h) => on(Channels.evtStatus, h),
     onProjectsChanged: (h) => on(Channels.evtProjectsChanged, h),
+    onCallbackOpen: (h) => on(Channels.evtCallbackOpen, h),
     onLog: (h) => on(Channels.evtLog, h),
   },
 };

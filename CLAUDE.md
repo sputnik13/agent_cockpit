@@ -1352,12 +1352,92 @@ Also: `choosePreset` (Cmd/Ctrl+E/R view switch) must `focusPanelForce` the view'
 active panel after `loadLayout`, since `loadLayout` suppresses focus during the
 layout cascade and nothing else restores it.
 
+**Showing a panel for a programmatic reason (a terminal's `cockpit open` showing
+Content) is a separate path that NEVER activates.** Do not use
+`panel.api.setActive()` + `withFocusSuppressed`: `setActive` makes the group the
+ACTIVE group and fires `onDidActivePanelChange`, whose handler in `CockpitWorkspace`
+calls `writeFocus` unconditionally (so the next project switch-back `focusPanelForce`s
+that panel) and records `lastActivePanelId`; suppression only silences the final
+`focusPanel`. Use `workspace/panelReveal.ts`
+(`group.model.openPanel(panel, { skipSetGroupActive: true })`: no activation event).
+Dockview's default `onlyWhenVisible` renderer DETACHES a hidden tab's DOM, so
+switching the visible tab of the group that holds focus (the terminal's, or the
+active group) drops DOM focus; the reveal declines there instead. A panel added
+`inactive` into a brand-new group renders blank until its group is activated, so
+follow it with the same `openPanel(…, { skipSetGroupActive: true })`. Pinned against
+the real Dockview by `panelReveal.test.tsx` and `callbackOpenWorkspace.test.tsx`
+(including a plain `setActive()` that DOES emit the event); design in
+docs/ARCHITECTURE.md "Terminal Callback Socket". Two more traps in the same path:
+re-adding a closed panel with `addPanel` makes Dockview EQUALIZE every sibling in the
+splitview it joins (`Sizing.Distribute`), which RESIZES THE TERMINAL (Review: its
+height falls by a third; any right-edge add shrinks the other columns), so
+`panelReveal.ts` pins the terminal group (`group.api.setConstraints`, min == max,
+restored in a `finally`) around the add and declines when there is no room; and
+anything that acts on "the layout" during a project switch must key on which
+project's layout is loaded (`CockpitWorkspace`'s `loadedRef`, set by `loadLayout`),
+never on `activeId`, which flips BEFORE the layout effect rebuilds the panels.
+
 **Known open:** keyboard focus does NOT reliably follow a newly-created tmux
 **split** inside the control-mode terminal (new windows/tabs work). The Dockview
 re-emit guard did not resolve it, so the cause is elsewhere (suspect:
 `ControlTerminalPanel`'s deferred-focus / `PaneXterm` active-transition timing).
 Diagnose with a focus trace (who calls `renderer.focus()` and for which pane)
 before changing logic — do not ship another untested guess.
+
+## Terminal callback variables reach a pane through the tmux SESSION, never the client; the server start stays variable-free
+
+**Invariant:** `COCKPIT_CALLBACK_SOCK`/`COCKPIT_CALLBACK_VERSION`/`COCKPIT_CLI` (and the mux-only
+`COCKPIT_CALLBACK_MUX_KEY`) reach a pane by the backend's own mechanism, never a typed
+`NAME=value` and never the node-pty `env`: local tmux (control-mode AND session-per-tab) through
+ONE indexed `update-environment[100..102]` element per name, LAST in the `start-server ; set …`
+chain and **local-only** (`localOnly` in `TMUX_SERVER_OPTIONS`; `tmuxServerOptionShell` filters it
+out so a remote variable-less attach never strips) — never a plain `set -g`, never `-ga` (a
+space-separated value is one literal name that matches nothing); remote control-mode through
+`set-environment -t '=<session>'` after the data handler is wired and BEFORE `attached` is emitted,
+on every attach and reattach; the mux as `NAME=value` operands at all three creation sites.
+
+**Why:** a tmux pane inherits the SESSION environment = the global environment copied from the
+process that STARTED the server + the `update-environment` copies from the attaching client. So
+`startTmuxServer` (`providers/local/tmuxServer.ts`) spawns `start-server` variable-free, and
+`exit-empty` is `off` in EVERY opener (an ephemeral run ends with an explicit `kill-server`: a
+server that exited when its last session went would be restarted by the next client, which carries
+one project's values, and stamp them into every project's panes). The startup scrub
+(`callback/startupScrub.ts`, the FIRST import of main's entry) removes an outer app's inherited
+`COCKPIT_CALLBACK_*`/`COCKPIT_CLI` and keeps `COCKPIT_MUX_HOME/BIN/EPHEMERAL`. A local session's
+listener bind is awaited BEFORE any terminal or control-mode attach (`SessionManager.open`,
+`callbackReady`): a terminal created first starts without the variables for the life of its tmux
+session, and a variable-less `-A` attach makes the server-wide entries strip the values the session
+already held. The `deterministicSessionNames` gate is captured with the object that names the
+session, never re-read later.
+
+**Regression check:** `npm run test:e2e:callback` (real panes on every local backend: the server's
+`show-environment -g` has no callback variable, each project's pane has its own socket, B's pane
+created after A started the server opens into B only, and with the setting on a pane has none).
+Design: docs/ARCHITECTURE.md "Environment injection (invariant)".
+
+## Callback transport ordering traps: helper reader, CLI dispatch, bridge registration, helper upload
+
+**Invariant:** four orderings that look incidental and are not.
+
+- `callback.reply` is answered INLINE by the helper's reader goroutine and never queued; every
+  other request goes through the worker's unbounded FIFO in arrival order. A reply routed through
+  the queue, or a reader that executes methods, lets a slow `beadsExec`/diff/status hold a pending
+  `cockpit open` until its timeout.
+- The `cockpit` CLI (a multi-call mode of the helper binary) dispatches in `main()` BEFORE
+  `bootstrapPath()` and before anything that could start the RPC server or read stdin.
+- Main registers its `callback` handler in the launcher's `onClient` hook BEFORE the handshake is
+  sent: the listener serves from inside the handshake, so a request from a surviving pane can reach
+  main ahead of the handshake reply.
+- The uploaded helper's name is keyed on the build's SOURCE HASH
+  (`helper-<version>-<sourceHash12>-<os>-<arch>`) and every write goes to `<name>.incoming-<uuid>`
+  then renames into place; the per-os/arch `cockpit` link retargets to the newest helper. Another
+  app build must never be able to swap the bytes under a link or fail with "text file busy".
+
+**Regression check:** `cd remote-helper && go test ./...` (a held slow method does not delay
+`callback.reply`; dispatch before `bootstrapPath` as a real process) and
+`env -u TMUX -u TMUX_PANE npx vitest run electron/main/callback electron/main/providers/remote`
+(`onClient` before the handshake; hash-keyed atomic upload). Design: docs/design/terminal-callback-socket.md "Remote
+helper".
 
 ## Content-panel code views: line-number gutters stay aligned; wrap is a toggle
 
@@ -1735,6 +1815,40 @@ block-scalar fold-row anchoring, `lastTouchedLine` itself) must stay green;
 in the app, collapse the last region of document N in a multi-document YAML
 file — document N+1's `---` marker line must remain visible with its own
 line number.
+
+## Zoom (`resize-pane -Z`) must not trigger client-size pushes or clobber `visibleLayout` (local_repo_explorer-6ywh)
+
+**Invariant:** four rules keep a zoom to exactly ONE pane SIGWINCH (plain-tmux parity),
+in `controlSession.ts` / `ControlTerminalPanel.tsx` / `PaneXterm.tsx`:
+
+1. `syncFromTmux` queries `#{window_id} #{window_layout} #{window_visible_layout}
+   #{window_flags}` and folds the REAL `visibleLayout`/`flags`. While zoomed, tmux returns
+   the SAVED (unzoomed) layout for `#{window_layout}`; folding it as `visibleLayout` with
+   `flags: null` flipped the view zoomed -> unzoomed -> zoomed on every zoom (both panes
+   remount each flip).
+2. Every client size goes through `sendClientSize`, which skips a size equal to the last one
+   sent for that project in the same channel epoch (`lastSentSize`, cleared by
+   `resetControlSession`). A same-size `refresh-client -C` on a ZOOMED window is NOT a tmux
+   no-op: it unzooms, resizes, re-zooms, so the TUI sees full -> split -> full and redraws its
+   whole history at the wrong geometry. `nudgeClientSize` passes `force` (its shrink/restore is
+   a deliberate real round-trip) but still records the size; do not route it through the dedupe.
+3. `PaneXterm`'s appearance effect applies appearance only when the entry's `appearanceKey`
+   (theme|font|size) differs. A zoom flips the PaneTree root and remounts every pane;
+   `applyAppearance` drops the shared cell-size cache, whose repopulation fires `cellSizeReady`
+   -> `pushClientSize`, a push storm (~4 per zoom). Cold start (empty cache) and real
+   font/theme changes still push.
+4. `resize-pane -Z` is non-structural: `afterStructural({ push: false })` re-syncs but does not
+   `pushClientSize` (host pixels are unchanged).
+
+**Do NOT** remove the dedupe and rely on only some of these: with the dedupe alone the view
+strands unzoomed (rule 1 exposes it); with rule 1 alone the redraws remain. Do not "fix" the
+-h split rounding case (summed floored pane cols differ from the zoomed fit) by pushing on
+zoom; rule 4 sidesteps it and the host ResizeObserver covers real pixel changes.
+
+**Regression check:** `controlSession.test.ts` "zoom-safe sync and client-size dedupe" and
+`controlTerminal.test.tsx` "zoom is non-structural and remount-safe" (each mutation-verified).
+Live: stream a large redraw in a pane (SIGWINCH-redraw TUI), zoom it; the pane sees one
+SIGWINCH and the renderer never commits an unzoomed frame.
 
 ## Known upstream noise
 

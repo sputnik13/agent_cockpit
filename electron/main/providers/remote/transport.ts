@@ -660,6 +660,18 @@ export class Ssh2Transport implements RemoteTransport {
   }
 }
 
+/** SFTP status codes (ssh2 reports them as `error.code`) that provisioning reacts to. */
+const SFTP_STATUS_NO_SUCH_FILE = 2;
+const SFTP_STATUS_OP_UNSUPPORTED = 8;
+
+/** The server cannot do `posix-rename@openssh.com`; the caller falls back to plain rename. */
+class PosixRenameUnavailable extends Error {
+  constructor(override readonly cause: unknown) {
+    super('server does not support posix-rename@openssh.com');
+    this.name = 'PosixRenameUnavailable';
+  }
+}
+
 /** A scoped SFTP-backed provisioning session. */
 class Ssh2ProvisionSession implements ProvisionSession {
   private ended = false;
@@ -723,19 +735,101 @@ class Ssh2ProvisionSession implements ProvisionSession {
     });
   }
 
+  /**
+   * Upload beside, then rename over. A running copy keeps its inode (an in-place
+   * overwrite of a running binary fails with "text file busy"), and the final path
+   * never holds a partial file. The `.incoming-*` temporary is removed on ANY
+   * failure so a refused rename or a dropped upload cannot strand a copy of the
+   * binary on the host.
+   *
+   * The rename is OpenSSH's `posix-rename@openssh.com` (atomic, replaces an existing
+   * destination). A server without it (a non-OpenSSH SFTP subsystem) falls back to
+   * remove-then-rename — SFTP v3's plain `rename` refuses an existing destination.
+   * That path is NOT atomic (the name is briefly absent, and a failure between the
+   * two steps leaves it absent, which the next provision treats as "upload"), but
+   * it keeps the property that matters here: unlinking a running binary does not
+   * disturb the process executing it.
+   */
   async replaceExecutable(localPath: string, remotePath: string, mode: number): Promise<void> {
     const temporaryPath = `${remotePath}.incoming-${randomUUID()}`;
-    await this.uploadExecutable(localPath, temporaryPath, mode);
+    try {
+      await this.uploadExecutable(localPath, temporaryPath, mode);
+      await this.renameOver(temporaryPath, remotePath);
+    } catch (err) {
+      await this.unlinkQuietly(temporaryPath);
+      throw err;
+    }
+  }
+
+  private async renameOver(source: string, destination: string): Promise<void> {
+    try {
+      await this.posixRename(source, destination);
+      return;
+    } catch (err) {
+      if (!(err instanceof PosixRenameUnavailable)) throw err;
+    }
+    await this.unlinkIfPresent(destination);
     await new Promise<void>((resolve, reject) => {
-      this.sftp.ext_openssh_rename(temporaryPath, remotePath, (err) => {
+      this.sftp.rename(source, destination, (err) => {
         if (err) {
-          reject(
-            new RemoteTransportError(`atomic rename failed: ${err.message}`, '', 'connect', err),
-          );
+          reject(new RemoteTransportError(`rename failed: ${err.message}`, '', 'connect', err));
         } else {
           resolve();
         }
       });
+    });
+  }
+
+  /** `posix-rename@openssh.com`; rejects with `PosixRenameUnavailable` when the server lacks it. */
+  private posixRename(source: string, destination: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      try {
+        this.sftp.ext_openssh_rename(source, destination, (err) => {
+          if (!err) {
+            resolve();
+          } else if ((err as { code?: unknown }).code === SFTP_STATUS_OP_UNSUPPORTED) {
+            reject(new PosixRenameUnavailable(err));
+          } else {
+            reject(
+              new RemoteTransportError(`atomic rename failed: ${err.message}`, '', 'connect', err),
+            );
+          }
+        });
+      } catch (err) {
+        // ssh2 throws synchronously when the server did not advertise the extension.
+        reject(new PosixRenameUnavailable(err));
+      }
+    });
+  }
+
+  /** Remove `path`; a path that is already gone is success. */
+  private unlinkIfPresent(path: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.sftp.unlink(path, (err) => {
+        if (!err || (err as { code?: unknown }).code === SFTP_STATUS_NO_SUCH_FILE) {
+          resolve();
+        } else {
+          reject(
+            new RemoteTransportError(
+              `failed to remove ${path}: ${err.message}`,
+              '',
+              'connect',
+              err,
+            ),
+          );
+        }
+      });
+    });
+  }
+
+  /** Best-effort cleanup: never throws, never rejects, whatever state the channel is in. */
+  private unlinkQuietly(path: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      try {
+        this.sftp.unlink(path, () => resolve());
+      } catch {
+        resolve();
+      }
     });
   }
 

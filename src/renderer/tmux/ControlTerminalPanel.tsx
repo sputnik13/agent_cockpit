@@ -429,18 +429,24 @@ export function ControlTerminalPanel(): JSX.Element {
   // follows automatically via the %window-pane-changed mirror effect below
   // — tmux selects the new pane on split/new-window by default and emits
   // the event, which the reducer captures into store.activePaneId.
-  const afterStructural = (): void => {
-    pushClientSize(hostRef.current);
+  // Zoom (`resize-pane -Z`) is NON-structural for sizing: host pixels are
+  // unchanged, and a client-size push on a zoomed window makes tmux
+  // unzoom+resize+rezoom, redrawing every TUI at the wrong geometry
+  // (local_repo_explorer-6ywh). It still re-syncs window/layout state.
+  const afterStructural = (opts?: { push?: boolean }): void => {
+    if (opts?.push !== false) pushClientSize(hostRef.current);
     const pid = activeIdRef.current;
     if (pid) void syncFromTmux(pid);
   };
+  const isZoomToggle = (args: string): boolean => /^resize-pane\s+-Z(\s|$)/.test(args);
   const cmd = (args: string): void => {
-    void useTmuxStore.getState().command(args).then(afterStructural).catch(() => {});
+    const push = !isZoomToggle(args);
+    void useTmuxStore.getState().command(args).then(() => afterStructural({ push })).catch(() => {});
   };
   // Open a new terminal tab via the single dir-named creation seam (the title
   // defaults to the directory basename and stays put — automatic-rename is off).
   const newWindow = (): void => {
-    void createTerminalWindow().then(afterStructural).catch(() => {});
+    void createTerminalWindow().then(() => afterStructural()).catch(() => {});
   };
   const target = activePaneId ?? '';
 
@@ -506,7 +512,7 @@ export function ControlTerminalPanel(): JSX.Element {
       ensuringRef.current = false;
     } else if (hadTerminalsRef.current && !ensuringRef.current) {
       ensuringRef.current = true;
-      void createTerminalWindow().then(afterStructural).catch(() => {});
+      void createTerminalWindow().then(() => afterStructural()).catch(() => {});
     }
   }, [isOpen, tabWindows.length]);
 
@@ -549,7 +555,7 @@ export function ControlTerminalPanel(): JSX.Element {
       const next = tabs[(idx + dir + tabs.length) % tabs.length];
       if (next) {
         setSelectedWindow(next);
-        void useTmuxStore.getState().command(`select-window -t ${next}`).then(afterStructural).catch(() => {});
+        void useTmuxStore.getState().command(`select-window -t ${next}`).then(() => afterStructural()).catch(() => {});
       }
     };
     const onKey = (e: KeyboardEvent): void => {
@@ -572,7 +578,7 @@ export function ControlTerminalPanel(): JSX.Element {
       const k = e.key.toLowerCase();
       if (k === 't' && !e.shiftKey) {
         e.preventDefault();
-        void createTerminalWindow().then(afterStructural).catch(() => {});
+        void createTerminalWindow().then(() => afterStructural()).catch(() => {});
       } else if (k === 'd' && !e.shiftKey && tgt) {
         e.preventDefault();
         splitPane('h', tgt);
@@ -608,8 +614,10 @@ export function ControlTerminalPanel(): JSX.Element {
         armTimer = null;
       }, 2000);
     };
-    const run = (args: string): void =>
-      void useTmuxStore.getState().command(args).then(afterStructural).catch(() => {});
+    const run = (args: string): void => {
+      const push = !isZoomToggle(args);
+      void useTmuxStore.getState().command(args).then(() => afterStructural({ push })).catch(() => {});
+    };
     // Move active-window selection by `dir`, wrapping (mirrors the ⌘⇧[ / ] nav).
     const navTab = (dir: -1 | 1): void => {
       const tabs = visibleTabWindowIds(activeIdRef.current ?? '');

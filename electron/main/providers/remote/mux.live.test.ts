@@ -173,8 +173,11 @@ describeLive('RemoteMuxLauncher (disposable live SSH host)', () => {
       join(process.cwd(), 'remote-helper', 'dist'),
     ).launch();
     try {
+      // The helper's file name is keyed on its build (source hash), so ask the launcher
+      // where it put it rather than spelling the name out.
+      const helperPath = helper.remotePath.replace(/^\.\//, '');
       const coexistence = await transport.exec(
-        'test -x "$HOME/.agent-cockpit/helper-0.1.0-linux-arm64" && test -L "$HOME/.agent-cockpit/cockpit-mux" && test -S "$HOME/.agent-cockpit/mux/mux.sock"',
+        `test -x "$HOME/${helperPath}" && test -L "$HOME/.agent-cockpit/cockpit-mux" && test -S "$HOME/.agent-cockpit/mux/mux.sock"`,
       );
       expect(coexistence.code).toBe(0);
     } finally {

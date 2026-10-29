@@ -27,10 +27,13 @@ import {
   resizePane as resizePaneCmd,
   selectPane as selectPaneCmd,
   selectWindow as selectWindowCmd,
+  setSessionEnvironment,
   splitWindow as splitWindowCmd,
 } from '@shared/tmux';
 import type { TmuxNotification, UnresponsiveInfo } from '@shared/tmux';
+import { callbackEnvironmentEntries, type CallbackEnvironmentSource } from '@shared/callback/env';
 import { logger } from '../../logger';
+import { resolveCallbackEnvironment } from '../../callback/resolveEnvironment';
 
 /** Backoff schedule (ms) for re-attaching after a control-channel drop. */
 const REATTACH_BACKOFF_MS = [500, 1_000, 2_000, 5_000];
@@ -97,6 +100,87 @@ function settleCommand(cmd: PendingCommand, reply: CommandReply): void {
   } else {
     cmd.resolve(reply);
   }
+}
+
+/**
+ * How long an attach waits for the `set-environment` replies before it stops
+ * waiting and announces the channel anyway. Deliberately below the 5 s
+ * unresponsive WARN threshold, so our own wait never reads as a wedged link.
+ */
+export const SESSION_ENVIRONMENT_TIMEOUT_MS = 3_000;
+
+/** What a {@link FirstPaneStrategy} may use: this project's own channel, never an ambient one. */
+export interface FirstPaneContext {
+  readonly projectId: string;
+  readonly sessionName: string;
+  /**
+   * A tmux command on THIS manager's channel (reply-correlated, FIFO), and on the
+   * channel of the attach that is running this strategy ONLY: it rejects once that
+   * channel has been replaced, so a late command can never land on a later one.
+   */
+  command(args: string): Promise<CommandReply>;
+}
+
+/**
+ * FIRST-PANE DECISION (docs/design/terminal-callback-socket.md,
+ * "Known limitations"): the first pane of a BRAND-NEW remote session exists
+ * before the manager can set the session environment, so it lacks the callback
+ * variables. The options, in order of invasiveness:
+ *
+ *  1. accept the limitation until a new tab is opened (the default, below);
+ *  2. adopt that initial window as the reserved `persistent` window, so the first
+ *     real tab is created after `set-environment` (a renderer reconcile change);
+ *  3. `respawn-pane -k` the fresh initial pane right after `set-environment` (a
+ *     main-side command through `ctx.command`; it needs a way to tell a
+ *     brand-new session apart, e.g. comparing `#{session_created}` with
+ *     `#{client_created}`).
+ *
+ * The choice is isolated in THIS one function: it runs after the variables were
+ * applied and before `attached` is emitted, on every attach and reattach. Swapping
+ * it is the whole change; nothing else in the manager knows which option is in use.
+ */
+export type FirstPaneStrategy = (ctx: FirstPaneContext) => Promise<void>;
+
+/** Option 1: do nothing; the first pane of a brand-new session lacks the variables. */
+export const acceptFirstPaneLimitation: FirstPaneStrategy = async () => undefined;
+
+/**
+ * Remote control-mode callback injection for ONE project's manager
+ * (requirement 6 of docs/requirements/terminal-callback-socket.md). On every attach and reattach, once
+ * the control stream is wired, the manager applies the project's variables to its
+ * own session with `set-environment -t '=<session>'` over its own channel, so
+ * reserved windows and every later window, split and `respawn-pane` inherit them.
+ * Absent = disabled for this manager (the owner decides, from the settings read
+ * that named the session, at creation: requirement 12).
+ */
+export interface SessionEnvironmentInjection {
+  /** The project this manager serves: carried into every diagnostic and the strategy context. */
+  readonly projectId: string;
+  /** Exact tmux session name; the target is `=<name>`. */
+  readonly sessionName: string;
+  /** The project's current values, or undefined when it has none (nothing is applied, nothing stripped). */
+  readonly environment: CallbackEnvironmentSource;
+  /** Defaults to {@link acceptFirstPaneLimitation}. */
+  readonly firstPane?: FirstPaneStrategy;
+  /** Defaults to {@link SESSION_ENVIRONMENT_TIMEOUT_MS}. */
+  readonly timeoutMs?: number;
+}
+
+type Within<T> = { timedOut: false; value: T } | { timedOut: true };
+
+/**
+ * Resolve with `promise`'s value, or `{timedOut: true}` after `ms`; the promise is
+ * left running either way. Callers pass promises that never reject.
+ */
+function within<T>(promise: Promise<T>, ms: number): Promise<Within<T>> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ timedOut: true }), ms);
+    timer.unref?.();
+    void promise.then((value) => {
+      clearTimeout(timer);
+      resolve({ timedOut: false, value });
+    });
+  });
 }
 
 export class RemoteTmuxControlManager {
@@ -173,7 +257,10 @@ export class RemoteTmuxControlManager {
   /** True once the current stall episode has fired onUnresponsive (warn-once). */
   private unresponsiveWarned = false;
 
-  constructor(private readonly openChannel: ControlChannelOpener) {}
+  constructor(
+    private readonly openChannel: ControlChannelOpener,
+    private readonly injection?: SessionEnvironmentInjection,
+  ) {}
 
   isOpen(): boolean {
     return this.channel != null && !this.closed;
@@ -189,7 +276,11 @@ export class RemoteTmuxControlManager {
    * rendering every byte once per duplicate channel.
    */
   async open(): Promise<void> {
-    if (this.channel) return;
+    // An attach still in flight is JOINED even though its channel is already
+    // assigned: with session-environment injection it is still awaiting the
+    // `set-environment` replies, and every caller must return only after the
+    // channel was announced (`attached`).
+    if (this.channel && !this.opening) return;
     this.closed = false;
     // A reattach is already pending: let it do the work. Without this, a caller
     // that re-acquires during the brief drop→reattach gap (the renderer retries
@@ -210,13 +301,33 @@ export class RemoteTmuxControlManager {
   private ensureOpen(): Promise<void> {
     if (this.opening) return this.opening;
     this.clearReattachTimer();
-    this.opening = this.attach().finally(() => {
+    this.opening = this.attachOrRetry().finally(() => {
       this.opening = null;
     });
     return this.opening;
   }
 
-  private async attach(): Promise<void> {
+  /**
+   * `attach()`, once more if the channel it opened was lost while it waited for the
+   * session environment and nothing will bring a channel back: a `close()` made the
+   * loss silent (no reattach is scheduled for a deliberate close), and a later
+   * `open()` then re-opened the manager by JOINING this very attach. Resolving
+   * would tell that caller the channel is open when none is. A second loss of the
+   * same kind rejects. A loss that scheduled a reattach (or gave up) is not retried
+   * here: the reattach (or the `exit` event) owns it.
+   */
+  private async attachOrRetry(): Promise<void> {
+    if (await this.attach()) return;
+    if (await this.attach()) return;
+    throw new Error('tmux control channel closed while attaching');
+  }
+
+  /**
+   * One attach. Resolves true when it is settled (announced, deliberately
+   * abandoned, or handed to a scheduled reattach), false when its channel was lost
+   * while it waited and nothing else will re-attach (see {@link attachOrRetry}).
+   */
+  private async attach(): Promise<boolean> {
     // A fresh parser per attach: tmux replays full state on reattach, so a
     // clean parser avoids carrying a half-buffered line across the drop.
     this.parser = new TmuxControlParser();
@@ -230,7 +341,7 @@ export class RemoteTmuxControlManager {
       } catch {
         /* already closed */
       }
-      return;
+      return true;
     }
     this.channel = channel;
     this.openedAt = Date.now();
@@ -257,12 +368,9 @@ export class RemoteTmuxControlManager {
         console.error('[remote-tmux-control] onReattached hook threw', e);
       }
     }
-    // Announce the fresh channel to the renderer (first open + every reattach).
-    // Emitted AFTER the channel/parser are live so a re-init the renderer kicks
-    // off in response can immediately issue commands (list-windows, capture-pane)
-    // over the new channel.
-    this.epoch += 1;
-    this.emit({ type: 'attached', epoch: this.epoch });
+    // Wire the control stream BEFORE anything awaits: the replies to the commands
+    // issued below (and tmux's own initial block) arrive on it, and `attached` is
+    // announced only after they were handled.
     channel.onData((chunk) => {
       try {
         // Diagnostic-only: keep a short latin1 preview of the first bytes so an
@@ -306,6 +414,118 @@ export class RemoteTmuxControlManager {
       }
       this.scheduleReattach();
     });
+    // Apply the project's callback variables to the session BEFORE announcing the
+    // channel, so the reserved windows the renderer's re-init creates in response
+    // (`persistent`, `run-1`, `respawn-pane -k`) inherit them. A channel lost
+    // while we waited is not announced: its onClose already owns what happens next
+    // (a reattach announces the next channel with the next epoch).
+    if (this.injection) {
+      try {
+        await this.applySessionEnvironment(this.injection, channel);
+      } catch (e) {
+        // Best-effort by design: whatever goes wrong here never fails the attach.
+        logger.error(
+          `callback env injection failed project=${this.injection.projectId}: ${e instanceof Error ? e.message : String(e)}`,
+          'remote-tmux-control',
+        );
+      }
+      if (this.channel !== channel) {
+        // Lost while we waited. A deliberate close(), a scheduled reattach or
+        // having given up each own what happens next; only a close() that a later
+        // open() undid leaves nothing scheduled (see attachOrRetry).
+        return this.closed || this.reattachTimer != null || this.gaveUp;
+      }
+    }
+    // Announce the fresh channel to the renderer (first open + every reattach).
+    // Emitted AFTER the channel/parser are live so a re-init the renderer kicks
+    // off in response can immediately issue commands (list-windows, capture-pane)
+    // over the new channel.
+    this.epoch += 1;
+    this.emit({ type: 'attached', epoch: this.epoch });
+    return true;
+  }
+
+  /**
+   * Send this project's variables to its session as ONE `set-environment` per
+   * variable — separate command lines, never `;`-sequenced (control mode answers
+   * each sub-command of a `;` line with its own reply block, which would desync
+   * the pending-reply FIFO) — and wait for the replies under a bounded timeout.
+   *
+   * Addressing is explicit by construction: the commands go through THIS
+   * manager's own channel (one per project) at an exact session target
+   * (`=<name>`), never through anything ambient.
+   *
+   * On timeout the wait ends but the commands' entries STAY in the pending-reply
+   * FIFO: removing them would make every later reply settle the wrong command. A
+   * late reply simply settles an already-abandoned promise. A user command issued
+   * in that window may create a window without the variables (accepted). Failures
+   * are logged and never fail the attach; this is best-effort by design.
+   */
+  private async applySessionEnvironment(
+    injection: SessionEnvironmentInjection,
+    channel: ControlChannel,
+  ): Promise<void> {
+    const { projectId, sessionName } = injection;
+    // Every command here is TIED to the channel this attach opened: a late one (a
+    // slow first-pane strategy, say) must never land on a later channel after a
+    // drop and reattach.
+    const onChannel = (args: string): Promise<CommandReply> =>
+      this.channel === channel
+        ? this.command(args)
+        : Promise.reject(new Error('tmux control channel changed'));
+    const timeoutMs = injection.timeoutMs ?? SESSION_ENVIRONMENT_TIMEOUT_MS;
+    const where = `project=${projectId} session=${JSON.stringify(sessionName)}`;
+    const environment = resolveCallbackEnvironment(injection.environment, where);
+    // No values (yet): nothing to apply. A remote attach never strips: unlike the
+    // local server, no `update-environment` entry exists on the host.
+    if (!environment) return;
+
+    const replies = callbackEnvironmentEntries(environment).map(([name, value]) =>
+      onChannel(setSessionEnvironment(sessionName, name, value)),
+    );
+    const settled = await within(Promise.allSettled(replies), timeoutMs);
+    if (settled.timedOut) {
+      logger.warn(
+        `tmux session environment not confirmed within ${timeoutMs}ms ${where}; continuing, ` +
+          'the replies stay queued so later replies still correlate',
+        'remote-tmux-control',
+      );
+      return;
+    }
+    for (const outcome of settled.value) {
+      if (outcome.status === 'rejected') return; // channel lost: onClose owns the recovery
+      if (outcome.value.error) {
+        logger.warn(
+          `tmux rejected set-environment ${where} detail=${JSON.stringify(outcome.value.lines.join('; '))}; ` +
+            'new windows in this session will not receive COCKPIT_CALLBACK_*',
+          'remote-tmux-control',
+        );
+        return;
+      }
+    }
+
+    // The brand-new-session first-pane decision lives in one swappable function.
+    const strategy = injection.firstPane ?? acceptFirstPaneLimitation;
+    const ran = await within(
+      Promise.resolve()
+        .then(() => strategy({ projectId, sessionName, command: onChannel }))
+        .then(
+          () => undefined,
+          (e: unknown) => {
+            logger.warn(
+              `first-pane strategy failed ${where}: ${e instanceof Error ? e.message : String(e)}`,
+              'remote-tmux-control',
+            );
+          },
+        ),
+      timeoutMs,
+    );
+    if (ran.timedOut) {
+      logger.warn(
+        `first-pane strategy not finished within ${timeoutMs}ms ${where}; continuing`,
+        'remote-tmux-control',
+      );
+    }
   }
 
   private scheduleReattach(): void {

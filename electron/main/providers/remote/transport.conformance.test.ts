@@ -87,6 +87,11 @@ interface FakeStats {
   isDirectory(): boolean;
 }
 
+/** An SFTP status error the way ssh2 builds it: an Error whose `code` is the status code. */
+function sftpStatusError(message: string, code: number): Error {
+  return Object.assign(new Error(message), { code });
+}
+
 /** A fake ssh2 `SFTPWrapper`: `stat`/`createReadStream` over a canned buffer,
  *  plus an `end()` call counter so tests can assert the D2 channel-per-call
  *  lifecycle (opened fresh per operation, released exactly once). */
@@ -94,7 +99,20 @@ class FakeSftp {
   endCallCount = 0;
   fastPutCalls: Array<{ localPath: string; remotePath: string }> = [];
   chmodCalls: Array<{ path: string; mode: number | string }> = [];
+  /** `ext_openssh_rename` (posix-rename) calls. */
   renameCalls: Array<{ source: string; destination: string }> = [];
+  plainRenameCalls: Array<{ source: string; destination: string }> = [];
+  unlinkCalls: string[] = [];
+  /** The paths that exist on the fake host (uploads add, renames/unlinks move/remove),
+   *  so a test can assert exactly what a failed or fallback replace leaves behind. */
+  files = new Set<string>();
+  /** How `ext_openssh_rename` behaves. */
+  posixRename: 'ok' | 'not-advertised' | 'op-unsupported' | 'fails' = 'ok';
+  failFastPut = false;
+  failChmod = false;
+  failPlainRename = false;
+  /** Makes unlink of the matching paths fail with something other than "no such file". */
+  failUnlink: ((path: string) => boolean) | null = null;
   /** Options passed to the most recent createReadStream() call on this
    *  session — lets a test assert NO range was requested. */
   lastReadStreamOpts: { start?: number; end?: number } | undefined;
@@ -127,17 +145,62 @@ class FakeSftp {
 
   fastPut(localPath: string, remotePath: string, cb: (err?: Error) => void): void {
     this.fastPutCalls.push({ localPath, remotePath });
-    queueMicrotask(() => cb());
+    queueMicrotask(() => {
+      this.files.add(remotePath); // a failed transfer leaves a partial file behind
+      cb(this.failFastPut ? sftpStatusError('Failure', 4) : undefined);
+    });
   }
 
   chmod(path: string, mode: number | string, cb: (err?: Error) => void): void {
     this.chmodCalls.push({ path, mode });
-    queueMicrotask(() => cb());
+    queueMicrotask(() => cb(this.failChmod ? sftpStatusError('Permission denied', 3) : undefined));
   }
 
+  /** `posix-rename@openssh.com`: replaces an existing destination atomically. ssh2
+   *  throws SYNCHRONOUSLY when the server did not advertise the extension. */
   ext_openssh_rename(source: string, destination: string, cb: (err?: Error) => void): void {
     this.renameCalls.push({ source, destination });
-    queueMicrotask(() => cb());
+    if (this.posixRename === 'not-advertised') {
+      throw new Error('Server does not support this extended request');
+    }
+    queueMicrotask(() => {
+      if (this.posixRename === 'op-unsupported') {
+        cb(sftpStatusError('Operation unsupported', 8));
+      } else if (this.posixRename === 'fails') {
+        cb(sftpStatusError('Permission denied', 3));
+      } else {
+        this.files.delete(source);
+        this.files.add(destination);
+        cb();
+      }
+    });
+  }
+
+  /** Plain SFTP v3 `rename`: refuses an existing destination. */
+  rename(source: string, destination: string, cb: (err?: Error) => void): void {
+    this.plainRenameCalls.push({ source, destination });
+    queueMicrotask(() => {
+      if (this.failPlainRename || this.files.has(destination)) {
+        cb(sftpStatusError('Failure', 4));
+        return;
+      }
+      this.files.delete(source);
+      this.files.add(destination);
+      cb();
+    });
+  }
+
+  unlink(path: string, cb: (err?: Error) => void): void {
+    this.unlinkCalls.push(path);
+    queueMicrotask(() => {
+      if (this.failUnlink?.(path)) {
+        cb(sftpStatusError('Permission denied', 3));
+      } else if (!this.files.delete(path)) {
+        cb(sftpStatusError('No such file', 2));
+      } else {
+        cb();
+      }
+    });
   }
 
   end(): void {
@@ -511,6 +574,140 @@ describe('Ssh2Transport conformance (ssh2 stubbed via createClient)', () => {
       expect(sftp.renameCalls).toEqual([
         { source: sftp.fastPutCalls[0]!.remotePath, destination: './.agent-cockpit/cockpit-mux' },
       ]);
+    });
+
+    describe('replaceExecutable failure and fallback handling', () => {
+      const DEST = './.agent-cockpit/helper-0.1.0-abc123def456-linux-amd64';
+
+      async function sftpSession(): Promise<{
+        session: Awaited<ReturnType<TestTransport['beginProvision']>>;
+        sftp: FakeSftp;
+      }> {
+        const session = await t.beginProvision();
+        return { session, sftp: t.fake.sftpInstances.at(-1)! };
+      }
+
+      it('leaves exactly the destination behind on success', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.files.add(DEST); // the previous build
+
+        await session.replaceExecutable('/local/helper', DEST, 0o755);
+
+        expect([...sftp.files]).toEqual([DEST]);
+        expect(sftp.unlinkCalls).toEqual([]);
+        expect(sftp.plainRenameCalls).toEqual([]);
+      });
+
+      it('removes the temporary when the upload fails, and surfaces the upload error', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.failFastPut = true;
+
+        await expect(session.replaceExecutable('/local/helper', DEST, 0o755)).rejects.toThrow(
+          /upload failed/,
+        );
+
+        expect(sftp.unlinkCalls).toEqual([sftp.fastPutCalls[0]!.remotePath]);
+        expect([...sftp.files]).toEqual([]);
+        expect(sftp.renameCalls).toEqual([]);
+      });
+
+      it('removes the temporary when chmod fails', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.failChmod = true;
+
+        await expect(session.replaceExecutable('/local/helper', DEST, 0o755)).rejects.toThrow(
+          /chmod failed/,
+        );
+
+        expect([...sftp.files]).toEqual([]);
+        expect(sftp.renameCalls).toEqual([]);
+      });
+
+      it('removes the temporary when the atomic rename fails for a real reason, keeps the old destination, and does not fall back', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.files.add(DEST);
+        sftp.posixRename = 'fails';
+
+        await expect(session.replaceExecutable('/local/helper', DEST, 0o755)).rejects.toThrow(
+          /atomic rename failed/,
+        );
+
+        expect([...sftp.files]).toEqual([DEST]);
+        expect(sftp.plainRenameCalls).toEqual([]);
+        expect(sftp.unlinkCalls).toEqual([sftp.fastPutCalls[0]!.remotePath]);
+      });
+
+      it('never lets a failing cleanup replace the original error', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.failFastPut = true;
+        sftp.failUnlink = () => true;
+
+        await expect(session.replaceExecutable('/local/helper', DEST, 0o755)).rejects.toThrow(
+          /upload failed/,
+        );
+      });
+
+      it('falls back to remove-then-rename when the server did not advertise posix-rename', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.files.add(DEST); // a plain SFTP v3 rename would refuse this
+        sftp.posixRename = 'not-advertised';
+
+        await session.replaceExecutable('/local/helper', DEST, 0o755);
+
+        const temporary = sftp.fastPutCalls[0]!.remotePath;
+        expect(sftp.unlinkCalls).toEqual([DEST]);
+        expect(sftp.plainRenameCalls).toEqual([{ source: temporary, destination: DEST }]);
+        expect([...sftp.files]).toEqual([DEST]);
+      });
+
+      it('falls back when the server answers the extension with OP_UNSUPPORTED', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.files.add(DEST);
+        sftp.posixRename = 'op-unsupported';
+
+        await session.replaceExecutable('/local/helper', DEST, 0o755);
+
+        expect(sftp.plainRenameCalls).toHaveLength(1);
+        expect([...sftp.files]).toEqual([DEST]);
+      });
+
+      it('fallback treats an absent destination (the first upload) as success', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.posixRename = 'not-advertised';
+
+        await session.replaceExecutable('/local/helper', DEST, 0o755);
+
+        expect(sftp.unlinkCalls).toEqual([DEST]); // tried, "no such file", ignored
+        expect([...sftp.files]).toEqual([DEST]);
+      });
+
+      it('fallback removes the temporary when the final rename fails', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.posixRename = 'not-advertised';
+        sftp.failPlainRename = true;
+
+        await expect(session.replaceExecutable('/local/helper', DEST, 0o755)).rejects.toThrow(
+          /rename failed/,
+        );
+
+        expect([...sftp.files]).toEqual([]);
+      });
+
+      it('fallback removes the temporary when the destination cannot be removed', async () => {
+        const { session, sftp } = await sftpSession();
+        sftp.files.add(DEST);
+        sftp.posixRename = 'not-advertised';
+        sftp.failUnlink = (path) => path === DEST;
+
+        await expect(session.replaceExecutable('/local/helper', DEST, 0o755)).rejects.toThrow(
+          /failed to remove/,
+        );
+
+        // The destination was never touched and the rename never attempted; the temporary
+        // is gone.
+        expect(sftp.plainRenameCalls).toEqual([]);
+        expect([...sftp.files]).toEqual([DEST]);
+      });
     });
 
     it('openPty delivers raw >0x7E bytes undecoded (FR4)', async () => {

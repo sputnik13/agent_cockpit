@@ -1,7 +1,7 @@
 # remote-helper build tasks. All binaries are fully static (CGO_ENABLED=0).
 
 VERSION ?= 0.1.0
-PROTOCOL_VERSION ?= 1
+PROTOCOL_VERSION ?= 2
 DIST := dist
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 

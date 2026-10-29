@@ -1,0 +1,78 @@
+{
+  "description": "Pane identity a client derives from its own environment (paneFromEnv in protocol.ts; the Go CLI mirrors it). COCKPIT_CALLBACK_MUX_KEY wins when present (an app launched from a tmux pane leaves its mux daemon a stale TMUX_PANE); otherwise TMUX_PANE; otherwise no pane. A value that is empty, over 128 characters or contains a control character is ignored. `pane: null` means the request is sent without a pane.",
+  "cases": [
+    {
+      "name": "tmux pane only",
+      "env": {
+        "TMUX_PANE": "%7"
+      },
+      "pane": {
+        "kind": "tmux",
+        "id": "%7"
+      }
+    },
+    {
+      "name": "mux key only",
+      "env": {
+        "COCKPIT_CALLBACK_MUX_KEY": "term-2"
+      },
+      "pane": {
+        "kind": "mux",
+        "id": "term-2"
+      }
+    },
+    {
+      "name": "mux key wins over a stale TMUX_PANE",
+      "env": {
+        "TMUX_PANE": "%0",
+        "COCKPIT_CALLBACK_MUX_KEY": "term-2"
+      },
+      "pane": {
+        "kind": "mux",
+        "id": "term-2"
+      }
+    },
+    {
+      "name": "neither variable",
+      "env": {},
+      "pane": null
+    },
+    {
+      "name": "empty mux key falls back to TMUX_PANE",
+      "env": {
+        "TMUX_PANE": "%7",
+        "COCKPIT_CALLBACK_MUX_KEY": ""
+      },
+      "pane": {
+        "kind": "tmux",
+        "id": "%7"
+      }
+    },
+    {
+      "name": "empty values yield no pane",
+      "env": {
+        "TMUX_PANE": "",
+        "COCKPIT_CALLBACK_MUX_KEY": ""
+      },
+      "pane": null
+    },
+    {
+      "name": "control character in the mux key is ignored",
+      "env": {
+        "TMUX_PANE": "%7",
+        "COCKPIT_CALLBACK_MUX_KEY": "a\nb"
+      },
+      "pane": {
+        "kind": "tmux",
+        "id": "%7"
+      }
+    },
+    {
+      "name": "oversize mux key is ignored",
+      "env": {
+        "COCKPIT_CALLBACK_MUX_KEY": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"
+      },
+      "pane": null
+    }
+  ]
+}

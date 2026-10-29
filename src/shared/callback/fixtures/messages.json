@@ -1,0 +1,137 @@
+{
+  "description": "Golden callback messages. `requests` are valid requests a client (the cockpit CLI) may send; the TypeScript test runs each through parseCallbackEnvelope/parseOpenArgs and requires them to be accepted. `replies` are replies a client must decode; ids echo the request.",
+  "requests": [
+    {
+      "name": "open from a tmux pane with a canonical path",
+      "request": {
+        "v": 1,
+        "id": 1,
+        "op": "open",
+        "pane": {
+          "kind": "tmux",
+          "id": "%3"
+        },
+        "args": {
+          "path": "/Users/me/repo/README.md",
+          "canonicalPath": "/Users/me/repo/README.md"
+        }
+      }
+    },
+    {
+      "name": "open without pane or canonical path (path has a space)",
+      "request": {
+        "v": 1,
+        "id": 2,
+        "op": "open",
+        "args": {
+          "path": "/tmp/a b/notes.md"
+        }
+      }
+    },
+    {
+      "name": "open from a mux pane",
+      "request": {
+        "v": 1,
+        "id": 3,
+        "op": "open",
+        "pane": {
+          "kind": "mux",
+          "id": "term-1"
+        },
+        "args": {
+          "path": "/srv/x/y.md",
+          "canonicalPath": "/data/x/y.md"
+        }
+      }
+    }
+  ],
+  "replies": [
+    {
+      "name": "dispatched",
+      "reply": {
+        "id": 1,
+        "ok": true,
+        "result": {
+          "status": "dispatched"
+        }
+      }
+    },
+    {
+      "name": "unsupported-op",
+      "reply": {
+        "id": 4,
+        "ok": false,
+        "error": {
+          "code": "unsupported-op",
+          "message": "unsupported operation"
+        }
+      }
+    },
+    {
+      "name": "bad-request",
+      "reply": {
+        "id": 5,
+        "ok": false,
+        "error": {
+          "code": "bad-request",
+          "message": "path must be an absolute path"
+        }
+      }
+    },
+    {
+      "name": "rate-limited",
+      "reply": {
+        "id": 6,
+        "ok": false,
+        "error": {
+          "code": "rate-limited",
+          "message": "too many requests"
+        }
+      }
+    },
+    {
+      "name": "timeout",
+      "reply": {
+        "id": 7,
+        "ok": false,
+        "error": {
+          "code": "timeout",
+          "message": "no confirmation within the deadline"
+        }
+      }
+    },
+    {
+      "name": "not-connected",
+      "reply": {
+        "id": 8,
+        "ok": false,
+        "error": {
+          "code": "not-connected",
+          "message": "project is not connected"
+        }
+      }
+    },
+    {
+      "name": "internal",
+      "reply": {
+        "id": 9,
+        "ok": false,
+        "error": {
+          "code": "internal",
+          "message": "internal error"
+        }
+      }
+    },
+    {
+      "name": "reply to a request whose id could not be read",
+      "reply": {
+        "id": 0,
+        "ok": false,
+        "error": {
+          "code": "bad-request",
+          "message": "request must be a JSON object"
+        }
+      }
+    }
+  ]
+}

@@ -97,6 +97,12 @@ See [docs/BUILD.md](docs/BUILD.md) for details.
 4. Watch the work through the read-only panels (workgraph, changes, content
    viewer). Switch projects with the tab strip or `Cmd/Ctrl+1..9`; flip between
    the Edit and Review layout presets as needed.
+5. From a terminal pane, `"$COCKPIT_CLI" open <path>` opens a file as a tab in the
+   Content panel of that pane's own project, without taking the keyboard from the
+   terminal (keep the quotes: the path of the CLI can contain a space). It is
+   verified live on local projects; remote projects are implemented but not yet
+   live-verified. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ("Terminal Callback
+   Socket") for what it does not cover.
 
 Common scripts:
 

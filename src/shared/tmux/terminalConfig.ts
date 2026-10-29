@@ -7,6 +7,7 @@
  * backend-agnostic — a pane rendered by xterm.js or by wterm inherits the same
  * terminal type, color support, scrollback, and mouse behavior.
  */
+import { CALLBACK_TMUX_ENV_NAMES, callbackUpdateEnvironmentOption } from '../callback/env';
 import { TERMINAL_SCROLLBACK } from './scrollback';
 
 /** Terminal type advertised to the tmux client — 256-color for modern color. */
@@ -19,6 +20,12 @@ interface TmuxServerOption {
   value: string;
   /** Append (`set -ga`) instead of replace (`set -g`). */
   append?: boolean;
+  /**
+   * Applied by the LOCAL argv opener only; {@link tmuxServerOptionShell} (every
+   * remote opener) filters it out. A documented exception to "one option source
+   * for both openers": see the callback `update-environment` entries below.
+   */
+  localOnly?: boolean;
 }
 
 /**
@@ -26,6 +33,9 @@ interface TmuxServerOption {
  * Every entry must be valid on any tmux the app targets (an unknown-option error
  * would break the remote `&&` opener chain) — `terminal-overrides` stores an
  * arbitrary capability string, so the `:Tc` truecolor cap is safe on all versions.
+ * The one exception is the `localOnly` tail, which only the local argv opener
+ * applies (its separate spawn cannot block a session, and a failure there is
+ * reported by `startTmuxServer`).
  */
 export const TMUX_SERVER_OPTIONS: readonly TmuxServerOption[] = [
   // Keep the sessionless server alive between start-server and the first session.
@@ -60,29 +70,58 @@ export const TMUX_SERVER_OPTIONS: readonly TmuxServerOption[] = [
   // The renderer xterm turns the incoming OSC 52 into a clipboard write.
   { name: 'set-clipboard', value: 'on' },
   { name: 'terminal-overrides', value: ',*:Ms=\\E]52;%p1%s;%p2%s\\007', append: true },
+  // Terminal callback socket (docs/design/terminal-callback-socket.md,
+  // "Environment injection"): tmux copies these variables from the ATTACHING CLIENT's
+  // environment into the session on create and on `-A` attach, and removes them
+  // when the client lacks them, so a pane inherits them from its session. Exactly
+  // ONE indexed element per name — never a plain `set -g` (it would replace the
+  // defaults: SSH_AUTH_SOCK, DISPLAY, …) and never repeated `-ga` (it would grow
+  // across opens). LAST in the chain: on an old tmux that rejects the indexed form
+  // a failing command stops the rest of a `;` chain, so nothing above is lost.
+  // LOCAL ONLY: a remote variable-less attach must never strip, and remote
+  // control-mode applies its values with `set-environment` over the channel.
+  ...CALLBACK_TMUX_ENV_NAMES.map((name) => ({
+    name: callbackUpdateEnvironmentOption(name),
+    value: name,
+    localOnly: true,
+  })),
 ];
 
 /**
  * Option args to chain after a tmux command (e.g. `start-server`), using `';'`
- * as the literal tmux command separator (for argv-based spawns).
+ * as the literal tmux command separator (for argv-based spawns). This is the
+ * LOCAL opener's chain, so it includes the `localOnly` callback
+ * `update-environment` entries unless `callbackEnvironment` is false (a naming
+ * object that shares its tmux sessions across installs sets no entry of its own).
+ *
+ * `exit-empty` is always `off`, in isolated/ephemeral runs too: the server is
+ * started by a variable-free process and the next client that carries a
+ * project's callback variables must never be the one that starts it, which an
+ * `exit-empty on` server (exiting at once with no session) would allow. Isolated
+ * runs end their server with an explicit `kill-server` instead.
  */
-export function tmuxServerOptionArgs(options: { exitEmpty?: boolean } = {}): string[] {
-  return TMUX_SERVER_OPTIONS.flatMap((o) => {
-    const value = o.name === 'exit-empty' && options.exitEmpty ? 'on' : o.value;
-    return [';', 'set', o.append ? '-ga' : '-g', o.name, value];
-  });
+export function tmuxServerOptionArgs(options: { callbackEnvironment?: boolean } = {}): string[] {
+  const callbackEnvironment = options.callbackEnvironment ?? true;
+  return TMUX_SERVER_OPTIONS.filter((o) => callbackEnvironment || !o.localOnly).flatMap((o) => [
+    ';',
+    'set',
+    o.append ? '-ga' : '-g',
+    o.name,
+    o.value,
+  ]);
 }
 
 /**
  * Option commands for a remote shell, joined with the literal `\;` separator the
  * shell passes through to tmux. Values are single-quoted so glob/special chars
  * (e.g. the `*` in `terminal-overrides`) reach tmux verbatim. Does NOT include a
- * leading separator — callers chain it after `start-server`.
+ * leading separator — callers chain it after `start-server`. `localOnly` entries
+ * are filtered out: no remote opener carries them.
  */
 export function tmuxServerOptionShell(): string {
-  return TMUX_SERVER_OPTIONS.map(
-    (o) => `set ${o.append ? '-ga' : '-g'} ${o.name} '${o.value}'`,
-  ).join(' \\; ');
+  return TMUX_SERVER_OPTIONS.filter((o) => !o.localOnly)
+    .map((o) => `set ${o.append ? '-ga' : '-g'} ${o.name} '${o.value}'`)
+    .join(' \\; ');
 }
 
 /** Env for a terminal-hosting process (node-pty): modern TERM + truecolor. */

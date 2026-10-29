@@ -1,0 +1,422 @@
+{
+  "description": "Callback frame codec cases (4-byte big-endian length + UTF-8 JSON body, 64 KiB body cap). Each case feeds `chunks` in order to a fresh decoder created with `maxFrameBytes`; `expect` is the outcome after the last chunk: `payloads` (decoded JSON values, in order) plus `pendingBytes` (bytes buffered that do not yet form a frame, default 0), or `error` (\"too-large\" when a header exceeds the cap, rejected before any body is buffered; \"malformed\" when a body is not valid JSON). A chunk is a lowercase hex string, or {\"jsonStringFrame\": N}: one complete frame whose body is a JSON string of N \"a\" characters. A payload may likewise be {\"jsonString\": N}. The TypeScript test (src/shared/callback/protocol.test.ts) and the Go mirror must agree on every case.",
+  "maxFrameBytes": 65536,
+  "cases": [
+    {
+      "name": "one frame in one chunk",
+      "chunks": [
+        "000000917b2276223a312c226964223a312c226f70223a226f70656e222c2270616e65223a7b226b696e64223a22746d7578222c226964223a222533227d2c2261726773223a7b2270617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64222c2263616e6f6e6963616c50617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64227d7d"
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "v": 1,
+            "id": 1,
+            "op": "open",
+            "pane": {
+              "kind": "tmux",
+              "id": "%3"
+            },
+            "args": {
+              "path": "/Users/me/repo/README.md",
+              "canonicalPath": "/Users/me/repo/README.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "header split across chunks",
+      "chunks": [
+        "0000",
+        "00917b2276223a312c226964223a312c226f70223a226f70656e222c2270616e65223a7b226b696e64223a22746d7578222c226964223a222533227d2c2261726773223a7b2270617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64222c2263616e6f6e6963616c50617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64227d7d"
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "v": 1,
+            "id": 1,
+            "op": "open",
+            "pane": {
+              "kind": "tmux",
+              "id": "%3"
+            },
+            "args": {
+              "path": "/Users/me/repo/README.md",
+              "canonicalPath": "/Users/me/repo/README.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "body split across chunks",
+      "chunks": [
+        "000000917b2276223a312c226964",
+        "223a312c226f70223a226f70656e222c2270616e",
+        "65223a7b226b696e64223a22746d7578222c226964223a222533227d2c2261726773223a7b2270617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64222c2263616e6f6e6963616c50617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64227d7d"
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "v": 1,
+            "id": 1,
+            "op": "open",
+            "pane": {
+              "kind": "tmux",
+              "id": "%3"
+            },
+            "args": {
+              "path": "/Users/me/repo/README.md",
+              "canonicalPath": "/Users/me/repo/README.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "one byte at a time",
+      "chunks": [
+        "00",
+        "00",
+        "00",
+        "91",
+        "7b",
+        "22",
+        "76",
+        "22",
+        "3a",
+        "31",
+        "2c",
+        "22",
+        "69",
+        "64",
+        "22",
+        "3a",
+        "31",
+        "2c",
+        "22",
+        "6f",
+        "70",
+        "22",
+        "3a",
+        "22",
+        "6f",
+        "70",
+        "65",
+        "6e",
+        "22",
+        "2c",
+        "22",
+        "70",
+        "61",
+        "6e",
+        "65",
+        "22",
+        "3a",
+        "7b",
+        "22",
+        "6b",
+        "69",
+        "6e",
+        "64",
+        "22",
+        "3a",
+        "22",
+        "74",
+        "6d",
+        "75",
+        "78",
+        "22",
+        "2c",
+        "22",
+        "69",
+        "64",
+        "22",
+        "3a",
+        "22",
+        "25",
+        "33",
+        "22",
+        "7d",
+        "2c",
+        "22",
+        "61",
+        "72",
+        "67",
+        "73",
+        "22",
+        "3a",
+        "7b",
+        "22",
+        "70",
+        "61",
+        "74",
+        "68",
+        "22",
+        "3a",
+        "22",
+        "2f",
+        "55",
+        "73",
+        "65",
+        "72",
+        "73",
+        "2f",
+        "6d",
+        "65",
+        "2f",
+        "72",
+        "65",
+        "70",
+        "6f",
+        "2f",
+        "52",
+        "45",
+        "41",
+        "44",
+        "4d",
+        "45",
+        "2e",
+        "6d",
+        "64",
+        "22",
+        "2c",
+        "22",
+        "63",
+        "61",
+        "6e",
+        "6f",
+        "6e",
+        "69",
+        "63",
+        "61",
+        "6c",
+        "50",
+        "61",
+        "74",
+        "68",
+        "22",
+        "3a",
+        "22",
+        "2f",
+        "55",
+        "73",
+        "65",
+        "72",
+        "73",
+        "2f",
+        "6d",
+        "65",
+        "2f",
+        "72",
+        "65",
+        "70",
+        "6f",
+        "2f",
+        "52",
+        "45",
+        "41",
+        "44",
+        "4d",
+        "45",
+        "2e",
+        "6d",
+        "64",
+        "22",
+        "7d",
+        "7d"
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "v": 1,
+            "id": 1,
+            "op": "open",
+            "pane": {
+              "kind": "tmux",
+              "id": "%3"
+            },
+            "args": {
+              "path": "/Users/me/repo/README.md",
+              "canonicalPath": "/Users/me/repo/README.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "two frames in one chunk",
+      "chunks": [
+        "000000917b2276223a312c226964223a312c226f70223a226f70656e222c2270616e65223a7b226b696e64223a22746d7578222c226964223a222533227d2c2261726773223a7b2270617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64222c2263616e6f6e6963616c50617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64227d7d0000003e7b2276223a312c226964223a322c226f70223a226f70656e222c2261726773223a7b2270617468223a222f746d702f6120622f6e6f7465732e6d64227d7d"
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "v": 1,
+            "id": 1,
+            "op": "open",
+            "pane": {
+              "kind": "tmux",
+              "id": "%3"
+            },
+            "args": {
+              "path": "/Users/me/repo/README.md",
+              "canonicalPath": "/Users/me/repo/README.md"
+            }
+          },
+          {
+            "v": 1,
+            "id": 2,
+            "op": "open",
+            "args": {
+              "path": "/tmp/a b/notes.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "second frame arrives later",
+      "chunks": [
+        "000000917b2276223a312c226964223a312c226f70223a226f70656e222c2270616e65223a7b226b696e64223a22746d7578222c226964223a222533227d2c2261726773223a7b2270617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64222c2263616e6f6e6963616c50617468223a222f55736572732f6d652f7265706f2f524541444d452e6d64227d7d",
+        "0000003e7b2276223a312c226964223a322c226f70223a226f70656e222c2261726773223a7b2270617468223a222f746d702f6120622f6e6f7465732e6d64227d7d"
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "v": 1,
+            "id": 1,
+            "op": "open",
+            "pane": {
+              "kind": "tmux",
+              "id": "%3"
+            },
+            "args": {
+              "path": "/Users/me/repo/README.md",
+              "canonicalPath": "/Users/me/repo/README.md"
+            }
+          },
+          {
+            "v": 1,
+            "id": 2,
+            "op": "open",
+            "args": {
+              "path": "/tmp/a b/notes.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "body exactly at the cap is accepted",
+      "chunks": [
+        {
+          "jsonStringFrame": 65534
+        }
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "jsonString": 65534
+          }
+        ]
+      }
+    },
+    {
+      "name": "header one over the cap is rejected before any body",
+      "chunks": ["00010001"],
+      "expect": {
+        "error": "too-large"
+      }
+    },
+    {
+      "name": "oversize header with a partial body is rejected immediately",
+      "chunks": ["000111707b2276223a31"],
+      "expect": {
+        "error": "too-large"
+      }
+    },
+    {
+      "name": "maximum uint32 header is rejected",
+      "chunks": ["ffffffff"],
+      "expect": {
+        "error": "too-large"
+      }
+    },
+    {
+      "name": "header cut short is pending",
+      "chunks": ["0000"],
+      "expect": {
+        "payloads": [],
+        "pendingBytes": 2
+      }
+    },
+    {
+      "name": "body cut short is pending",
+      "chunks": ["000000287b2276223a312c226964223a31"],
+      "expect": {
+        "payloads": [],
+        "pendingBytes": 17
+      }
+    },
+    {
+      "name": "complete frame followed by a partial header",
+      "chunks": [
+        "0000003e7b2276223a312c226964223a322c226f70223a226f70656e222c2261726773223a7b2270617468223a222f746d702f6120622f6e6f7465732e6d64227d7d0000"
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "v": 1,
+            "id": 2,
+            "op": "open",
+            "args": {
+              "path": "/tmp/a b/notes.md"
+            }
+          }
+        ],
+        "pendingBytes": 2
+      }
+    },
+    {
+      "name": "malformed JSON body",
+      "chunks": ["000000057b6f6f7073"],
+      "expect": {
+        "error": "malformed"
+      }
+    },
+    {
+      "name": "zero-length body is malformed",
+      "chunks": ["00000000"],
+      "expect": {
+        "error": "malformed"
+      }
+    },
+    {
+      "name": "byte order mark before the JSON is malformed",
+      "chunks": ["00000005efbbbf7b7d"],
+      "expect": {
+        "error": "malformed"
+      }
+    },
+    {
+      "name": "non-ASCII path survives the round trip",
+      "chunks": [
+        "000000447b2276223a312c226964223a392c226f70223a226f70656e222c2261726773223a7b2270617468223a222f746d702fe697a5e69cace8aa9e2fc3b620c3a92e6d64227d7d"
+      ],
+      "expect": {
+        "payloads": [
+          {
+            "v": 1,
+            "id": 9,
+            "op": "open",
+            "args": {
+              "path": "/tmp/日本語/ö é.md"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

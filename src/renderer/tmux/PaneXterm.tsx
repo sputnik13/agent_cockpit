@@ -99,7 +99,16 @@ export function PaneXterm({
   useEffect(() => {
     const entry = entryRef.current;
     if (!entry) return;
-    registry.applyAppearance(entry, useSettingsStore.getState().settings);
+    // Skip when the entry already carries these settings: a (re)mount runs this
+    // effect too (a zoom flips the PaneTree root, remounting every pane), and
+    // applyAppearance drops the cell-size cache, whose repopulation fires
+    // cellSizeReady -> a client-size push (local_repo_explorer-6ywh). The
+    // cold-start cellSizeReady (cache empty) and real font/theme changes (key
+    // differs) are unaffected.
+    const settings = useSettingsStore.getState().settings;
+    if (entry.appearanceKey !== registry.appearanceKeyOf(settings)) {
+      registry.applyAppearance(entry, settings);
+    }
     requestAnimationFrame(() => registry.fit(entry));
   }, [theme, fontFamily, fontSize]);
 

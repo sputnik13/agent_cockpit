@@ -66,7 +66,11 @@ import type {
 } from './rpcClient';
 import { beadsArgs, beadsErrorMessage, parseComments, parseCreatedId } from '../../beads/runner';
 import { RemoteTerminalManager } from './tmux';
-import { RemoteTmuxControlManager, type ControlChannel } from './tmuxControl';
+import {
+  acceptFirstPaneLimitation,
+  RemoteTmuxControlManager,
+  type ControlChannel,
+} from './tmuxControl';
 import { RemoteMuxLauncher } from './mux';
 import { RemoteMuxConnectionManager } from './muxConnection';
 import { RemoteMuxTerminalManager } from './muxTerminal';
@@ -78,6 +82,11 @@ import { createConnectionMachine, type ConnectionMachine } from '../connectionMa
 import { createWatchIngest } from '../../watch/ingest';
 import { deriveWatchSpec } from '@shared/watch/policy';
 import { TERMINAL_COLORTERM, tmuxServerOptionShell } from '@shared/tmux';
+import { NO_CALLBACK_ENVIRONMENT, type CallbackEnvironmentSource } from '@shared/callback/env';
+import type { CallbackReply } from '@shared/callback/protocol';
+import { bridgeRemoteCallbacks } from '../../callback/remoteBridge';
+import { remoteCallbackEnvironmentSource } from '../../callback/remoteEnvironment';
+import { noteCallbackDisabledForSharedSessions } from '../../callback/sharedSessions';
 
 /**
  * Map a git porcelain/name-status code to a FileChangeStatus. Codes come from
@@ -358,6 +367,26 @@ export function toDiffBundle(res: GitDiffBundleResult): DiffBundle {
   };
 }
 
+export interface RemoteProviderDeps {
+  /**
+   * Main's decision function for a callback request that arrived on THIS project's
+   * remote socket (`CallbackBroker.handle` bound to the project id): the helper
+   * forwards each request as a `callback` event and main answers with the
+   * `callback.reply` RPC. Its presence is what turns the feature on for the
+   * project: the helper is told the project id in the handshake (so it binds the
+   * socket) and the handshake's `callbackSock`/`cliPath` become the project's
+   * injected environment. Absent, the provider behaves exactly as it did before
+   * the callback socket existed.
+   */
+  handleCallback?: (request: unknown) => CallbackReply;
+  /**
+   * Override for this project's callback environment on its host (tests). By
+   * default it is derived from the helper handshake, evaluated at every
+   * control-channel attach and every mux spawn.
+   */
+  callbackEnvironment?: CallbackEnvironmentSource;
+}
+
 export class RemoteProvider implements WorkspaceProvider {
   readonly kind: ProjectKind = 'remote';
   readonly projectId: string;
@@ -370,6 +399,14 @@ export class RemoteProvider implements WorkspaceProvider {
    *  names are enabled. Resolved once at construction so two clients opening the
    *  same remote repo (deterministic mode) share the session. */
   private readonly nameToken: string;
+  /** The `deterministicSessionNames` value that produced {@link nameToken}, kept
+   *  with it: the sessions are shared across installs exactly when it is true, and
+   *  callback injection must then never touch them (requirement 12). */
+  private readonly sharedSessionNames: boolean;
+  private readonly callbackEnvironment: CallbackEnvironmentSource | undefined;
+  private readonly handleCallback: ((request: unknown) => CallbackReply) | undefined;
+  /** Stops answering the helper's forwarded callback requests (set while connected). */
+  private stopCallbackBridge: (() => void) | null = null;
   private helper: LaunchedHelper | null = null;
   private controlMgr: RemoteTmuxControlManager | null = null;
   private muxMgr: RemoteMuxConnectionManager | null = null;
@@ -379,14 +416,29 @@ export class RemoteProvider implements WorkspaceProvider {
    *  control opener (identity for the shipped modes). */
   private envLauncher: EnvLauncher | null = null;
 
-  constructor(projectId: string, spec: RemoteConnectionSpec) {
+  constructor(projectId: string, spec: RemoteConnectionSpec, deps: RemoteProviderDeps = {}) {
     this.projectId = projectId;
     this.spec = spec;
-    this.nameToken = sessionNameToken(
-      loadSettings().deterministicSessionNames,
-      projectId,
-      spec.remotePath,
-    );
+    // ONE settings read both names the sessions and decides whether callback
+    // injection may write to them.
+    this.sharedSessionNames = loadSettings().deterministicSessionNames;
+    this.handleCallback = deps.handleCallback;
+    // The feature is on for this project iff something can answer its callback
+    // requests (or a source was injected). Its values then come from the helper
+    // handshake, only while that helper's stream is alive: a dead helper serves
+    // nothing, so a new terminal must not be pointed at it.
+    this.callbackEnvironment =
+      deps.callbackEnvironment ??
+      (deps.handleCallback
+        ? remoteCallbackEnvironmentSource(projectId, {
+            helperValues: () =>
+              this.helper && !this.helper.client.isClosed ? this.helper.handshake : undefined,
+          })
+        : undefined);
+    this.nameToken = sessionNameToken(this.sharedSessionNames, projectId, spec.remotePath);
+    if (this.sharedSessionNames && this.callbackEnvironment) {
+      noteCallbackDisabledForSharedSessions(projectId, 'control-mode');
+    }
     this.machine = createConnectionMachine(projectId);
     this.transport = createRemoteTransport();
     this.terminals = new RemoteTerminalManager(this.transport, this.nameToken);
@@ -493,7 +545,23 @@ export class RemoteProvider implements WorkspaceProvider {
         };
         return ctrl;
       };
-      this.controlMgr = new RemoteTmuxControlManager(opener);
+      // Callback injection is applied to THIS manager's session on every attach,
+      // unless the session is shared across installs (value captured with
+      // `nameToken` at construction, never re-read) or this provider has no source
+      // of values yet (until the helper handshake exists the attach path is exactly
+      // what it always was). The first pane of a brand-new session is the open
+      // decision `acceptFirstPaneLimitation` isolates.
+      this.controlMgr = new RemoteTmuxControlManager(
+        opener,
+        this.sharedSessionNames || !this.callbackEnvironment
+          ? undefined
+          : {
+              projectId: this.projectId,
+              sessionName,
+              environment: this.callbackEnvironment,
+              firstPane: acceptFirstPaneLimitation,
+            },
+      );
       // Surface the control-channel reattach cycle in the connection status. The
       // `-CC` channel reconnects independently of the SSH transport, so without
       // this the machine would stay `connected` through a silent flap. This is
@@ -536,6 +604,7 @@ export class RemoteProvider implements WorkspaceProvider {
         this.projectId,
         () => loadSettings().muxPersistScrollback,
         () => loadSettings().muxScrollbackLines,
+        this.callbackEnvironment ?? NO_CALLBACK_ENVIRONMENT,
       );
     }
     return this.muxTerminals;
@@ -586,10 +655,27 @@ export class RemoteProvider implements WorkspaceProvider {
     logger.info(`SSH connect ok: ${this.spec.user}@${this.spec.host}`, ctx);
 
     logger.info('Helper provision start', ctx);
-    const launcher = new RemoteHelperLauncher(this.transport);
+    // Naming the project in the handshake is what makes the helper bind its
+    // callback socket; without a handler there is nobody to answer its requests.
+    // The bridge is registered on the helper's client BEFORE the handshake is sent
+    // (`onClient`): the listener serves from inside the handshake, so a request from
+    // a surviving pane can reach us ahead of the handshake reply, and a handler
+    // registered after `launch()` returns would never see it.
+    const launcher = new RemoteHelperLauncher(
+      this.transport,
+      undefined,
+      this.handleCallback
+        ? {
+            projectId: this.projectId,
+            onClient: (client) => this.startCallbackBridge(client),
+          }
+        : {},
+    );
     try {
       this.helper = await launcher.launch();
     } catch (err) {
+      this.stopCallbackBridge?.();
+      this.stopCallbackBridge = null;
       const msg = err instanceof Error ? err.message : String(err);
       const phase = (err as { phase?: string }).phase ?? 'launch';
       logger.error(`Helper provision failed at phase=${phase}: ${msg}`, ctx);
@@ -598,6 +684,7 @@ export class RemoteProvider implements WorkspaceProvider {
       throw err;
     }
     logger.info(`Helper provision ok (version=${this.helper.version})`, ctx);
+    this.reportCallbackAvailability(this.helper);
 
     // Dev-environment cap: resolve the launcher from the global devEnv setting
     // and ensure() the (per-host) capped tmux server exists before the control
@@ -630,9 +717,47 @@ export class RemoteProvider implements WorkspaceProvider {
     this.machine.toConnected();
   }
 
+  /**
+   * Answer the helper's forwarded callback requests for as long as this helper
+   * lives. The listener itself belongs to the helper process, so it is torn down
+   * with the helper (closing its channel on disconnect releases the socket path);
+   * only the answering side is main's to stop. Called by the launcher with each new
+   * client BEFORE its handshake (a retry after a protocol mismatch builds another
+   * client, which replaces this registration).
+   */
+  private startCallbackBridge(client: HelperRpcClient): void {
+    if (!this.handleCallback) return;
+    this.stopCallbackBridge?.();
+    this.stopCallbackBridge = bridgeRemoteCallbacks({
+      client,
+      projectId: this.projectId,
+      handle: this.handleCallback,
+    });
+  }
+
+  /** Say, once the handshake has answered, whether the helper serves a callback socket. */
+  private reportCallbackAvailability(helper: LaunchedHelper): void {
+    if (!this.handleCallback) return;
+    const { callbackSock, cliPath } = helper.handshake;
+    if (callbackSock && cliPath) {
+      logger.info(
+        `callback listening project=${this.projectId} host-socket=${JSON.stringify(callbackSock)}`,
+        'callback',
+      );
+    } else {
+      logger.warn(
+        `callback unavailable project=${this.projectId} reason=helper-reported-none ` +
+          'detail="the remote helper reported no callback socket; terminals carry no callback variables (see its stderr line)"',
+        'callback',
+      );
+    }
+  }
+
   async disconnect(): Promise<void> {
     const ctx = 'remote-disconnect';
     logger.info(`SSH disconnect start: ${this.spec.user}@${this.spec.host}`, ctx);
+    this.stopCallbackBridge?.();
+    this.stopCallbackBridge = null;
     this.terminals.closeAll();
     this.muxTerminals?.closeAll();
     this.muxTerminals = null;
